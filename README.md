@@ -8,9 +8,6 @@ Current release: `0.9.0-beta.1`
 
 ## Windows download
 
-Download the latest verified Windows archive from the
-[GitHub Releases page](https://github.com/Heyitsthatoneguy/Elsewhere-An-ASCII-Life-Sim-RPG/releases).
-
 The standalone Windows release does not require Python. Extract the complete
 zip archive, then run:
 
