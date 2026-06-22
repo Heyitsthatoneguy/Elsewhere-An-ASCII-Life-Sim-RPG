@@ -38,7 +38,10 @@ jobs:
         run: python -m compileall -q .
 
       - name: Run farmstead smoke tests
-        run: python -W error smoke_test.py
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force .ci-temp | Out-Null
+          python -W error -c "import tempfile; from pathlib import Path; tempfile.tempdir = str((Path.cwd() / '.ci-temp').resolve()); import smoke_test; raise SystemExit(smoke_test.main())"
 
       - name: Run combat smoke tests
         run: python -W error -m ascii_battle_prototype.combat.smoke_tests
