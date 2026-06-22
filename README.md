@@ -26,17 +26,20 @@ ZIP before extraction.
 ## Running from source
 
 Elsewhere requires Python 3.11 or later and uses only the Python standard
-library.
+library. The source project currently lives in the `ascii_farmstead_v154/`
+folder.
 
-On Windows, double-click:
+On Windows, open the repository folder in a terminal and run:
 
 ```text
+cd ascii_farmstead_v154
 run_elsewhere.bat
 ```
 
-Or run:
+Or run directly with Python:
 
 ```text
+cd ascii_farmstead_v154
 python elsewhere.py
 ```
 
@@ -121,6 +124,13 @@ folder and run:
 Elsewhere.exe --self-check
 ```
 
+For a source checkout, run:
+
+```text
+cd ascii_farmstead_v154
+python elsewhere.py --self-check
+```
+
 This checks data-folder access, farm initialization, custom-content recovery,
 and tactical-content validity without starting a play session.
 
@@ -131,11 +141,13 @@ include the crash report and relevant log when reporting a bug.
 
 Please report reproducible problems through
 [GitHub Issues](https://github.com/Heyitsthatoneguy/Elsewhere-An-ASCII-Life-Sim-RPG/issues).
-See `CONTRIBUTING.md` before submitting code changes.
+See [`ascii_farmstead_v154/CONTRIBUTING.md`](ascii_farmstead_v154/CONTRIBUTING.md)
+before submitting code changes.
 
 Useful verification commands for contributors:
 
 ```text
+cd ascii_farmstead_v154
 python smoke_test.py
 python -m ascii_battle_prototype.combat.smoke_tests
 python -m ascii_battle_prototype.combat.main --validate-content
@@ -149,11 +161,12 @@ and without requesting additional permission.
 
 See:
 
-- `LICENSE`
-- `CREDITS.md`
-- `THIRD_PARTY_NOTICES.md`
+- [`ascii_farmstead_v154/LICENSE`](ascii_farmstead_v154/LICENSE)
+- [`ascii_farmstead_v154/CREDITS.md`](ascii_farmstead_v154/CREDITS.md)
+- [`ascii_farmstead_v154/THIRD_PARTY_NOTICES.md`](ascii_farmstead_v154/THIRD_PARTY_NOTICES.md)
 
 Some portions of the project were created with generative AI assistance from
 OpenAI Codex.
 
-Release builders should see `BUILDING.md`.
+Release builders should see
+[`ascii_farmstead_v154/BUILDING.md`](ascii_farmstead_v154/BUILDING.md).
