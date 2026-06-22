@@ -1,0 +1,22 @@
+name: Feature request
+description: Suggest an improvement for Elsewhere.
+title: "[Idea] "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like to add or change?
+    validations:
+      required: true
+  - type: textarea
+    id: experience
+    attributes:
+      label: How would it improve the player experience?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives or related systems

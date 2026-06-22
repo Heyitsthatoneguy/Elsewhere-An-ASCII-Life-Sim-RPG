@@ -1,0 +1,45 @@
+name: Tests
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Python ${{ matrix.python-version }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+          - "3.11"
+          - "3.14"
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Compile source
+        shell: pwsh
+        run: |
+          python -m compileall -q .
+
+      - name: Run farmstead smoke tests
+        run: python -W error smoke_test.py
+
+      - name: Run combat smoke tests
+        run: python -W error -m ascii_battle_prototype.combat.smoke_tests
+
+      - name: Validate tactical content
+        run: python -m ascii_battle_prototype.combat.main --validate-content

@@ -1,0 +1,30 @@
+__pycache__/
+*.py[cod]
+
+# Local development and assistant workspace
+.agents/
+.local/
+.rgignore
+AGENTS.md
+HANDOFF.md
+CODEMAP.md
+tools/
+
+# Runtime data and private development records
+*.log
+ascii_farmstead_crash_report.txt
+ascii_farmstead_error.log
+ascii_farmstead_save.json
+ascii_farmstead_slot_*.json
+*.broken.json
+*.broken-*.json
+*.backup*.json
+*.json.tmp
+chat-history.md
+
+# Release tooling output
+.build-venv/
+build/
+dist/
+*.spec
+!elsewhere.spec

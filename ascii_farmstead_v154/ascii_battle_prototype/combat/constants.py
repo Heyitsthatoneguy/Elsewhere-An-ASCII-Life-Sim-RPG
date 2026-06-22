@@ -1,0 +1,35 @@
+from __future__ import annotations
+
+import sys
+
+NO_COLOR = "--no-color" in sys.argv
+ASCII_MODE = "--ascii" in sys.argv
+NO_ALT_SCREEN = "--no-alt-screen" in sys.argv
+FORCE_COMPACT = "--compact" in sys.argv
+FORCE_ROOMY = "--roomy" in sys.argv
+
+MAP_W = 20
+MAP_H = 12
+CELL_W = 3
+PANEL_W = 42
+
+TILE_FLOOR = "."
+TILE_WALL = "#"
+TILE_TREE = "T" if ASCII_MODE else "♣"
+TILE_WATER = "~"
+TILE_DIRT = ","
+TILE_GRASS = '"'
+TILE_MUD = ":"
+TILE_BRIDGE = "="
+TILE_STONE = "^"
+TILE_THORNS = "*"
+TILE_SPRING = "+"
+TILE_CRYSTAL = "m"
+TILE_ICE = "_"
+TILE_BARREL = "B"
+TILE_CRATE = "C"
+
+PASSABLE = {TILE_FLOOR, TILE_DIRT, TILE_GRASS, TILE_MUD, TILE_BRIDGE, TILE_STONE, TILE_THORNS, TILE_SPRING, TILE_CRYSTAL, TILE_ICE}
+COVER_TILES = {TILE_TREE, TILE_WALL, TILE_STONE, TILE_GRASS, TILE_CRATE, TILE_BARREL}
+TERRAIN_OBJECT_TILES = {TILE_BARREL, TILE_CRATE}
+

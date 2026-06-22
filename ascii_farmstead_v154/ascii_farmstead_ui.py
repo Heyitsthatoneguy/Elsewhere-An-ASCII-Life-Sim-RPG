@@ -1,0 +1,366 @@
+from __future__ import annotations
+
+"""Terminal UI helpers for Elsewhere.
+
+This module contains standalone menu, panel, and text-fitting helpers. It may
+accept a game-like object for compact overlays, but it does not import FarmGame
+or gameplay systems, keeping UI utilities reusable and low-risk.
+"""
+
+import shutil
+import textwrap
+from dataclasses import dataclass
+from typing import List, Optional
+
+from ascii_farmstead_support import (
+    ANSI_RE,
+    C,
+    clear_screen,
+    colorize,
+    normalize_key,
+    pad_visual,
+    read_key,
+)
+from ascii_farmstead_data import (
+    GUTTER_WIDTH,
+    LEFT_PANEL_WIDTH,
+    MAP_LINE_WIDTH,
+    MENU_CONFIRM_KEYS,
+)
+from ascii_farmstead_state import GameState
+
+
+def terminal_width() -> int:
+    try:
+        return shutil.get_terminal_size((100, 30)).columns
+    except Exception:
+        return 100
+
+def left_margin(content_width: int) -> str:
+    cols = terminal_width()
+    return " " * max(0, (cols - content_width) // 2)
+
+def pad_to(text: str, width: int) -> str:
+    """Pad text by visible length, ignoring ANSI color codes."""
+    visible_len = len(strip_ansi(text))
+    return text + " " * max(0, width - visible_len)
+
+def strip_ansi(text: str) -> str:
+    return ANSI_RE.sub("", str(text))
+
+def visible_text_len(text: str) -> int:
+    return len(strip_ansi(str(text)))
+
+def fit_text(text: str, width: int) -> str:
+    """Trim text by visible length when it cannot fit."""
+    text = str(text)
+    if visible_text_len(text) <= width:
+        return text
+    plain = strip_ansi(text)
+    if width <= 1:
+        return plain[:max(0, width)]
+    marker = "..." if width >= 3 else "." * width
+    return plain[:max(0, width - len(marker))] + marker
+
+def wrap_panel_row(row: object, width: int) -> List[str]:
+    """Wrap one panel row to visible width, preserving simple indentation."""
+    text = strip_ansi(str(row))
+    if not text:
+        return [""]
+
+    leading_len = len(text) - len(text.lstrip(" "))
+    leading = text[:min(leading_len, max(0, width - 8))]
+    body = text[leading_len:]
+    first_prefix = leading
+    next_prefix = leading + ("  " if leading_len < 2 else "")
+    first_width = max(8, width - visible_text_len(first_prefix))
+    next_width = max(8, width - visible_text_len(next_prefix))
+
+    wrapped = textwrap.wrap(
+        body,
+        width=first_width,
+        subsequent_indent="",
+        break_long_words=True,
+        break_on_hyphens=False,
+        replace_whitespace=True,
+        drop_whitespace=True,
+    )
+    if not wrapped:
+        return [fit_text(first_prefix, width)]
+
+    lines = [first_prefix + wrapped[0]]
+    if len(wrapped) > 1:
+        for part in textwrap.wrap(
+            " ".join(wrapped[1:]),
+            width=next_width,
+            break_long_words=True,
+            break_on_hyphens=False,
+            replace_whitespace=True,
+            drop_whitespace=True,
+        ):
+            lines.append(next_prefix + part)
+    return [fit_text(line, width) for line in lines]
+
+def wrap_panel_rows(rows: List[object], width: int) -> List[str]:
+    wrapped: List[str] = []
+    for row in rows:
+        wrapped.extend(wrap_panel_row(row, width))
+    return wrapped
+
+def dynamic_panel_width_for_text(lines: List[str], base_width: int = LEFT_PANEL_WIDTH) -> int:
+    """Pick a panel width that fits visible text when possible."""
+    longest = max([visible_text_len(line) for line in lines] + [base_width - 2])
+    needed = min(longest + 2, 48)
+    side_by_side_cap = terminal_width() - GUTTER_WIDTH - MAP_LINE_WIDTH
+    terminal_cap = max(base_width, min(48, side_by_side_cap))
+    return max(base_width, min(needed, terminal_cap))
+
+@dataclass
+class MenuItem:
+    label: str
+    value: object = None
+    enabled: bool = True
+    hint: str = ""
+
+def menu_context_lines(
+    selected_hint: str = "",
+    footer: str = "",
+    width: Optional[int] = None,
+) -> List[str]:
+    """Wrap changing menu guidance outside the selectable option area."""
+    context_width = max(
+        24,
+        int(width if width is not None else terminal_width() - 2),
+    )
+    lines: List[str] = []
+    if str(selected_hint or "").strip():
+        lines.extend(
+            wrap_panel_row(
+                f"Selected: {str(selected_hint).strip()}",
+                context_width,
+            )
+        )
+    if str(footer or "").strip():
+        lines.extend(wrap_panel_row(str(footer).strip(), context_width))
+    return lines
+
+def draw_menu(title: str, items: List[MenuItem], selected: int, footer: str = "", extra_lines: Optional[List[str]] = None):
+    clear_screen()
+    print(title)
+    print("=" * max(40, len(title)))
+    if extra_lines:
+        for line in extra_lines:
+            print(line)
+        print("-" * max(40, len(title)))
+
+    for i, item in enumerate(items):
+        cursor = ">" if i == selected else " "
+        status = "" if item.enabled else " [unavailable]"
+        label = item.label if item.enabled else colorize(item.label, C.DIM)
+        print(f"{cursor} {label}{status}")
+
+    selected_hint = items[selected].hint if 0 <= selected < len(items) else ""
+    if footer or selected_hint:
+        print("-" * max(40, len(title)))
+        for line in menu_context_lines(selected_hint, footer):
+            print(line)
+
+def menu_select(title: str, items: List[MenuItem], footer: str = "", extra_lines: Optional[List[str]] = None) -> Optional[MenuItem]:
+    """Arrow-key controlled menu. Returns selected MenuItem or None if cancelled."""
+    if not items:
+        return None
+
+    selected = 0
+    # Prefer first enabled item, but allow every item to be highlighted so
+    # unavailable choices can explain their requirements in the hint line.
+    for i, item in enumerate(items):
+        if item.enabled:
+            selected = i
+            break
+
+    while True:
+        draw_menu(title, items, selected, footer, extra_lines)
+        key = normalize_key(read_key())
+
+        if key in ["\t", "\x1b", "q", "x"]:
+            return None
+
+        if key in ["w", "UP", "a", "LEFT"]:
+            selected = (selected - 1) % len(items)
+        elif key in ["s", "DOWN", "d", "RIGHT"]:
+            selected = (selected + 1) % len(items)
+        elif key in MENU_CONFIRM_KEYS:
+            if items[selected].enabled:
+                return items[selected]
+
+def clean_text_entry(value: object, default: str = "", max_length: int = 16) -> str:
+    cleaned = "".join(ch for ch in str(value or "").strip() if ch.isprintable())
+    cleaned = " ".join(cleaned.split())
+    if not cleaned:
+        cleaned = "".join(ch for ch in str(default or "").strip() if ch.isprintable())
+        cleaned = " ".join(cleaned.split())
+    return cleaned[:max(1, int(max_length))]
+
+
+def text_entry_menu(title: str, prompt: str, default: str = "", max_length: int = 16) -> Optional[str]:
+    """Simple single-line text entry used by startup character creation."""
+    value = str(default or "")
+    while True:
+        clear_screen()
+        print(title)
+        print("=" * max(40, len(title)))
+        print(prompt)
+        print()
+        print(f"> {value}")
+        print()
+        print("Type to edit | Backspace delete | Enter accept | Esc cancel")
+
+        key = read_key()
+        if key in ["\x1b"]:
+            return None
+        if key in ["\r", "\n"]:
+            return clean_text_entry(value, default, max_length)
+        if key in ["\b", "\x7f"]:
+            value = value[:-1]
+            continue
+        if len(key) == 1 and key.isprintable() and len(value) < max_length:
+            value += key
+
+def quantity_menu(title: str, unit_label: str, unit_price: int, max_qty: int, start_qty: int = 1) -> int:
+    """Arrow-key quantity picker. Returns selected quantity, or 0 if cancelled."""
+    if max_qty <= 0:
+        return 0
+
+    qty = max(1, min(start_qty, max_qty))
+
+    while True:
+        total = qty * unit_price
+        clear_screen()
+        print(title)
+        print("=" * max(40, len(title)))
+        print(f"Item: {unit_label}")
+        print(f"Unit price: ${unit_price}")
+        print()
+        print(f"Quantity: {qty}")
+        print(f"Total:    ${total}")
+        print()
+        print("Left/Right or A/D: -/+ 1")
+        print("Up/Down or W/S:    +/- 5")
+        print("Z/Enter/Space:       Confirm")
+        print("X/Esc/Q:           Cancel")
+
+        key = normalize_key(read_key())
+        if key in ["\t", "\x1b", "q", "x"]:
+            return 0
+        if key in ["a", "LEFT"]:
+            qty = max(1, qty - 1)
+        elif key in ["d", "RIGHT"]:
+            qty = min(max_qty, qty + 1)
+        elif key in ["w", "UP"]:
+            qty = min(max_qty, qty + 5)
+        elif key in ["s", "DOWN"]:
+            qty = max(1, qty - 5)
+        elif key in MENU_CONFIRM_KEYS:
+            return qty
+        elif key in ["\x1b", "q", "x"]:
+            return 0
+
+def compact_menu_select(game, title: str, items: List[MenuItem], footer: str = "") -> Optional[MenuItem]:
+    """
+    Smaller in-game submenu: redraws the farm, then shows a compact option list
+    underneath instead of sending the player to a separate full-screen page.
+    """
+    if not items:
+        return None
+
+    selected = 0
+    for i, item in enumerate(items):
+        if item.enabled:
+            selected = i
+            break
+
+    while True:
+        game.draw()
+        print()
+        print(f"+- {title} " + "-" * max(1, 54 - len(title)))
+        for i, item in enumerate(items):
+            cursor = ">" if i == selected else " "
+            status = "" if item.enabled else " [unavailable]"
+            label = item.label if item.enabled else colorize(item.label, C.DIM)
+            print(f"| {cursor} {label}{status}")
+        print("+" + "-" * 60)
+        selected_hint = items[selected].hint if 0 <= selected < len(items) else ""
+        context_footer = (
+            footer
+            or "Arrow keys/WASD move | Z/Enter select | X/Esc/Q cancel"
+        )
+        for line in menu_context_lines(selected_hint, context_footer, 60):
+            print(line)
+
+        key = normalize_key(read_key())
+        if key in ["\t", "\x1b", "q", "x"]:
+            return None
+        if key in ["w", "UP", "a", "LEFT"]:
+            selected = (selected - 1) % len(items)
+        elif key in ["s", "DOWN", "d", "RIGHT"]:
+            selected = (selected + 1) % len(items)
+        elif key in MENU_CONFIRM_KEYS:
+            if items[selected].enabled:
+                return items[selected]
+
+def compact_quantity_menu(game, title: str, unit_label: str, unit_price: int, max_qty: int, start_qty: int = 1) -> int:
+    """Compact overlay quantity picker. Returns quantity, or 0 if cancelled."""
+    if max_qty <= 0:
+        return 0
+
+    qty = max(1, min(start_qty, max_qty))
+
+    while True:
+        game.draw()
+        print()
+        print(f"+- {title} " + "-" * max(1, 54 - len(title)))
+        print(f"| Item:      {unit_label}")
+        print(f"| Unit:      ${unit_price}")
+        print(f"| Quantity:  {qty}")
+        print(f"| Total:     ${qty * unit_price}")
+        print("+" + "-" * 60)
+        print("Left/Right or A/D: -/+1 | Up/Down or W/S: +/-5 | Z/Enter: confirm | X/Esc/Q: cancel")
+
+        key = normalize_key(read_key())
+        if key in ["\t", "\x1b", "q", "x"]:
+            return 0
+        if key in ["a", "LEFT"]:
+            qty = max(1, qty - 1)
+        elif key in ["d", "RIGHT"]:
+            qty = min(max_qty, qty + 1)
+        elif key in ["w", "UP"]:
+            qty = min(max_qty, qty + 5)
+        elif key in ["s", "DOWN"]:
+            qty = max(1, qty - 5)
+        elif key in MENU_CONFIRM_KEYS:
+            return qty
+        elif key in ["\x1b", "q", "x"]:
+            return 0
+
+
+
+__all__ = [
+    'terminal_width',
+    'left_margin',
+    'pad_to',
+    'strip_ansi',
+    'visible_text_len',
+    'fit_text',
+    'wrap_panel_row',
+    'wrap_panel_rows',
+    'dynamic_panel_width_for_text',
+    'MenuItem',
+    'draw_menu',
+    'menu_context_lines',
+    'menu_select',
+    'text_entry_menu',
+    'quantity_menu',
+    'compact_menu_select',
+    'clean_text_entry',
+    'compact_quantity_menu'
+]

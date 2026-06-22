@@ -1,0 +1,56 @@
+name: Bug report
+description: Report a reproducible problem in Elsewhere.
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve Elsewhere. Please avoid uploading private save data.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The release version or source revision you used.
+      placeholder: 0.9.0-beta.1
+    validations:
+      required: true
+  - type: dropdown
+    id: launch
+    attributes:
+      label: How did you run the game?
+      options:
+        - Windows release
+        - Python source
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Include what you expected and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: Include self-check output or the smallest relevant crash/log excerpt.
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy check
+      options:
+        - label: I removed any private information from the material above.
+          required: true
