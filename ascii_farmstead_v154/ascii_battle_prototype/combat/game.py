@@ -3174,10 +3174,10 @@ class Game:
 
     def tactic_description(self) -> str:
         descriptions = {
-            "Balanced": "Mira weighs damage, MP, safety, KOs, and Overwatch lanes evenly.",
-            "Aggressive": "Mira chases damage first and uses Overwatch only when no clean hit exists.",
-            "Cautious": "Mira avoids danger and favors safe Overwatch lanes over risky movement.",
-            "Support": "Mira prioritizes survival, control skills, and protective Overwatch.",
+            "Balanced": "AI companions weigh damage, MP, safety, KOs, and Overwatch lanes evenly.",
+            "Aggressive": "AI companions chase damage first and use Overwatch only when no clean hit exists.",
+            "Cautious": "AI companions avoid danger and favor safe Overwatch lanes over risky movement.",
+            "Support": "AI companions prioritize survival, control skills, and protective Overwatch.",
         }
         return descriptions.get(self.follower_tactic, "Standard behavior.")
 
@@ -9131,11 +9131,26 @@ class Game:
         )
 
     def loadout_options(self) -> List[Dict[str, object]]:
-        options: List[Dict[str, object]] = [
-            {"label": "Upgrade Rook weapon", "kind": "hero_damage", "hero": "Rook", "cost": {"Coin": 12, "Shard": 1}, "desc": "Rook weapon damage +1."},
-            {"label": "Upgrade Mira bow", "kind": "hero_damage", "hero": "Mira", "cost": {"Coin": 10, "Fang": 1}, "desc": "Mira weapon damage +1."},
-            {"label": "Upgrade Brom axe", "kind": "hero_damage", "hero": "Brom", "cost": {"Coin": 10, "Stone": 1}, "desc": "Brom weapon damage +1."},
-            {"label": "Upgrade Aria wand", "kind": "hero_damage", "hero": "Aria", "cost": {"Coin": 10, "Shard": 1}, "desc": "Aria weapon damage +1."},
+        if str(getattr(self, "battle_source", "")) == "ascii_farmstead":
+            options: List[Dict[str, object]] = [
+                {
+                    "label": f"Upgrade {hero.name}'s weapon",
+                    "kind": "hero_damage",
+                    "hero": hero.name,
+                    "cost": {"Coin": 10, "Shard": 1},
+                    "desc": f"{hero.name}'s weapon damage +1.",
+                }
+                for hero in self.heroes
+                if hero.active
+            ]
+        else:
+            options = [
+                {"label": "Upgrade Rook weapon", "kind": "hero_damage", "hero": "Rook", "cost": {"Coin": 12, "Shard": 1}, "desc": "Rook weapon damage +1."},
+                {"label": "Upgrade Mira bow", "kind": "hero_damage", "hero": "Mira", "cost": {"Coin": 10, "Fang": 1}, "desc": "Mira weapon damage +1."},
+                {"label": "Upgrade Brom axe", "kind": "hero_damage", "hero": "Brom", "cost": {"Coin": 10, "Stone": 1}, "desc": "Brom weapon damage +1."},
+                {"label": "Upgrade Aria wand", "kind": "hero_damage", "hero": "Aria", "cost": {"Coin": 10, "Shard": 1}, "desc": "Aria weapon damage +1."},
+            ]
+        options.extend([
             {"label": "Train party endurance", "kind": "party_hp", "cost": {"Coin": 16, "Hide": 2}, "desc": "All heroes gain +2 max HP."},
             {"label": "Train party focus", "kind": "party_mp", "cost": {"Coin": 12, "Tonic": 2}, "desc": "All heroes gain +1 max MP."},
             {"label": "Stock Potions", "kind": "stock_item", "item": "Potion", "cost": {"Coin": 4, "Tonic": 1}, "desc": "+1 starting Potion for each active hero."},
@@ -9144,7 +9159,7 @@ class Game:
             {"label": "Stock Guard Tonics", "kind": "stock_item", "item": "Guard Tonic", "cost": {"Coin": 6, "Hide": 1}, "desc": "+1 starting Guard Tonic for each active hero."},
             {"label": "Stock Throwing Knives", "kind": "stock_item", "item": "Throwing Knife", "cost": {"Coin": 5, "Fang": 1}, "desc": "+1 starting Throwing Knife for each active hero."},
             {"label": "Stock Fire Bombs", "kind": "stock_item", "item": "Fire Bomb", "cost": {"Coin": 10, "Gel": 1, "Shard": 1}, "desc": "+1 starting Fire Bomb for each active hero."},
-        ]
+        ])
         hero = self.current_loadout_hero()
         slot = self.current_loadout_slot()
         defs = self.equipment_defs().get(slot, {})

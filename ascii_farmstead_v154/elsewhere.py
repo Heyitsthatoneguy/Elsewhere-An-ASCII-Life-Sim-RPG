@@ -42,7 +42,7 @@ def run_self_check() -> int:
         raise RuntimeError("Combat validation failed: " + "; ".join(errors[:5]))
     custom_total = sum(
         len(custom_content.get(field, []))
-        for field in ("abilities", "classes", "enemies", "equipment", "maps", "dungeon_rooms")
+        for field in ("abilities", "classes", "enemies", "equipment", "maps", "dungeon_rooms", "building_templates")
     )
     print("Elsewhere self-check passed.")
     print(f"Data directory: {GAME_DATA_DIRECTORY}")

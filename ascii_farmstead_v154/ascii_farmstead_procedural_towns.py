@@ -14,10 +14,15 @@ from ascii_farmstead_data import (
     MENU_BACK,
 )
 from ascii_farmstead_npc_builder import (
+    procedural_custom_building_template,
     procedural_population_key,
     stable_text_seed,
 )
 from ascii_farmstead_npc_dialogue import BAD_WEATHER
+from ascii_farmstead_custom_extended import (
+    custom_building_template_signature,
+    stamp_custom_building_template,
+)
 from ascii_farmstead_town_builder import (
     SETTLEMENT_BUILDING_CATALOG,
     SETTLEMENT_STYLES,
@@ -30,7 +35,7 @@ from ascii_farmstead_ui import MenuItem
 
 
 Position = Tuple[int, int]
-PROCEDURAL_TOWN_RUNTIME_VERSION = 1
+PROCEDURAL_TOWN_RUNTIME_VERSION = 9
 PROCEDURAL_TOWN_GRID_SIZE = 13
 PROCEDURAL_TOWN_MIN_DISTANCE = 8
 PROCEDURAL_TOWN_OVERWORLD_SYMBOL = "t"
@@ -1312,9 +1317,619 @@ class ProceduralTownRuntimeMixin:
             PROCEDURAL_TOWN_SIGN_SYMBOL,
         }
 
+    def procedural_town_interior_blocking_tiles(self) -> Set[str]:
+        return {
+            " ", "#", "-", "&", "$", "+", "l", "w", "x", "a",
+            "b", "t", "c", "s", "f", "P", "d", "p", "<", "_",
+        }
+
+    def procedural_town_interior_tile_passable(self, tile: str) -> bool:
+        return str(tile) not in self.procedural_town_interior_blocking_tiles()
+
+    def procedural_town_custom_building_template(
+        self,
+        plan: Dict[str, object],
+        building: Dict[str, object],
+        property_record: Optional[Dict[str, object]] = None,
+    ) -> Optional[Dict[str, object]]:
+        type_id = str(building.get("type_id", ""))
+        if not type_id or type_id in PROCEDURAL_TOWN_OPEN_BUILDINGS:
+            return None
+        # Once a home is owned by the player, the residence system takes over
+        # with movable furniture and its own private-object scope.
+        if type_id == "home" and property_record:
+            return None
+        return procedural_custom_building_template(plan, building, enabled_only=True)
+
+    def procedural_town_building_floor_count(
+        self,
+        plan: Dict[str, object],
+        building: Dict[str, object],
+        custom_template: Optional[Dict[str, object]] = None,
+        property_record: Optional[Dict[str, object]] = None,
+    ) -> int:
+        if custom_template:
+            floors = custom_template.get("floors", [])
+            if isinstance(floors, list) and floors:
+                return max(1, min(4, len(floors)))
+            return 1
+        type_id = str(building.get("type_id", "home"))
+        seed = stable_text_seed(f"{plan.get('seed')}:{building.get('id')}:floors")
+        development = self.procedural_town_development_rank(plan)
+        if property_record:
+            upgrade_level = int(property_record.get("upgrade_level", 0) or 0)
+            return 2 if upgrade_level >= 2 or property_record.get("household_moved") else 1
+        if type_id == "inn":
+            return 2 if development >= 1 or seed % 100 < 70 else 1
+        if type_id == "home":
+            return 2 if seed % 100 < 35 else 1
+        return 1
+
+    def current_procedural_building_floor(
+        self,
+        plan: Optional[Dict[str, object]] = None,
+        building: Optional[Dict[str, object]] = None,
+    ) -> int:
+        plan = plan or self.current_procedural_town_plan() or {}
+        building = building or self.current_procedural_town_building() or {}
+        try:
+            requested = int(getattr(self.state, "current_procedural_building_floor", 0) or 0)
+        except Exception:
+            requested = 0
+        if not isinstance(plan, dict) or not isinstance(building, dict) or not plan or not building:
+            return max(0, requested)
+        property_record = (
+            self.player_property_for_building(plan, building)
+            if hasattr(self, "player_property_for_building")
+            and str(building.get("type_id")) == "home"
+            else None
+        )
+        template = self.procedural_town_custom_building_template(plan, building, property_record)
+        floor_count = self.procedural_town_building_floor_count(plan, building, template, property_record)
+        return max(0, min(floor_count - 1, requested))
+
+    def procedural_town_generated_upper_floor_map(
+        self,
+        plan: Dict[str, object],
+        building: Dict[str, object],
+        floor_index: int,
+        floor_count: int,
+    ) -> List[List[str]]:
+        width, height = 64, 28
+        grid = [[" " for _ in range(width)] for _ in range(height)]
+        floor_cells: Set[Position] = set()
+        hall_cells: Set[Position] = set()
+
+        def add_floor_rect(x1: int, y1: int, x2: int, y2: int, *, hall: bool = False) -> None:
+            for y in range(max(1, y1), min(height - 1, y2 + 1)):
+                for x in range(max(1, x1), min(width - 1, x2 + 1)):
+                    floor_cells.add((x, y))
+                    if hall:
+                        hall_cells.add((x, y))
+
+        def add_room(x1: int, y1: int, x2: int, y2: int) -> None:
+            add_floor_rect(x1, y1, x2, y2)
+
+        def add_hall(x1: int, y1: int, x2: int, y2: int) -> None:
+            add_floor_rect(x1, y1, x2, y2, hall=True)
+
+        add_room(24, 18, 40, 24)
+        add_hall(31, 8, 33, 24)
+        add_room(22, 4, 42, 8)
+        type_id = str(building.get("type_id", "home"))
+        if type_id == "inn":
+            for room_x1, room_x2 in ((8, 12), (15, 19), (45, 49), (52, 56)):
+                add_room(room_x1, 6, room_x2, 10)
+                add_room(room_x1, 17, room_x2, 21)
+                room_mid = (room_x1 + room_x2) // 2
+                add_hall(room_mid, 10, room_mid, 13)
+                add_hall(room_mid, 14, room_mid, 17)
+            add_hall(10, 13, 31, 14)
+            add_hall(33, 13, 54, 14)
+        elif type_id in {"library", "town_hall"}:
+            add_room(6, 6, 19, 12)
+            add_room(45, 6, 58, 12)
+            add_room(6, 16, 19, 22)
+            add_room(45, 16, 58, 22)
+            add_hall(19, 9, 31, 11)
+            add_hall(33, 9, 45, 11)
+            add_hall(19, 19, 31, 21)
+            add_hall(33, 19, 45, 21)
+        else:
+            add_room(7, 6, 20, 12)
+            add_room(44, 6, 57, 12)
+            add_room(7, 17, 20, 23)
+            add_room(44, 17, 57, 23)
+            add_hall(20, 9, 31, 11)
+            add_hall(33, 9, 44, 11)
+            add_hall(20, 20, 31, 22)
+            add_hall(33, 20, 44, 22)
+
+        for x, y in floor_cells:
+            grid[y][x] = "."
+        for x, y in list(floor_cells):
+            for dy in (-1, 0, 1):
+                for dx in (-1, 0, 1):
+                    nx, ny = x + dx, y + dy
+                    if (
+                        0 <= nx < width
+                        and 0 <= ny < height
+                        and (nx, ny) not in floor_cells
+                        and grid[ny][nx] == " "
+                    ):
+                        grid[ny][nx] = "#"
+
+        stair_x = 32
+        stair_y = 23
+        grid[stair_y][stair_x] = ">"
+        if floor_index < floor_count - 1 and grid[20][36] == ".":
+            grid[20][36] = "<"
+
+        protected_cells = set(hall_cells) | {
+            (stair_x, stair_y),
+            (stair_x, stair_y - 1),
+            (stair_x - 1, stair_y),
+            (stair_x + 1, stair_y),
+            (36, 20),
+            (36, 19),
+            (35, 20),
+            (37, 20),
+        }
+
+        def place(x: int, y: int, ch: str, *, allow_hall: bool = False) -> None:
+            if (
+                1 <= x < width - 1
+                and 1 <= y < height - 1
+                and grid[y][x] in {".", ","}
+                and (allow_hall or (x, y) not in protected_cells)
+            ):
+                grid[y][x] = ch
+
+        def hline(x1_inner: int, x2_inner: int, y: int, ch: str) -> None:
+            for x in range(max(1, x1_inner), min(width - 1, x2_inner + 1)):
+                place(x, y, ch)
+
+        def rug_rect(x1: int, y1: int, x2: int, y2: int) -> None:
+            for y in range(max(1, y1), min(height - 1, y2 + 1)):
+                for x in range(max(1, x1), min(width - 1, x2 + 1)):
+                    if grid[y][x] == "." and (x, y) not in protected_cells:
+                        grid[y][x] = ","
+
+        def compact_bedroom(x1: int, y1: int) -> None:
+            place(x1 + 1, y1 + 1, "b")
+            place(x1 + 2, y1 + 1, "b")
+            place(x1 + 3, y1 + 1, "l")
+
+        rug_rect(27, 20, 37, 22)
+        if type_id == "inn":
+            for x1, y1 in ((8, 6), (15, 6), (45, 6), (52, 6), (8, 17), (15, 17), (45, 17), (52, 17)):
+                compact_bedroom(x1, y1)
+            place(25, 6, "s")
+            place(39, 6, "P")
+        elif type_id == "library":
+            hline(9, 17, 8, "l")
+            hline(48, 56, 8, "l")
+            hline(9, 17, 19, "l")
+            hline(48, 56, 19, "P")
+            hline(25, 39, 6, "l")
+            place(31, 22, "d")
+        elif type_id == "town_hall":
+            place(12, 8, "d")
+            place(52, 8, "P")
+            place(12, 19, "s")
+            place(52, 19, "d")
+            hline(26, 38, 6, "P")
+            place(31, 21, "t")
+            place(35, 21, "c")
+        elif type_id == "clinic":
+            compact_bedroom(7, 6)
+            hline(46, 54, 8, "+")
+            hline(10, 18, 19, "s")
+            place(47, 19, "d")
+        elif type_id == "general_store":
+            hline(10, 18, 8, "s")
+            hline(47, 55, 8, "$")
+            hline(10, 18, 19, "$")
+            hline(47, 55, 19, "s")
+            place(31, 6, "d")
+        elif type_id in {"carpenter", "workshop"}:
+            hline(10, 18, 8, "w")
+            hline(47, 55, 8, "a")
+            hline(10, 18, 19, "x")
+            hline(47, 55, 19, "s")
+        else:
+            compact_bedroom(7, 6)
+            place(45, 8, "P")
+            place(48, 19, "s")
+            place(16, 19, "t")
+            place(18, 20, "c")
+        decor_seed = stable_text_seed(f"{plan.get('seed')}:{building.get('id')}:upper:{floor_index}")
+        floor_tiles = [
+            (x, y)
+            for y, row in enumerate(grid)
+            for x, ch in enumerate(row)
+            if ch == "."
+        ]
+        for offset, (x, y) in enumerate(floor_tiles[decor_seed % 5::17][:3]):
+            grid[y][x] = "p" if offset < 2 else ","
+        return grid
+
+    def procedural_town_stair_landing(
+        self,
+        grid: List[List[str]],
+        stair_x: int,
+        stair_y: int,
+    ) -> Position:
+        for dx, dy in ((0, 1), (1, 0), (-1, 0), (0, -1), (1, 1), (-1, 1)):
+            x, y = stair_x + dx, stair_y + dy
+            if 0 <= y < len(grid) and 0 <= x < len(grid[y]) and self.procedural_town_interior_tile_passable(grid[y][x]):
+                return x, y
+        return stair_x, stair_y
+
+    def change_procedural_town_building_floor(self, delta: int) -> bool:
+        plan = self.current_procedural_town_plan()
+        building = self.current_procedural_town_building()
+        if not plan or not building:
+            self.set_message("There is no connected floor here.")
+            return False
+        property_record = (
+            self.player_property_for_building(plan, building)
+            if hasattr(self, "player_property_for_building")
+            and str(building.get("type_id")) == "home"
+            else None
+        )
+        template = self.procedural_town_custom_building_template(plan, building, property_record)
+        floor_count = self.procedural_town_building_floor_count(plan, building, template, property_record)
+        current_floor = self.current_procedural_building_floor(plan, building)
+        target_floor = current_floor + (1 if delta > 0 else -1)
+        if not (0 <= target_floor < floor_count):
+            self.set_message("The stairs do not continue any farther.")
+            return False
+        self.state.current_procedural_building_floor = target_floor
+        target_grid = self.procedural_town_interior_map(building, floor=target_floor)
+        target_tile = ">" if delta > 0 else "<"
+        stair_positions = [
+            (x, y)
+            for y, row in enumerate(target_grid)
+            for x, ch in enumerate(row)
+            if ch == target_tile
+        ]
+        if not stair_positions:
+            stair_positions = [
+                (x, y)
+                for y, row in enumerate(target_grid)
+                for x, ch in enumerate(row)
+                if ch in {"<", "U", ">"}
+            ]
+        stair_x, stair_y = stair_positions[0] if stair_positions else (len(target_grid[0]) // 2, len(target_grid) - 4)
+        self.state.player_x, self.state.player_y = self.procedural_town_stair_landing(target_grid, stair_x, stair_y)
+        self.state.facing = "UP" if delta > 0 else "DOWN"
+        self._procedural_resident_runtime_signature = None
+        self.update_procedural_town_residents(force_reanchor=True)
+        direction = "upstairs" if delta > 0 else "downstairs"
+        self.set_message(f"You take the stairs {direction} to floor {target_floor + 1}.")
+        return True
+
+    def procedural_town_generated_ground_floor_map(
+        self,
+        plan: Dict[str, object],
+        building: Dict[str, object],
+        floor_count: int,
+        property_record: Optional[Dict[str, object]],
+        business_record: Optional[Dict[str, object]],
+        community: Dict[str, object],
+        layout_variant: int,
+        fixture_variant: int,
+    ) -> List[List[str]]:
+        """Build practical, type-specific settlement interiors.
+
+        The goal is architecture first: a clear entrance, one obvious service
+        counter where service exists, rooms that match the building's purpose,
+        and a small number of useful fixtures instead of decorative clutter.
+        """
+        width, height = 64, 28
+        door_x, door_y = width // 2, height - 1
+        grid = [[" " for _ in range(width)] for _ in range(height)]
+        floor_cells: Set[Position] = set()
+        hall_cells: Set[Position] = set()
+
+        def in_bounds(x: int, y: int) -> bool:
+            return 0 <= x < width and 0 <= y < height
+
+        def mark_floor(x: int, y: int, *, hall: bool = False) -> None:
+            if 1 <= x < width - 1 and 1 <= y < height - 1:
+                floor_cells.add((x, y))
+                if hall:
+                    hall_cells.add((x, y))
+                grid[y][x] = "."
+
+        def add_room(
+            x1: int,
+            y1: int,
+            x2: int,
+            y2: int,
+            openings: Optional[Iterable[Position]] = None,
+        ) -> None:
+            openings_set = set(openings or [])
+            left, right = sorted((max(1, x1), min(width - 2, x2)))
+            top, bottom = sorted((max(1, y1), min(height - 2, y2)))
+            for y in range(top, bottom + 1):
+                for x in range(left, right + 1):
+                    edge = x in {left, right} or y in {top, bottom}
+                    if edge and (x, y) not in openings_set:
+                        grid[y][x] = "#"
+                    else:
+                        mark_floor(x, y)
+
+        def add_hall(points: List[Position], *, half_width: int = 0) -> None:
+            if len(points) < 2:
+                return
+            for (x1, y1), (x2, y2) in zip(points, points[1:]):
+                x, y = x1, y1
+                step_x = 0 if x1 == x2 else (1 if x2 > x1 else -1)
+                step_y = 0 if y1 == y2 else (1 if y2 > y1 else -1)
+                while True:
+                    for oy in range(-half_width, half_width + 1):
+                        for ox in range(-half_width, half_width + 1):
+                            mark_floor(x + ox, y + oy, hall=True)
+                    if (x, y) == (x2, y2):
+                        break
+                    if x != x2:
+                        x += step_x
+                    if y != y2:
+                        y += step_y
+
+        def finalize_walls() -> None:
+            for x, y in list(floor_cells):
+                for dy in (-1, 0, 1):
+                    for dx in (-1, 0, 1):
+                        nx, ny = x + dx, y + dy
+                        if in_bounds(nx, ny) and (nx, ny) not in floor_cells and grid[ny][nx] == " ":
+                            grid[ny][nx] = "#"
+            for lane_y in range(18, door_y):
+                for lane_x in range(door_x - 1, door_x + 2):
+                    mark_floor(lane_x, lane_y, hall=True)
+            grid[door_y][door_x] = "D"
+            grid[door_y - 1][door_x] = "."
+
+        def protected_cells() -> Set[Position]:
+            front_lane = {
+                (x, y)
+                for y in range(18, door_y)
+                for x in range(door_x - 1, door_x + 2)
+            }
+            return hall_cells | front_lane | {(door_x, door_y - 1)}
+
+        def place(x: int, y: int, ch: str, *, allow_hall: bool = False) -> None:
+            if (
+                1 <= x < width - 1
+                and 1 <= y < height - 1
+                and grid[y][x] in {".", ","}
+                and (allow_hall or (x, y) not in protected_cells())
+            ):
+                grid[y][x] = ch
+
+        def hline(x1: int, x2: int, y: int, ch: str) -> None:
+            for x in range(max(1, x1), min(width - 2, x2) + 1):
+                place(x, y, ch)
+
+        def rug(x1: int, y1: int, x2: int, y2: int) -> None:
+            blocked = protected_cells()
+            for y in range(max(1, y1), min(height - 2, y2) + 1):
+                for x in range(max(1, x1), min(width - 2, x2) + 1):
+                    if grid[y][x] == "." and (x, y) not in blocked:
+                        grid[y][x] = ","
+
+        def table(x: int, y: int) -> None:
+            place(x, y, "t")
+            place(x - 1, y, "c")
+            place(x + 1, y, "c")
+
+        def bed(x: int, y: int) -> None:
+            place(x, y, "b")
+
+        def counter(cx: int, y: int, *, stock: bool = True) -> None:
+            if stock:
+                place(cx - 3, y, "$")
+            place(cx - 2, y, "-")
+            place(cx - 1, y, "-")
+            place(cx, y, "&")
+            place(cx + 1, y, "-")
+            place(cx + 2, y, "-")
+
+        type_id = str(building.get("type_id", "home"))
+
+        # Shape phase. Each building type has a deliberately different plan.
+        if type_id == "inn":
+            add_room(18, 17, 46, 25, [(32, 25), (18, 21), (46, 21), (32, 17)])
+            add_room(21, 9, 39, 15, [(32, 15), (39, 12)])
+            add_room(43, 8, 57, 15, [(43, 12)])
+            add_hall([(32, 26), (32, 18), (32, 15)], half_width=1)
+            add_hall([(39, 12), (43, 12)])
+            add_hall([(31, 21), (12, 21)])
+            add_hall([(33, 21), (52, 21)])
+            for x1, x2 in ((7, 14), (50, 57)):
+                add_room(x1, 17, x2, 20, [((x1 + x2) // 2, 20)])
+                add_room(x1, 22, x2, 25, [((x1 + x2) // 2, 22)])
+            if floor_count <= 1:
+                add_room(8, 10, 16, 14, [(12, 14)])
+                add_room(49, 10, 57, 14, [(53, 14)])
+                add_hall([(12, 17), (12, 14), (32, 14), (53, 14), (53, 17)])
+        elif type_id == "home":
+            if layout_variant == 0:
+                add_room(23, 17, 41, 25, [(32, 25), (23, 21), (41, 21), (32, 17)])
+                add_room(8, 15, 21, 23, [(21, 20)])
+                add_room(44, 15, 57, 23, [(44, 20)])
+                add_room(24, 8, 40, 14, [(32, 14)])
+                add_hall([(32, 26), (32, 20), (21, 20)])
+                add_hall([(32, 20), (44, 20)])
+                add_hall([(32, 18), (32, 14)])
+            else:
+                add_room(20, 17, 44, 25, [(32, 25), (20, 21), (44, 21), (32, 17)])
+                add_room(6, 13, 18, 22, [(18, 18)])
+                add_room(47, 16, 58, 24, [(47, 20)])
+                add_room(25, 7, 39, 14, [(32, 14)])
+                add_room(42, 8, 55, 13, [(42, 11)])
+                add_hall([(32, 26), (32, 20), (18, 20), (18, 18)])
+                add_hall([(32, 20), (47, 20)])
+                add_hall([(32, 18), (32, 14)])
+                add_hall([(39, 11), (42, 11)])
+            if property_record:
+                add_room(6, 6, 20, 11, [(17, 11)])
+                add_room(44, 6, 57, 11, [(49, 11)])
+                add_hall([(17, 11), (18, 12), (18, 16)])
+                add_hall([(49, 11), (49, 16)])
+        elif type_id == "general_store":
+            add_room(21, 16, 43, 25, [(32, 25), (21, 20), (43, 20), (32, 16)])
+            add_room(22, 9, 42, 14, [(32, 14)])
+            add_room(7, 13, 18, 22, [(18, 19)])
+            add_room(47, 13, 58, 20, [(47, 17)])
+            add_hall([(32, 26), (32, 17), (32, 14)])
+            add_hall([(22, 20), (18, 20)])
+            add_hall([(42, 18), (47, 18)])
+        elif type_id == "clinic":
+            add_room(22, 17, 42, 25, [(32, 25), (22, 21), (42, 21), (32, 17)])
+            add_room(23, 10, 41, 15, [(32, 15)])
+            add_room(7, 10, 20, 21, [(20, 17)])
+            add_room(45, 11, 57, 20, [(45, 17)])
+            add_hall([(32, 26), (32, 18), (32, 15)])
+            add_hall([(22, 21), (17, 21), (17, 17), (20, 17)])
+            add_hall([(42, 21), (50, 21), (50, 17), (45, 17)])
+        elif type_id == "library":
+            add_room(19, 16, 45, 25, [(32, 25), (19, 20), (45, 20), (32, 16)])
+            add_room(8, 8, 20, 22, [(20, 18)])
+            add_room(44, 7, 57, 16, [(44, 12)])
+            add_room(24, 7, 40, 13, [(32, 13)])
+            add_hall([(32, 26), (32, 17), (32, 13)])
+            add_hall([(20, 20), (32, 20), (45, 20), (50, 20), (50, 12), (44, 12)])
+        elif type_id == "carpenter":
+            add_room(20, 17, 44, 25, [(32, 25), (20, 21), (44, 21), (32, 17)])
+            add_room(7, 11, 20, 24, [(20, 20)])
+            add_room(44, 9, 58, 18, [(44, 14)])
+            add_room(25, 8, 39, 14, [(32, 14)])
+            add_hall([(32, 26), (32, 18), (32, 14)])
+            add_hall([(20, 21), (14, 21), (14, 20), (20, 20)])
+            add_hall([(44, 21), (50, 21), (50, 14), (44, 14)])
+        elif type_id == "workshop":
+            add_room(23, 16, 41, 25, [(32, 25), (23, 20), (41, 20), (32, 16)])
+            add_room(6, 9, 22, 18, [(22, 14)])
+            add_room(45, 14, 58, 24, [(45, 20)])
+            add_room(24, 6, 40, 12, [(32, 12)])
+            add_hall([(32, 26), (32, 17), (32, 12)])
+            add_hall([(23, 20), (18, 20), (18, 14), (22, 14)])
+            add_hall([(41, 20), (45, 20)])
+        elif type_id == "town_hall":
+            add_room(18, 17, 46, 25, [(32, 25), (18, 21), (46, 21), (32, 17)])
+            add_room(22, 9, 42, 14, [(32, 14)])
+            add_room(7, 9, 19, 18, [(19, 14)])
+            add_room(47, 8, 58, 18, [(47, 14)])
+            add_hall([(32, 26), (32, 18), (32, 14)])
+            add_hall([(18, 21), (13, 21), (13, 14), (19, 14)])
+            add_hall([(46, 21), (52, 21), (52, 14), (47, 14)])
+        else:
+            add_room(23, 17, 41, 25, [(32, 25), (23, 21), (41, 21)])
+            add_room(9, 13, 21, 22, [(21, 19)])
+            add_room(44, 12, 56, 20, [(44, 18)])
+            add_hall([(32, 26), (32, 20), (21, 20)])
+            add_hall([(32, 20), (44, 20)])
+
+        finalize_walls()
+
+        # Fixture phase. Keep it sparse and meaningful.
+        if type_id == "inn":
+            counter(31, 12)
+            place(48, 10, "f")
+            place(52, 10, "s")
+            rug(25, 20, 39, 24)
+            table(28, 23)
+            table(37, 23)
+            for x, y in ((9, 18), (52, 18), (9, 23), (52, 23), (10, 11), (51, 11)):
+                bed(x, y)
+            if floor_count > 1:
+                place(40, 18, "<")
+            place(23, 11, "P")
+        elif type_id == "home":
+            place(29, 19, "&")
+            if layout_variant == 0:
+                bed(10, 17)
+                place(48, 17, "f")
+                place(37, 10, "P")
+            else:
+                bed(8, 16)
+                place(50, 18, "f")
+                place(50, 10, "P")
+            table(31, 23)
+            if floor_count > 1:
+                place(38, 18, "<")
+        elif type_id == "general_store":
+            counter(32, 13)
+            hline(10, 16, 16, "s")
+            hline(49, 55, 16, "$")
+            place(50, 18, "P")
+        elif type_id == "clinic":
+            counter(32, 14, stock=False)
+            rug(24, 20, 40, 24)
+            bed(10, 12)
+            place(12, 15, "+")
+            place(48, 14, "+")
+            place(53, 14, "s")
+            place(26, 12, "P")
+        elif type_id == "library":
+            place(30, 18, "&")
+            hline(10, 10, 10, "l")
+            hline(13, 13, 10, "l")
+            hline(16, 16, 10, "l")
+            hline(10, 10, 15, "l")
+            hline(13, 13, 15, "l")
+            hline(16, 16, 15, "l")
+            place(50, 10, "P")
+            table(32, 22)
+        elif type_id == "carpenter":
+            counter(32, 13, stock=False)
+            hline(9, 17, 14, "w")
+            place(49, 12, "a")
+            place(53, 12, "x")
+            table(31, 22)
+            place(36, 10, "P")
+        elif type_id == "workshop":
+            counter(32, 11, stock=False)
+            place(10, 12, "w")
+            place(14, 12, "a")
+            place(18, 12, "x")
+            place(49, 18, "s")
+            place(36, 9, "P")
+        elif type_id == "town_hall":
+            counter(32, 13, stock=False)
+            place(12, 11, "d")
+            place(52, 11, "P")
+            table(32, 22)
+            if community.get("story_completed"):
+                place(38, 11, "f")
+        else:
+            counter(32, 13, stock=False)
+            table(32, 23)
+
+        if business_record and type_id in {"general_store", "inn"}:
+            upgrade_level = int(business_record.get("upgrade_level", 0))
+            if upgrade_level >= 1:
+                place(26, 11, "$")
+            if upgrade_level >= 2:
+                place(38, 11, "s")
+            if upgrade_level >= 3:
+                place(28, 11, "P")
+
+        # Final safety: preserve the approach lane exactly as plain floor.
+        for lane_y in range(18, door_y):
+            for lane_x in range(door_x - 1, door_x + 2):
+                if grid[lane_y][lane_x] != "D":
+                    grid[lane_y][lane_x] = "."
+        grid[door_y][door_x] = "D"
+        return grid
+
     def procedural_town_interior_map(
         self,
         building: Optional[Dict[str, object]] = None,
+        floor: Optional[int] = None,
     ) -> List[List[str]]:
         plan = self.current_procedural_town_plan()
         if not plan:
@@ -1336,11 +1951,59 @@ class ProceduralTownRuntimeMixin:
             and str(building.get("type_id")) == "home"
             else None
         )
+        if property_record and hasattr(self, "ensure_procedural_residence_furnishings"):
+            self.ensure_procedural_residence_furnishings(property_record, building)
         business_record = (
             self.player_business_for_building(plan, building)
             if hasattr(self, "player_business_for_building")
             else None
         )
+        type_id = str(building.get("type_id", "home"))
+        custom_template = self.procedural_town_custom_building_template(
+            plan,
+            building,
+            property_record,
+        )
+        custom_template_signature = (
+            custom_building_template_signature(custom_template)
+            if custom_template
+            else ""
+        )
+        floor_count = self.procedural_town_building_floor_count(
+            plan,
+            building,
+            custom_template,
+            property_record,
+        )
+        if floor is None:
+            floor_index = self.current_procedural_building_floor(plan, building)
+        else:
+            try:
+                floor_index = int(floor)
+            except Exception:
+                floor_index = 0
+            floor_index = max(0, min(floor_count - 1, floor_index))
+        same_type_ids = sorted(
+            str(candidate.get("id", ""))
+            for candidate in plan.get("buildings", {}).values()
+            if isinstance(candidate, dict)
+            and str(candidate.get("type_id", "")) == type_id
+        )
+        try:
+            same_type_index = same_type_ids.index(str(building.get("id", "")))
+        except ValueError:
+            same_type_index = 0
+        variant_seed = stable_text_seed(
+            f"{plan.get('seed')}:{type_id}:{building.get('id')}:interior-variants"
+        )
+        layout_variant = (variant_seed + same_type_index) % 4
+        fixture_variant = ((variant_seed // 7) + same_type_index * 2) % 4
+        family_signature = ""
+        if type_id == "home":
+            family_signature = (
+                f":family={1 if getattr(self.state, 'spouse_npc_id', '') else 0}:"
+                f"{len(getattr(self.state, 'children', []) or [])}"
+            )
         cache_key = (
             f"{plan.get('id')}:{building.get('id')}:{PROCEDURAL_TOWN_RUNTIME_VERSION}:"
             f"{self.procedural_town_development_rank(plan)}:"
@@ -1349,97 +2012,397 @@ class ProceduralTownRuntimeMixin:
             f"{int(property_record.get('upgrade_level', 0)) if property_record else 0}:"
             f"{bool(property_record and property_record.get('household_moved'))}:"
             f"{int(business_record.get('upgrade_level', 0)) if business_record else 0}"
+            f":floor={floor_index}:floors={floor_count}:layout={layout_variant}:fixtures={fixture_variant}:"
+            f"custom={custom_template_signature}:"
+            f"{family_signature}"
         )
         if cache_key in cache:
             return cache[cache_key]
 
-        width, height = 42, 20
-        grid = [["." for _ in range(width)] for _ in range(height)]
-        for x in range(width):
-            grid[0][x] = "#"
-            grid[height - 1][x] = "#"
-        for y in range(height):
-            grid[y][0] = "#"
-            grid[y][width - 1] = "#"
+        if custom_template:
+            custom_grid = stamp_custom_building_template(custom_template, floor_index)
+            if custom_grid:
+                cache[cache_key] = custom_grid
+                return custom_grid
+
+        if floor_index > 0:
+            upper_grid = self.procedural_town_generated_upper_floor_map(
+                plan,
+                building,
+                floor_index,
+                floor_count,
+            )
+            cache[cache_key] = upper_grid
+            return upper_grid
+
+        generated_grid = self.procedural_town_generated_ground_floor_map(
+            plan,
+            building,
+            floor_count,
+            property_record,
+            business_record,
+            community,
+            layout_variant,
+            fixture_variant,
+        )
+        cache[cache_key] = generated_grid
+        return generated_grid
+
+        width, height = 64, 28
+        grid = [[" " for _ in range(width)] for _ in range(height)]
+        floor_cells: Set[Position] = set()
+        hall_cells: Set[Position] = set()
         door_x = width // 2
-        grid[height - 1][door_x] = "D"
-        grid[height - 2][door_x] = "."
-        type_id = str(building.get("type_id", "home"))
+        door_y = height - 1
 
-        for x in range(5, width - 5):
-            if x not in {door_x - 1, door_x, door_x + 1}:
-                grid[5][x] = "-"
-        for x in range(7, width - 7, 5):
-            grid[4][x] = "s"
-        grid[8][door_x] = "&"
-        grid[9][door_x] = "."
-        grid[10][door_x - 5] = "t"
-        grid[10][door_x + 5] = "t"
-        grid[11][door_x - 5] = "c"
-        grid[11][door_x + 5] = "c"
+        def add_floor_rect(x1: int, y1: int, x2: int, y2: int, *, hall: bool = False) -> None:
+            for y in range(max(1, y1), min(height - 1, y2 + 1)):
+                for x in range(max(1, x1), min(width - 1, x2 + 1)):
+                    floor_cells.add((x, y))
+                    if hall:
+                        hall_cells.add((x, y))
 
-        if type_id in {"home", "inn"}:
-            for x in (8, 13, width - 14, width - 9):
-                grid[3][x] = "b"
-            grid[3][door_x] = "f"
-        if type_id in {"clinic"}:
-            grid[3][10] = "b"
-            grid[3][width - 11] = "b"
-            grid[7][10] = "+"
-            grid[7][width - 11] = "+"
-        if type_id in {"library"}:
-            for y in (3, 7, 12):
-                for x in range(6, width - 6, 4):
-                    grid[y][x] = "l"
-        if type_id in {"carpenter", "workshop"}:
-            grid[3][8] = "w"
-            grid[3][width - 9] = "a"
-            grid[7][8] = "x"
-            grid[7][width - 9] = "x"
-        if type_id in {"general_store"}:
-            for x in range(8, width - 8, 4):
-                grid[3][x] = "$"
-        if type_id == "town_hall":
-            grid[3][door_x] = "P"
-            grid[3][door_x - 8] = "d"
-            grid[3][door_x + 8] = "d"
+        def add_room(x1: int, y1: int, x2: int, y2: int) -> None:
+            add_floor_rect(x1, y1, x2, y2)
+
+        def add_hall(x1: int, y1: int, x2: int, y2: int) -> None:
+            add_floor_rect(x1, y1, x2, y2, hall=True)
+
+        # Every generated building begins with a front room just inside the
+        # door, then expands outward through corridors and role-specific rooms.
+        add_room(24, 18, 40, 26)
+        add_hall(31, 18, 33, 26)
+
+        def add_west_room(x1: int = 6, y1: int = 18, x2: int = 20, y2: int = 25) -> None:
+            add_room(x1, y1, x2, y2)
+            add_hall(x2, 20, 24, 22)
+
+        def add_east_room(x1: int = 44, y1: int = 18, x2: int = 58, y2: int = 25) -> None:
+            add_room(x1, y1, x2, y2)
+            add_hall(40, 20, x1, 22)
+
+        def add_north_room(x1: int = 22, y1: int = 5, x2: int = 42, y2: int = 11) -> None:
+            add_room(x1, y1, x2, y2)
+            add_hall(31, y2, 33, 18)
+
+        if type_id == "inn":
+            # Inns use the player's preferred grammar: a readable public
+            # common room, a clear service point, and one-room-per-guest wings.
+            add_room(24, 14, 40, 17)
+            add_hall(31, 14, 33, 26)
+            add_hall(8, 21, 24, 21)
+            add_hall(40, 21, 56, 21)
+            bedroom_columns = ((8, 11), (13, 16), (18, 21), (43, 46), (48, 51), (53, 56))
+            for room_x1, room_x2 in bedroom_columns:
+                add_room(room_x1, 17, room_x2, 19)
+                add_room(room_x1, 23, room_x2, 25)
+                room_mid = (room_x1 + room_x2) // 2
+                add_hall(room_mid, 19, room_mid, 21)
+                add_hall(room_mid, 21, room_mid, 23)
+        elif type_id == "home":
+            add_west_room(7, 18, 20, 25)
+            add_east_room(44, 18, 57, 25)
+            add_north_room(23, 6, 41, 12)
+            add_room(45, 7, 57, 13)
+            add_hall(33, 9, 45, 11)
+            if property_record:
+                upgrade_level = int(property_record.get("upgrade_level", 0))
+                add_room(6, 6, 19, 13)          # owner's bedroom / study
+                add_hall(19, 9, 31, 11)
+                if property_record.get("built") or upgrade_level >= 1:
+                    add_room(6, 14, 20, 17)      # finished kitchen annex
+                if property_record.get("household_moved") or upgrade_level >= 2:
+                    add_room(45, 14, 58, 16)     # family / child room
+                    add_hall(51, 16, 51, 18)
+                if upgrade_level >= 3:
+                    add_room(22, 2, 42, 4)       # deluxe loft / keepsake room
+                    add_hall(31, 4, 33, 6)
+                    add_room(45, 2, 58, 4)       # private sitting room
+                    add_hall(42, 3, 45, 3)
+        elif type_id == "general_store":
+            add_west_room(6, 17, 20, 25)
+            add_east_room(44, 17, 59, 25)
+            add_north_room(22, 6, 42, 12)
+            add_room(7, 7, 19, 13)
+            add_hall(19, 9, 31, 11)
+        elif type_id == "clinic":
+            add_west_room(6, 17, 20, 25)
+            add_east_room(44, 17, 58, 25)
+            add_north_room(23, 5, 41, 12)
+            add_room(45, 6, 58, 13)
+            add_hall(33, 9, 45, 11)
+        elif type_id == "library":
+            add_west_room(5, 16, 20, 25)
+            add_east_room(44, 16, 59, 25)
+            add_north_room(20, 4, 44, 12)
+            add_room(6, 5, 19, 13)
+            add_room(45, 5, 58, 13)
+            add_hall(19, 9, 31, 11)
+            add_hall(33, 9, 45, 11)
+        elif type_id in {"carpenter", "workshop"}:
+            add_west_room(5, 17, 20, 26)
+            add_east_room(44, 17, 59, 26)
+            add_north_room(22, 6, 42, 12)
+            add_room(7, 6, 20, 13)
+            add_hall(20, 9, 31, 11)
+        elif type_id == "town_hall":
+            add_west_room(6, 17, 20, 25)
+            add_east_room(44, 17, 58, 25)
+            add_north_room(20, 5, 44, 13)
+            add_room(6, 6, 19, 13)
+            add_room(45, 6, 58, 13)
+            add_hall(19, 9, 31, 11)
+            add_hall(33, 9, 45, 11)
+        else:
+            add_west_room()
+            add_east_room()
+            add_north_room()
+
+        def add_layout_variant_rooms() -> None:
+            """Add deterministic same-role variants without breaking the entry lane."""
+            if layout_variant == 1:
+                # West-heavy side suite: good for stockrooms, bedrooms, and offices.
+                add_room(3, 4, 18, 9)
+                add_hall(18, 6, 31, 8)
+                add_room(4, 13, 18, 17)
+                add_hall(18, 14, 31, 16)
+            elif layout_variant == 2:
+                # East-heavy side suite, mirroring the previous family.
+                add_room(46, 3, 60, 9)
+                add_hall(33, 6, 46, 8)
+                add_room(47, 13, 61, 17)
+                add_hall(40, 14, 47, 16)
+            elif layout_variant == 3:
+                # Deep civic/dungeon-like spine with a top gallery and staggered side rooms.
+                add_room(21, 2, 43, 5)
+                add_hall(31, 5, 33, 18)
+                add_room(4, 7, 17, 13)
+                add_hall(17, 10, 31, 12)
+                add_room(47, 8, 60, 14)
+                add_hall(33, 11, 47, 13)
+
+        add_layout_variant_rooms()
+
+        for x, y in floor_cells:
+            grid[y][x] = "."
+        for x, y in list(floor_cells):
+            for dy in (-1, 0, 1):
+                for dx in (-1, 0, 1):
+                    nx, ny = x + dx, y + dy
+                    if (
+                        0 <= nx < width
+                        and 0 <= ny < height
+                        and (nx, ny) not in floor_cells
+                        and grid[ny][nx] == " "
+                    ):
+                        grid[ny][nx] = "#"
+
+        grid[door_y][door_x] = "D"
+        grid[door_y - 1][door_x] = "."
+        approach_cells = {
+            (x, y)
+            for y in range(18, door_y)
+            for x in range(door_x - 1, door_x + 2)
+            if (x, y) in floor_cells
+        }
+        protected_cells = set(hall_cells) | approach_cells
+
+        def place(x: int, y: int, ch: str, *, allow_hall: bool = False, force: bool = False) -> None:
+            if (
+                1 <= x < width - 1
+                and 1 <= y < height - 1
+                and (grid[y][x] in {".", ","} or (force and grid[y][x] not in {" ", "#", "D"}))
+                and (allow_hall or (x, y) not in protected_cells)
+            ):
+                grid[y][x] = ch
+
+        def hline(
+            x1: int,
+            x2: int,
+            y: int,
+            ch: str,
+            *,
+            force: bool = False,
+            allow_hall: bool = False,
+        ) -> None:
+            for x in range(max(1, x1), min(width - 1, x2 + 1)):
+                place(x, y, ch, force=force, allow_hall=allow_hall)
+
+        def vline(
+            x: int,
+            y1: int,
+            y2: int,
+            ch: str,
+            *,
+            force: bool = False,
+            allow_hall: bool = False,
+        ) -> None:
+            for y in range(max(1, y1), min(height - 1, y2 + 1)):
+                place(x, y, ch, force=force, allow_hall=allow_hall)
+
+        def rug_rect(x1: int, y1: int, x2: int, y2: int) -> None:
+            for y in range(max(1, y1), min(height - 1, y2 + 1)):
+                for x in range(max(1, x1), min(width - 1, x2 + 1)):
+                    if grid[y][x] == "." and (x, y) not in protected_cells:
+                        grid[y][x] = ","
+
+        def table_setting(x: int, y: int) -> None:
+            place(x, y, "t")
+            place(x - 1, y, "c")
+            place(x + 1, y, "c")
+
+        def compact_bedroom(x1: int, y1: int, x2: int, y2: int, *, lamp: bool = True) -> None:
+            place(x1 + 1, y1 + 1, "b")
+            place(x1 + 2, y1 + 1, "b")
+            if lamp and x1 + 3 <= x2:
+                place(x1 + 3, y1 + 1, "l")
+
+        def service_counter(x: int, y: int, *, stock: bool = False) -> None:
+            # Put counters beside, not across, the main entry lane so shops read
+            # clearly while the player can still walk straight through.
+            hline(x - 2, x - 1, y, "-")
+            place(x, y, "&")
+            hline(x + 1, x + 2, y, "-")
+            if stock:
+                place(x - 3, y, "$")
+
+        if layout_variant == 1:
+            hline(7, 13, 6, "-")
+            hline(7, 15, 15, "-")
+        elif layout_variant == 2:
+            hline(49, 56, 6, "-")
+            hline(50, 58, 15, "-")
+        elif layout_variant == 3:
+            hline(24, 29, 3, "-")
+            hline(35, 40, 3, "-")
+            hline(7, 14, 10, "-")
+            hline(50, 57, 11, "-")
 
         identity = self.procedural_town_identity(plan)
         development_rank = self.procedural_town_development_rank(plan)
+        if type_id == "inn":
+            service_counter(28, 17, stock=True)
+            place(37, 17, "f")
+            place(39, 17, "s")
+            rug_rect(27, 22, 37, 25)
+            table_setting(28, 24)
+            table_setting(36, 24)
+            for room_x1, room_x2 in ((8, 11), (13, 16), (18, 21), (43, 46), (48, 51), (53, 56)):
+                compact_bedroom(room_x1, 17, room_x2, 19)
+                compact_bedroom(room_x1, 23, room_x2, 25)
+            if fixture_variant in {1, 3}:
+                place(25, 15, "P")
+            if fixture_variant in {2, 3}:
+                place(39, 15, "f")
+        elif type_id == "general_store":
+            service_counter(29, 18, stock=True)
+            rug_rect(27, 22, 37, 24)
+            hline(9, 16, 20, "$")
+            hline(49, 56, 20, "$")
+            hline(9, 16, 23, "s")
+            hline(49, 56, 23, "s")
+            hline(27, 37, 11, "s")
+            place(52, 11, "P")
+        elif type_id == "clinic":
+            service_counter(29, 18)
+            rug_rect(27, 22, 37, 24)
+            hline(9, 15, 20, "+")
+            hline(49, 55, 20, "+")
+            compact_bedroom(25, 7, 31, 10, lamp=False)
+            compact_bedroom(34, 7, 40, 10, lamp=False)
+            place(51, 10, "d")
+            place(54, 10, "s")
+        elif type_id == "library":
+            service_counter(29, 18)
+            rug_rect(27, 22, 37, 25)
+            hline(8, 17, 19, "l")
+            hline(48, 57, 19, "l")
+            hline(24, 40, 8, "l")
+            table_setting(28, 24)
+            table_setting(36, 24)
+            place(12, 23, "P")
+            place(52, 23, "P")
+        elif type_id in {"carpenter", "workshop"}:
+            service_counter(29, 18)
+            rug_rect(27, 22, 37, 24)
+            hline(8, 16, 20, "w")
+            hline(49, 57, 20, "a")
+            hline(25, 39, 9, "w")
+            place(14, 23, "x")
+            place(52, 23, "s")
+        elif type_id == "town_hall":
+            service_counter(29, 18)
+            rug_rect(26, 21, 38, 25)
+            hline(25, 39, 8, "P")
+            place(12, 9, "d")
+            place(52, 9, "d")
+            place(12, 22, "P")
+            place(52, 22, "s")
+            table_setting(32, 24)
+        elif type_id == "home" and not property_record:
+            rug_rect(27, 22, 37, 24)
+            place(29, 18, "&")
+            compact_bedroom(24, 7, 30, 10)
+            compact_bedroom(34, 7, 40, 10)
+            place(12, 21, "f")
+            place(14, 23, "s")
+            table_setting(32, 24)
+            place(52, 10, "P")
+        elif not (type_id == "home" and property_record):
+            service_counter(29, 18)
+            rug_rect(27, 22, 37, 24)
+            table_setting(32, 24)
+
         if development_rank >= 1:
             if type_id in {"general_store", "inn"}:
-                grid[7][7] = "$"
-                grid[7][width - 8] = "$"
+                place(25, 16, "$")
+                place(38, 16, "$")
             elif type_id == "clinic":
-                grid[10][7] = "+"
+                place(38, 16, "+")
             elif type_id == "library":
-                grid[15][door_x - 6] = "l"
-                grid[15][door_x + 6] = "l"
+                place(18, 23, "l")
+                place(45, 23, "l")
         if development_rank >= 2 and type_id in {"carpenter", "workshop"}:
-            grid[12][7] = "w"
-            grid[12][width - 8] = "a"
+            place(10, 23, "w")
+            place(53, 23, "a")
         if development_rank >= 3 and type_id == "town_hall":
-            grid[7][door_x - 8] = "d"
-            grid[7][door_x + 8] = "d"
+            place(12, 23, "d")
+            place(52, 23, "d")
         if community.get("story_completed") and type_id == "town_hall":
-            grid[7][door_x] = "f"
+            place(38, 16, "f")
         if business_record:
             upgrade_level = int(business_record.get("upgrade_level", 0))
+            if type_id == "inn":
+                upgrade_positions = ((25, 16), (38, 16), (25, 15))
+            elif type_id == "general_store":
+                upgrade_positions = ((28, 11), (36, 11), (52, 23))
+            else:
+                upgrade_positions = ((38, 24), (12, 23), (52, 23))
             if upgrade_level >= 1:
-                grid[15][7] = "$" if type_id in {"general_store", "inn"} else "s"
+                place(*upgrade_positions[0], "$" if type_id in {"general_store", "inn"} else "s")
             if upgrade_level >= 2:
-                grid[15][width - 8] = "s"
+                place(*upgrade_positions[1], "s")
             if upgrade_level >= 3:
-                grid[16][door_x] = "P"
-        decor_seed = stable_text_seed(
-            f"{plan.get('seed')}:{building.get('id')}:{identity.get('industry')}"
-        )
-        for offset in range(5):
-            x = 5 + (decor_seed + offset * 11) % (width - 10)
-            y = 6 + (decor_seed // (offset + 1) + offset * 7) % (height - 10)
-            if grid[y][x] == ".":
-                grid[y][x] = "p" if offset < 2 else ","
-        if type_id == "home":
+                place(*upgrade_positions[2], "P")
+        if floor_count > 1:
+            placed_stair = False
+            for stair_x, stair_y in ((36, 18), (28, 18), (36, 20), (28, 20), (32, 16)):
+                if 0 <= stair_y < len(grid) and 0 <= stair_x < len(grid[stair_y]) and grid[stair_y][stair_x] == ".":
+                    grid[stair_y][stair_x] = "<"
+                    placed_stair = True
+                    break
+            if not placed_stair:
+                place(36, 18, "<", allow_hall=True, force=True)
+        if not (type_id == "home" and property_record) and type_id != "inn":
+            decor_seed = stable_text_seed(
+                f"{plan.get('seed')}:{building.get('id')}:{identity.get('industry')}"
+            )
+            floor_list = sorted(floor_cells - protected_cells)
+            for offset in range(min(4, len(floor_list))):
+                x, y = floor_list[(decor_seed + offset * 17) % len(floor_list)]
+                if grid[y][x] == ".":
+                    grid[y][x] = "p" if offset < 2 else ","
+        if type_id == "home" and not property_record:
             population = self.procedural_settlement_population(
                 int(plan["chunk_x"]),
                 int(plan["chunk_y"]),
@@ -1450,30 +2413,13 @@ class ProceduralTownRuntimeMixin:
                 if str(resident.get("home_building_id", "")) == str(building.get("id"))
             ]
             for index, _resident in enumerate(household_members[:4]):
-                x = 7 + index * 8
-                grid[3][min(width - 4, x)] = "b"
+                x = 27 + index * 3
+                place(min(39, x), 7, "b")
             if any(
                 str(resident.get("age_group")) in {"Child", "Teen"}
                 for resident in household_members
             ):
-                grid[7][width - 8] = "P"
-            if property_record:
-                grid[14][7] = "b"
-                grid[14][11] = "c"
-                grid[14][15] = "P"
-                if property_record.get("built"):
-                    grid[13][7] = "p"
-                    grid[13][15] = "p"
-                upgrade_level = int(property_record.get("upgrade_level", 0))
-                if upgrade_level >= 1:
-                    grid[14][27] = "s"
-                    grid[14][31] = "c"
-                if upgrade_level >= 2:
-                    grid[16][19] = "t"
-                    grid[16][23] = "c"
-                if upgrade_level >= 3:
-                    grid[13][27] = "p"
-                    grid[13][31] = "f"
+                place(52, 10, "P")
 
         cache[cache_key] = grid
         return grid
@@ -1503,6 +2449,7 @@ class ProceduralTownRuntimeMixin:
             int(plan["chunk_y"]),
         )
         self.state.current_procedural_building_id = str(building["id"])
+        self.state.current_procedural_building_floor = 0
         self.state.procedural_settlement_return_x = int(building["access_x"])
         self.state.procedural_settlement_return_y = int(building["access_y"])
         self.state.location = PROCEDURAL_TOWN_INTERIOR_LOCATION
@@ -1541,6 +2488,7 @@ class ProceduralTownRuntimeMixin:
         )
         self.state.facing = "DOWN"
         self.state.current_procedural_building_id = ""
+        self.state.current_procedural_building_floor = 0
         self.set_message(
             f"You stepped outside {building.get('name', 'the building') if building else 'the building'}."
         )
@@ -1649,6 +2597,17 @@ class ProceduralTownRuntimeMixin:
                 None,
             )
             if isinstance(building, dict):
+                if (
+                    str(building.get("type_id", "")) == "home"
+                    and hasattr(self, "player_property_for_building")
+                    and self.player_property_for_building(plan, building)
+                ):
+                    return (
+                        "outdoor",
+                        int(building.get("access_x", 1)),
+                        int(building.get("access_y", 1)),
+                        str(event.get("activity", "passing by a private residence")),
+                    )
                 if str(building.get("type_id")) in PROCEDURAL_TOWN_OPEN_BUILDINGS:
                     return (
                         "outdoor",
@@ -1673,6 +2632,17 @@ class ProceduralTownRuntimeMixin:
             building = plan.get("buildings", {}).get(building_id)
             type_id = str(building.get("type_id", "")) if isinstance(building, dict) else ""
             if isinstance(building, dict) and type_id not in PROCEDURAL_TOWN_OPEN_BUILDINGS:
+                if (
+                    type_id == "home"
+                    and hasattr(self, "player_property_for_building")
+                    and self.player_property_for_building(plan, building)
+                ):
+                    return (
+                        "outdoor",
+                        int(building.get("access_x", entry.get("x", 1))),
+                        int(building.get("access_y", entry.get("y", 1))),
+                        "passing by the private residence",
+                    )
                 return f"building:{building_id}", -1, -1, activity
             if isinstance(building, dict):
                 return (
@@ -1688,12 +2658,347 @@ class ProceduralTownRuntimeMixin:
             activity,
         )
 
-    def procedural_town_interior_resident_candidates(self) -> List[Position]:
+    def procedural_town_default_interior_resident_candidates(self) -> List[Position]:
         return [
-            (9, 9), (14, 9), (27, 9), (32, 9),
-            (9, 14), (14, 14), (27, 14), (32, 14),
-            (19, 8), (23, 8), (19, 14), (23, 14),
+            (27, 21), (29, 22), (37, 22), (39, 24),
+            (27, 24), (37, 24), (14, 21), (50, 21),
+            (14, 23), (50, 23), (28, 9), (36, 9),
+            (12, 10), (52, 10), (28, 12), (36, 12),
         ]
+
+    def procedural_town_zone_kind_preferences(
+        self,
+        resident: Dict[str, object],
+        building: Dict[str, object],
+        phase: str,
+    ) -> List[str]:
+        role = str(resident.get("role", "Settler"))
+        type_id = str(building.get("type_id", ""))
+        building_id = str(building.get("id", ""))
+        if (
+            str(phase) in {"wake", "late"}
+            and str(resident.get("home_building_id", "")) == building_id
+            and type_id in {"home", "inn"}
+        ):
+            return ["bedroom", "dining", "kitchen", "public_hall"]
+        role_zones = {
+            "Mayor": ["office", "public_hall"],
+            "Clerk": ["office", "public_hall"],
+            "Shopkeeper": ["shopping_counter", "stockroom", "storage"],
+            "Stockkeeper": ["stockroom", "storage", "shopping_counter"],
+            "Carpenter": ["workshop", "office", "storage"],
+            "Carpenter Apprentice": ["workshop", "storage"],
+            "Doctor": ["clinic_ward", "office", "storage"],
+            "Nurse": ["clinic_ward", "storage"],
+            "Librarian": ["library_stacks", "office", "public_hall"],
+            "Archivist": ["library_stacks", "office", "storage"],
+            "Innkeeper": ["shopping_counter", "dining", "office"],
+            "Cook": ["kitchen", "dining", "storage"],
+            "Merchant": ["shopping_counter", "stockroom", "storage"],
+            "Mechanic": ["workshop", "storage"],
+            "Artisan": ["workshop", "storage"],
+            "Student": ["library_stacks", "public_hall", "dining"],
+            "Retiree": ["dining", "public_hall", "bedroom"],
+        }
+        type_zones = {
+            "home": ["bedroom", "kitchen", "dining"],
+            "inn": ["shopping_counter", "kitchen", "dining", "bedroom"],
+            "general_store": ["shopping_counter", "stockroom", "storage"],
+            "clinic": ["clinic_ward", "office", "storage"],
+            "library": ["library_stacks", "office", "public_hall"],
+            "carpenter": ["workshop", "office", "storage"],
+            "workshop": ["workshop", "storage", "office"],
+            "town_hall": ["office", "public_hall", "storage"],
+        }
+        return list(dict.fromkeys(
+            role_zones.get(role, [])
+            + type_zones.get(type_id, [])
+            + ["public_hall", "dining", "storage"]
+        ))
+
+    def procedural_town_zone_rect_candidates(
+        self,
+        grid: List[List[str]],
+        zone: Dict[str, object],
+    ) -> List[Position]:
+        x1 = int(zone.get("x1", 0))
+        y1 = int(zone.get("y1", 0))
+        x2 = int(zone.get("x2", x1))
+        y2 = int(zone.get("y2", y1))
+        left, right = sorted((x1, x2))
+        top, bottom = sorted((y1, y2))
+        center_x = (left + right) // 2
+        center_y = (top + bottom) // 2
+        candidates: List[Position] = []
+        for y in range(max(0, top), min(len(grid), bottom + 1)):
+            for x in range(max(0, left), min(len(grid[y]), right + 1)):
+                if self.procedural_town_interior_tile_passable(grid[y][x]):
+                    candidates.append((x, y))
+        if not candidates:
+            for y in range(max(0, top - 1), min(len(grid), bottom + 2)):
+                for x in range(max(0, left - 1), min(len(grid[y]), right + 2)):
+                    if self.procedural_town_interior_tile_passable(grid[y][x]):
+                        candidates.append((x, y))
+        candidates = list(dict.fromkeys(candidates))
+        candidates.sort(key=lambda pos: (abs(pos[0] - center_x) + abs(pos[1] - center_y), pos[1], pos[0]))
+        return candidates
+
+    def procedural_town_template_zone_anchors(
+        self,
+        plan: Dict[str, object],
+        building: Dict[str, object],
+        zone_kinds: List[str],
+    ) -> List[Position]:
+        type_id = str(building.get("type_id", ""))
+        property_record = (
+            self.player_property_for_building(plan, building)
+            if hasattr(self, "player_property_for_building") and type_id == "home"
+            else None
+        )
+        template = self.procedural_town_custom_building_template(plan, building, property_record)
+        if not template:
+            return []
+        grid = self.procedural_town_interior_map(building)
+        current_floor = self.current_procedural_building_floor(plan, building)
+        anchors: List[Position] = []
+        for kind in zone_kinds:
+            for zone in template.get("zones", []) or []:
+                if not isinstance(zone, dict) or str(zone.get("kind")) != str(kind):
+                    continue
+                if int(zone.get("floor", 0) or 0) != current_floor:
+                    continue
+                candidates = self.procedural_town_zone_rect_candidates(grid, zone)
+                if not candidates:
+                    continue
+                limit = 1 if kind in {
+                    "bedroom", "shopping_counter", "kitchen", "clinic_ward",
+                    "library_stacks", "workshop", "office",
+                } else 4
+                anchors.extend(candidates[:limit])
+        return list(dict.fromkeys(anchors))
+
+    def procedural_town_template_spawn_anchors(
+        self,
+        plan: Dict[str, object],
+        building: Dict[str, object],
+    ) -> List[Position]:
+        type_id = str(building.get("type_id", ""))
+        property_record = (
+            self.player_property_for_building(plan, building)
+            if hasattr(self, "player_property_for_building") and type_id == "home"
+            else None
+        )
+        template = self.procedural_town_custom_building_template(plan, building, property_record)
+        if not template:
+            return []
+        grid = self.procedural_town_interior_map(building)
+        current_floor = self.current_procedural_building_floor(plan, building)
+        anchors: List[Position] = []
+        for spawn in template.get("spawns", []) or []:
+            if not isinstance(spawn, dict):
+                continue
+            if int(spawn.get("floor", 0) or 0) != current_floor:
+                continue
+            x = int(spawn.get("x", 0) or 0)
+            y = int(spawn.get("y", 0) or 0)
+            if not (0 <= y < len(grid) and 0 <= x < len(grid[y])):
+                continue
+            if self.procedural_town_interior_tile_passable(grid[y][x]):
+                anchors.append((x, y))
+                continue
+            nearby: List[Position] = []
+            for radius in (1, 2, 3):
+                for ny in range(max(0, y - radius), min(len(grid), y + radius + 1)):
+                    for nx in range(max(0, x - radius), min(len(grid[ny]), x + radius + 1)):
+                        if self.procedural_town_interior_tile_passable(grid[ny][nx]):
+                            nearby.append((nx, ny))
+                if nearby:
+                    break
+            if nearby:
+                nearby = list(dict.fromkeys(nearby))
+                nearby.sort(key=lambda pos: (abs(pos[0] - x) + abs(pos[1] - y), pos[1], pos[0]))
+                anchors.append(nearby[0])
+        return list(dict.fromkeys(anchors))
+
+    def procedural_town_custom_tile_color_key(
+        self,
+        x: int,
+        y: int,
+        floor: Optional[int] = None,
+    ) -> str:
+        plan = self.current_procedural_town_plan()
+        building = self.current_procedural_town_building()
+        if not plan or not building:
+            return ""
+        type_id = str(building.get("type_id", ""))
+        property_record = (
+            self.player_property_for_building(plan, building)
+            if hasattr(self, "player_property_for_building") and type_id == "home"
+            else None
+        )
+        template = self.procedural_town_custom_building_template(plan, building, property_record)
+        if not template:
+            return ""
+        floor_index = (
+            self.current_procedural_building_floor(plan, building)
+            if floor is None
+            else int(floor)
+        )
+        for color in template.get("colors", []) or []:
+            if not isinstance(color, dict):
+                continue
+            if (
+                int(color.get("floor", 0) or 0) == int(floor_index)
+                and int(color.get("x", 0) or 0) == int(x)
+                and int(color.get("y", 0) or 0) == int(y)
+            ):
+                return str(color.get("color", ""))
+        return ""
+
+    def procedural_town_resident_preferred_interior_floor(
+        self,
+        plan: Dict[str, object],
+        building: Dict[str, object],
+        resident: Dict[str, object],
+        phase: str,
+        floor_count: int,
+        fallback_index: int,
+    ) -> int:
+        if floor_count <= 1:
+            return 0
+        zone_kinds = self.procedural_town_zone_kind_preferences(resident, building, phase)
+        type_id = str(building.get("type_id", ""))
+        property_record = (
+            self.player_property_for_building(plan, building)
+            if hasattr(self, "player_property_for_building") and type_id == "home"
+            else None
+        )
+        template = self.procedural_town_custom_building_template(plan, building, property_record)
+        possible_floors: List[int] = []
+        if template:
+            for spawn in template.get("spawns", []) or []:
+                if not isinstance(spawn, dict):
+                    continue
+                possible_floors.append(max(0, min(floor_count - 1, int(spawn.get("floor", 0) or 0))))
+            for kind in zone_kinds:
+                for zone in template.get("zones", []) or []:
+                    if not isinstance(zone, dict) or str(zone.get("kind")) != str(kind):
+                        continue
+                    possible_floors.append(max(0, min(floor_count - 1, int(zone.get("floor", 0) or 0))))
+        if possible_floors:
+            possible_floors = list(dict.fromkeys(possible_floors))
+            seed = stable_text_seed(f"{resident.get('id')}:{phase}:floor")
+            return possible_floors[seed % len(possible_floors)]
+        if type_id == "inn" and str(phase) in {"wake", "late"}:
+            return 1 if floor_count > 1 else 0
+        if type_id in {"library", "town_hall"} and str(resident.get("role", "")) in {"Archivist", "Mayor", "Clerk"}:
+            return 1 if floor_count > 1 else 0
+        return max(0, min(floor_count - 1, int(fallback_index) % floor_count))
+
+    def procedural_town_tile_cluster_anchors(
+        self,
+        grid: List[List[str]],
+        symbols: Set[str],
+    ) -> List[Position]:
+        seen: Set[Position] = set()
+        anchors: List[Position] = []
+        for y, row in enumerate(grid):
+            for x, ch in enumerate(row):
+                if ch not in symbols or (x, y) in seen:
+                    continue
+                cluster: List[Position] = []
+                queue = deque([(x, y)])
+                seen.add((x, y))
+                while queue:
+                    cx, cy = queue.popleft()
+                    cluster.append((cx, cy))
+                    for nx, ny in ((cx + 1, cy), (cx - 1, cy), (cx, cy + 1), (cx, cy - 1)):
+                        if (
+                            0 <= ny < len(grid)
+                            and 0 <= nx < len(grid[ny])
+                            and (nx, ny) not in seen
+                            and grid[ny][nx] in symbols
+                        ):
+                            seen.add((nx, ny))
+                            queue.append((nx, ny))
+                passable_neighbors = []
+                for cx, cy in cluster:
+                    for nx, ny in ((cx + 1, cy), (cx - 1, cy), (cx, cy + 1), (cx, cy - 1)):
+                        if (
+                            0 <= ny < len(grid)
+                            and 0 <= nx < len(grid[ny])
+                            and self.procedural_town_interior_tile_passable(grid[ny][nx])
+                        ):
+                            passable_neighbors.append((nx, ny))
+                if passable_neighbors:
+                    center_x = sum(pos[0] for pos in cluster) // max(1, len(cluster))
+                    center_y = sum(pos[1] for pos in cluster) // max(1, len(cluster))
+                    passable_neighbors = list(dict.fromkeys(passable_neighbors))
+                    passable_neighbors.sort(
+                        key=lambda pos: (abs(pos[0] - center_x) + abs(pos[1] - center_y), pos[1], pos[0])
+                    )
+                    anchors.append(passable_neighbors[0])
+        return list(dict.fromkeys(anchors))
+
+    def procedural_town_inferred_zone_anchors(
+        self,
+        building: Dict[str, object],
+        zone_kinds: List[str],
+    ) -> List[Position]:
+        grid = self.procedural_town_interior_map(building)
+        symbol_map: Dict[str, Set[str]] = {
+            "bedroom": {"b", "B"},
+            "kitchen": {"f"},
+            "shopping_counter": {"&"},
+            "stockroom": {"s", "$"},
+            "storage": {"s", "$"},
+            "clinic_ward": {"+", "b"},
+            "library_stacks": {"l"},
+            "workshop": {"w", "a", "x"},
+            "office": {"d", "P"},
+            "dining": {"t", "c"},
+            "public_hall": {"P", "t"},
+        }
+        anchors: List[Position] = []
+        for kind in zone_kinds:
+            symbols = symbol_map.get(kind, set())
+            if symbols:
+                anchors.extend(self.procedural_town_tile_cluster_anchors(grid, symbols))
+        return list(dict.fromkeys(anchors))
+
+    def procedural_town_interior_resident_candidates_for(
+        self,
+        plan: Dict[str, object],
+        building: Dict[str, object],
+        resident: Dict[str, object],
+        phase: str,
+    ) -> List[Position]:
+        zone_kinds = self.procedural_town_zone_kind_preferences(resident, building, phase)
+        candidates = (
+            self.procedural_town_template_spawn_anchors(plan, building)
+            + self.procedural_town_template_zone_anchors(plan, building, zone_kinds)
+            + self.procedural_town_inferred_zone_anchors(building, zone_kinds)
+            + self.procedural_town_default_interior_resident_candidates()
+        )
+        return list(dict.fromkeys(candidates))
+
+    def procedural_town_interior_resident_candidates(self) -> List[Position]:
+        building = self.current_procedural_town_building()
+        plan = self.current_procedural_town_plan()
+        if not building or not plan:
+            return self.procedural_town_default_interior_resident_candidates()
+        return list(dict.fromkeys(
+            self.procedural_town_template_spawn_anchors(plan, building)
+            + self.procedural_town_inferred_zone_anchors(
+                building,
+                [
+                    "shopping_counter", "bedroom", "kitchen", "dining",
+                    "office", "clinic_ward", "library_stacks", "workshop",
+                    "public_hall", "storage",
+                ],
+            )
+            + self.procedural_town_default_interior_resident_candidates()
+        ))
 
     def procedural_town_runtime_tile_passable(
         self,
@@ -1714,10 +3019,7 @@ class ProceduralTownRuntimeMixin:
             grid = self.procedural_town_interior_map()
             if not (0 <= y < len(grid) and 0 <= x < len(grid[y])):
                 return False
-            return grid[y][x] not in {
-                "#", "-", "D", "&", "$", "+", "l", "w", "x", "a",
-                "b", "t", "c", "s", "f", "P", "d", "p",
-            }
+            return self.procedural_town_interior_tile_passable(grid[y][x])
         return self.procedural_town_map_tile_passable(x, y, plan)
 
     def ensure_procedural_town_resident_runtime(
@@ -1744,6 +3046,11 @@ class ProceduralTownRuntimeMixin:
         interior = self.on_procedural_town_interior()
         current_building = self.current_procedural_town_building() if interior else None
         current_building_id = str(current_building.get("id", "")) if current_building else ""
+        current_floor = (
+            self.current_procedural_building_floor(plan, current_building)
+            if interior and current_building
+            else 0
+        )
         event_signature = (
             str(event.get("phase", "")),
             str(event.get("building_type", "")),
@@ -1761,6 +3068,7 @@ class ProceduralTownRuntimeMixin:
             weather,
             bool(interior),
             current_building_id,
+            current_floor,
             event_signature,
             resident_ids,
         )
@@ -1806,18 +3114,54 @@ class ProceduralTownRuntimeMixin:
             if interior:
                 if location != f"building:{current_building_id}":
                     continue
-                candidates = self.procedural_town_interior_resident_candidates()
-                preferred = candidates[
-                    stable_text_seed(resident.get("id", "")) % len(candidates)
-                ]
-                if changed or not self.procedural_town_runtime_tile_passable(
+                property_record = (
+                    self.player_property_for_building(plan, current_building)
+                    if hasattr(self, "player_property_for_building")
+                    and str(current_building.get("type_id")) == "home"
+                    else None
+                )
+                template = self.procedural_town_custom_building_template(plan, current_building, property_record)
+                floor_count = self.procedural_town_building_floor_count(
+                    plan,
+                    current_building,
+                    template,
+                    property_record,
+                )
+                resident_floor = self.procedural_town_resident_preferred_interior_floor(
+                    plan,
+                    current_building,
+                    resident,
+                    phase,
+                    floor_count,
+                    indoor_index,
+                )
+                try:
+                    floor_changed = int(resident.get("runtime_floor", -1)) != int(resident_floor)
+                except Exception:
+                    floor_changed = True
+                resident["runtime_floor"] = resident_floor
+                if resident_floor != current_floor:
+                    indoor_index += 1
+                    continue
+                candidates = self.procedural_town_interior_resident_candidates_for(
+                    plan,
+                    current_building,
+                    resident,
+                    phase,
+                )
+                if not candidates:
+                    candidates = self.procedural_town_default_interior_resident_candidates()
+                start_index = indoor_index % len(candidates)
+                preferred = candidates[start_index]
+                resident["runtime_target_x"], resident["runtime_target_y"] = preferred
+                if changed or floor_changed or not self.procedural_town_runtime_tile_passable(
                     int(resident.get("runtime_x", -1)),
                     int(resident.get("runtime_y", -1)),
                     occupied,
                     plan,
                     interior=True,
                 ):
-                    ordered = candidates[indoor_index:] + candidates[:indoor_index]
+                    ordered = candidates[start_index:] + candidates[:start_index]
                     position = next(
                         (
                             candidate
@@ -1892,12 +3236,21 @@ class ProceduralTownRuntimeMixin:
         visible_location = (
             f"building:{current_building.get('id')}" if current_building else "outdoor"
         )
+        current_floor = (
+            self.current_procedural_building_floor(plan, current_building)
+            if interior and current_building
+            else 0
+        )
         residents = [
             resident
             for resident in population.get("residents", {}).values()
             if (
                 not bool(resident.get("deceased", False))
                 and str(resident.get("runtime_location", "")) == visible_location
+                and (
+                    not interior
+                    or int(resident.get("runtime_floor", 0) or 0) == current_floor
+                )
             )
         ]
         occupied: Set[Position] = {
@@ -1937,8 +3290,9 @@ class ProceduralTownRuntimeMixin:
             rotation = stable_text_seed(f"{resident.get('id')}:{tick}:direction") % 4
             options = options[rotation:] + options[:rotation]
             if interior:
-                target_x, target_y = 21, 10
-                radius = 14
+                target_x = int(resident.get("runtime_target_x", 21))
+                target_y = int(resident.get("runtime_target_y", 10))
+                radius = 5
             else:
                 _location, target_x, target_y, _activity = (
                     self.procedural_town_resident_runtime_destination(
@@ -2000,8 +3354,10 @@ class ProceduralTownRuntimeMixin:
             visible_location = (
                 f"building:{building.get('id')}" if building else ""
             )
+            current_floor = self.current_procedural_building_floor(plan, building) if building else 0
         else:
             visible_location = "outdoor"
+            current_floor = 0
         deceased_ids = set(
             getattr(self.state, "deceased_spouse_npc_ids", []) or []
         )
@@ -2019,6 +3375,11 @@ class ProceduralTownRuntimeMixin:
                 continue
             if str(resident.get("runtime_location", "")) != visible_location:
                 continue
+            if (
+                self.on_procedural_town_interior()
+                and int(resident.get("runtime_floor", 0) or 0) != current_floor
+            ):
+                continue
             position = (
                 int(resident.get("runtime_x", -1)),
                 int(resident.get("runtime_y", -1)),
@@ -2031,6 +3392,7 @@ class ProceduralTownRuntimeMixin:
             self.on_procedural_town_interior()
             and building
             and hasattr(self, "procedural_town_household_members")
+            and current_floor == 0
         ):
             household_members = self.procedural_town_household_members(
                 plan,
@@ -3625,7 +4987,9 @@ class ProceduralTownRuntimeMixin:
             if hasattr(self, "player_property_for_building")
             else None
         )
-        return [
+        if property_record:
+            residents = []
+        lines = [
             str(building.get("name", "Settlement Home")).upper(),
             "",
             f"Residents: {', '.join(residents) if residents else 'Unoccupied'}",
@@ -3652,9 +5016,41 @@ class ProceduralTownRuntimeMixin:
                 else "Player household: elsewhere"
             ),
             "",
-            "This is a private household rather than a public service.",
-            "Residents can still be met here when their daily schedule brings them home.",
         ]
+        if property_record:
+            lines.extend([
+                "This is your private town residence.",
+                "Former occupants have relocated, and the interior now uses movable player furniture.",
+            ])
+        else:
+            lines.extend([
+                "This is a private household rather than a public service.",
+                "Residents can still be met here when their daily schedule brings them home.",
+            ])
+        if property_record:
+            upgrade_level = int(property_record.get("upgrade_level", 0))
+            kitchen_ready = (
+                self.procedural_residence_has_kitchen(property_record)
+                if hasattr(self, "procedural_residence_has_kitchen")
+                else bool(property_record.get("built")) or upgrade_level >= 1
+            )
+            if hasattr(self, "procedural_residence_has_furnishing"):
+                kitchen_ready = kitchen_ready or self.procedural_residence_has_furnishing(
+                    property_record,
+                    "Kitchen Counter",
+                )
+            lines.extend([
+                "",
+                "Amenities:",
+                f"- Comfort rating: {int(property_record.get('comfort', 0))}/10",
+                f"- Sleep bonus: +{self.procedural_residence_sleep_bonus() if getattr(self.state, 'primary_residence_id', '') == property_record.get('id') else 0} stamina if used as primary",
+                "- Bedroom suite: ready",
+                f"- Kitchen: {'ready' if kitchen_ready else 'needs annex or first upgrade'}",
+                f"- Family room: {'ready' if property_record.get('household_moved') or upgrade_level >= 2 else 'basic'}",
+                f"- Keepsake loft: {'ready' if upgrade_level >= 3 else 'locked behind final upgrade'}",
+                f"- Movable furniture tier: {int(property_record.get('furnishings_level', -1)) + 1}/4",
+            ])
+        return lines
 
     def procedural_town_hall_menu(self) -> None:
         plan = self.current_procedural_town_plan()
@@ -4273,14 +5669,96 @@ class ProceduralTownRuntimeMixin:
             else:
                 self.procedural_town_resident_menu(resident)
             return
+        building = self.current_procedural_town_building()
+        plan = self.current_procedural_town_plan()
+        property_record = (
+            self.player_property_for_building(plan, building)
+            if plan
+            and building
+            and str(building.get("type_id", "")) == "home"
+            and hasattr(self, "player_property_for_building")
+            else None
+        )
+        if property_record:
+            placed = self.get_placed_object(x, y) if self.in_active_bounds(x, y) else None
+            if placed:
+                if placed == "Bed":
+                    if self.can_sleep_at_primary_town_residence():
+                        self.sleep()
+                    else:
+                        self.set_message(
+                            "A proper town-home bed. Make this your primary residence if you want to sleep here."
+                        )
+                    return
+                if placed == "Writing Desk":
+                    if hasattr(self, "procedural_town_residence_menu") and building:
+                        self.procedural_town_residence_menu(building)
+                    else:
+                        self.use_house_furniture(placed)
+                    return
+                self.use_house_furniture(placed)
+                return
         tile = self.procedural_town_interior_map()[y][x]
         if tile == "D":
             self.exit_procedural_town_building()
             return
-        building = self.current_procedural_town_building()
+        if tile == "_":
+            interior = self.procedural_town_interior_map()
+            if 0 <= y < len(interior) and 0 <= x < len(interior[y]):
+                interior[y][x] = "|"
+            self.set_message("Opened the room door.")
+            return
+        if tile == "|":
+            if (int(getattr(self.state, "player_x", -1)), int(getattr(self.state, "player_y", -1))) == (x, y):
+                self.set_message("You are standing in the doorway.")
+                return
+            interior = self.procedural_town_interior_map()
+            if 0 <= y < len(interior) and 0 <= x < len(interior[y]):
+                interior[y][x] = "_"
+            self.set_message("Closed the room door.")
+            return
+        if tile in {"<", "U"}:
+            self.change_procedural_town_building_floor(1)
+            return
+        if tile == ">":
+            self.change_procedural_town_building_floor(-1)
+            return
         if tile == "&" and building:
             self.procedural_town_building_service(building)
             return
+        if property_record:
+            if tile == "b":
+                if self.can_sleep_at_primary_town_residence():
+                    self.sleep()
+                else:
+                    self.set_message("A proper town-home bed. Make this your primary residence if you want to sleep here.")
+                return
+            if tile == "f":
+                if (
+                    hasattr(self, "procedural_residence_has_kitchen")
+                    and self.procedural_residence_has_kitchen(property_record)
+                ):
+                    self.safe_menu(self.show_cooking_menu, "Cooking closed.")
+                else:
+                    self.set_message("A simple hearth. Build the annex or upgrade the residence to finish the kitchen.")
+                return
+            if tile == "P":
+                lines = self.procedural_town_home_lines(building)
+                self.vertical_panel_view("Town Residence", lines, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
+                self.set_message("Checked the residence notes.")
+                return
+            if tile == "s":
+                self.set_message("Residence storage: linens, pantry goods, tools, and travel supplies are neatly sorted.")
+                return
+            if tile == "t":
+                self.set_message("A household table with enough room for meals, letters, and planning the next trip.")
+                return
+            if tile == "c":
+                self.set_message("A comfortable seat that makes this town residence feel lived in.")
+                return
+            if tile == "p":
+                self.set_message("A personal touch from the household, brightening the town home.")
+                return
         if tile == "d" and building and str(building.get("type_id")) == "town_hall":
             current_plan = self.current_procedural_town_plan()
             if not current_plan:
@@ -4298,24 +5776,6 @@ class ProceduralTownRuntimeMixin:
             self.set_message(
                 "A permanent display commemorates the local concern the town overcame."
             )
-            return
-        if tile == "$":
-            self.set_message("Shelves hold the town's limited daily stock and regional goods.")
-            return
-        if tile == "+":
-            self.set_message("Remedies are labeled by use, season, and the person who prepared them.")
-            return
-        if tile == "l":
-            self.set_message("Local records mix family histories with practical wilderness notes.")
-            return
-        if tile == "p":
-            self.set_message("A carefully tended planter reflects the town's local style.")
-            return
-        if tile == ",":
-            self.set_message("A woven rug softens the hard-used floor.")
-            return
-        if tile in {"b", "t", "c", "s", "l", "$", "w", "a", "x", "+", "P", "d", "f"}:
-            self.set_message("A carefully maintained part of the settlement building.")
             return
         self.set_message("Nothing here needs your attention.")
 

@@ -12,6 +12,7 @@ import random
 import re
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
+from ascii_farmstead_custom_extended import custom_building_template_records
 from ascii_farmstead_town_builder import (
     SETTLEMENT_BUILDING_CATALOG,
     settlement_chunk_key,
@@ -245,6 +246,53 @@ def stable_text_seed(text: object) -> int:
         total ^= ord(char)
         total = (total * 16777619) & 0xFFFFFFFF
     return total
+
+
+def procedural_custom_building_template(
+    plan: Dict[str, object],
+    building: Dict[str, object],
+    enabled_only: bool = True,
+) -> Optional[Dict[str, object]]:
+    type_id = str(building.get("type_id", ""))
+    if not type_id:
+        return None
+    templates = custom_building_template_records(type_id, enabled_only=enabled_only)
+    if not templates:
+        return None
+    same_type_ids = sorted(
+        str(candidate.get("id", ""))
+        for candidate in plan.get("buildings", {}).values()
+        if isinstance(candidate, dict)
+        and str(candidate.get("type_id", "")) == type_id
+    )
+    try:
+        same_type_index = same_type_ids.index(str(building.get("id", "")))
+    except ValueError:
+        same_type_index = 0
+    template_seed = stable_text_seed(
+        f"{plan.get('seed')}:{building.get('id')}:{type_id}:custom-building-template"
+    )
+    return templates[(template_seed + same_type_index) % len(templates)]
+
+
+def procedural_building_capacity(
+    plan: Dict[str, object],
+    building: Dict[str, object],
+) -> int:
+    catalog = SETTLEMENT_BUILDING_CATALOG.get(str(building.get("type_id")), {})
+    capacity = int(catalog.get("capacity", 0))
+    template = procedural_custom_building_template(plan, building)
+    if template is not None:
+        capacity = int(template.get("max_occupancy", capacity))
+        if str(building.get("type_id")) == "inn" and capacity > 0:
+            bedroom_zones = [
+                zone
+                for zone in template.get("zones", []) or []
+                if isinstance(zone, dict) and str(zone.get("kind")) == "bedroom"
+            ]
+            if bedroom_zones:
+                capacity = min(capacity, len(bedroom_zones))
+    return max(0, min(24, capacity))
 
 
 def procedural_completed_buildings(plan: Dict[str, object]) -> List[Dict[str, object]]:
@@ -669,8 +717,7 @@ class ProceduralNpcBuilder:
     def residence_buildings(self, plan: Dict[str, object]) -> List[Dict[str, object]]:
         residences = []
         for building in procedural_completed_buildings(plan):
-            catalog = SETTLEMENT_BUILDING_CATALOG.get(str(building.get("type_id")), {})
-            if int(catalog.get("capacity", 0)) > 0:
+            if procedural_building_capacity(plan, building) > 0:
                 residences.append(building)
         return sorted(residences, key=lambda row: (int(row.get("priority", 0)), str(row.get("id", ""))))
 
@@ -1044,8 +1091,7 @@ class ProceduralNpcBuilder:
         household_capacity: Dict[str, int] = {}
         for home in residences:
             home_id = str(home["id"])
-            catalog = SETTLEMENT_BUILDING_CATALOG.get(str(home.get("type_id")), {})
-            capacity = max(1, int(catalog.get("capacity", 1)))
+            capacity = max(1, procedural_building_capacity(plan, home))
             household_id = f"household:{key}:{procedural_slug(home_id)}"
             surname = self.household_surname(plan, home_id)
             population["households"][household_id] = {
@@ -1324,8 +1370,7 @@ class ProceduralNpcBuilder:
             if home_id not in buildings:
                 errors.append(f"Household {household_id} references unavailable housing.")
                 continue
-            catalog = SETTLEMENT_BUILDING_CATALOG.get(str(buildings[home_id].get("type_id")), {})
-            capacity = int(catalog.get("capacity", 0))
+            capacity = int(household.get("capacity", procedural_building_capacity(plan, buildings[home_id])))
             member_ids = list(household.get("member_ids", []) or [])
             if len(member_ids) > capacity:
                 errors.append(f"Household {household.get('name')} exceeds housing capacity.")
@@ -1603,7 +1648,9 @@ __all__ = [
     "PROCEDURAL_SEXES",
     "ProceduralNpcBuilder",
     "ProceduralNpcBuilderMixin",
+    "procedural_building_capacity",
     "procedural_completed_buildings",
+    "procedural_custom_building_template",
     "procedural_population_key",
     "sanitize_procedural_request",
     "sanitize_procedural_settlement_populations",

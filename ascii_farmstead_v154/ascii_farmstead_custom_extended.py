@@ -20,6 +20,96 @@ EQUIPMENT_SLOTS = ("weapon", "armor", "charm")
 MAP_THEMES = ("Meadow", "Ruins", "River", "Fortress", "Cavern", "Wild")
 DUNGEON_ROOM_THEMES = ("Any", "overgrown", "root", "sunken", "crystal", "quarry")
 DUNGEON_ROOM_PATTERNS = ("Open", "Pillars", "Crossroads", "Pools", "Ruined Ring", "Split Hall")
+BUILDING_TEMPLATE_TYPES = (
+    "home",
+    "general_store",
+    "inn",
+    "clinic",
+    "library",
+    "carpenter",
+    "workshop",
+    "town_hall",
+)
+BUILDING_TEMPLATE_TYPE_LABELS = {
+    "home": "Home",
+    "general_store": "General Store",
+    "inn": "Inn",
+    "clinic": "Clinic",
+    "library": "Library",
+    "carpenter": "Carpenter",
+    "workshop": "Workshop",
+    "town_hall": "Town Hall",
+}
+BUILDING_TEMPLATE_ZONE_KINDS = (
+    "bedroom",
+    "kitchen",
+    "shopping_counter",
+    "stockroom",
+    "clinic_ward",
+    "library_stacks",
+    "workshop",
+    "office",
+    "dining",
+    "storage",
+    "public_hall",
+)
+BUILDING_TEMPLATE_ZONE_LABELS = {
+    "bedroom": "Bedroom",
+    "kitchen": "Kitchen",
+    "shopping_counter": "Shopping Counter",
+    "stockroom": "Stockroom",
+    "clinic_ward": "Clinic Ward",
+    "library_stacks": "Library Stacks",
+    "workshop": "Workshop",
+    "office": "Office",
+    "dining": "Dining/Common Room",
+    "storage": "Storage",
+    "public_hall": "Public Hall",
+}
+BUILDING_TEMPLATE_WIDTH = 64
+BUILDING_TEMPLATE_HEIGHT = 28
+BUILDING_TEMPLATE_MAX_FLOORS = 4
+BUILDING_TEMPLATE_ALLOWED_TILES = {
+    " ", "#", "-", ".", ",", "D", "&", "$", "+", "l", "w", "x",
+    "a", "b", "t", "c", "s", "f", "P", "d", "p", "<", "U", ">",
+    "|", "_",
+}
+BUILDING_TEMPLATE_COLOR_KEYS = (
+    "default",
+    "white",
+    "brown",
+    "red",
+    "orange",
+    "yellow",
+    "green",
+    "blue",
+    "purple",
+    "gray",
+)
+BUILDING_TEMPLATE_COLOR_LABELS = {
+    "default": "Default",
+    "white": "White",
+    "brown": "Brown",
+    "red": "Red",
+    "orange": "Orange",
+    "yellow": "Yellow",
+    "green": "Green",
+    "blue": "Blue",
+    "purple": "Purple",
+    "gray": "Gray",
+}
+BUILDING_TEMPLATE_MAX_COLOR_MARKS = 512
+BUILDING_TEMPLATE_MAX_SPAWNS = 32
+BUILDING_TEMPLATE_REQUIRED_TILES = {
+    "home": ("&", "b", "f"),
+    "general_store": ("&", "$", "s"),
+    "inn": ("&", "$", "b", "f"),
+    "clinic": ("&", "+", "b"),
+    "library": ("&", "l", "P"),
+    "carpenter": ("&", "w", "a", "x"),
+    "workshop": ("&", "w", "a", "x"),
+    "town_hall": ("&", "d", "P"),
+}
 
 
 def _clean_text(value: object, maximum: int) -> str:
@@ -49,6 +139,11 @@ def _clean_names(value: object, maximum: int = 8) -> List[str]:
         if len(clean) >= maximum:
             break
     return clean
+
+
+def _clean_building_template_color(value: object) -> str:
+    key = _clean_text(value, 16).casefold().replace(" ", "_")
+    return key if key in BUILDING_TEMPLATE_COLOR_KEYS else "default"
 
 
 def sanitize_custom_enemy(raw: object) -> Optional[Dict[str, object]]:
@@ -552,6 +647,440 @@ def custom_dungeon_room_records(enabled_only: bool = False, theme: str = "") -> 
             continue
         rooms.append(room)
     return rooms
+
+
+def default_custom_building_template_rows(building_type: str = "home", floor_index: int = 0) -> List[str]:
+    width, height = BUILDING_TEMPLATE_WIDTH, BUILDING_TEMPLATE_HEIGHT
+    grid = [[" " for _ in range(width)] for _ in range(height)]
+    if int(floor_index or 0) > 0:
+        x1, y1, x2, y2 = 10, 4, width - 11, height - 4
+        for y in range(y1, y2 + 1):
+            for x in range(x1, x2 + 1):
+                grid[y][x] = "#" if y in {y1, y2} or x in {x1, x2} else "."
+        stair_x = (x1 + x2) // 2
+        stair_y = y2 - 1
+        grid[stair_y][stair_x] = ">"
+        for y in range(6, y2):
+            if y not in {10, 17}:
+                grid[y][stair_x - 8] = "-"
+                grid[y][stair_x + 8] = "-"
+        for x in range(x1 + 2, x2 - 1):
+            if x not in range(stair_x - 1, stair_x + 2) and x % 2 == 1:
+                grid[10][x] = "-"
+        type_id = building_type if building_type in BUILDING_TEMPLATE_TYPES else "home"
+        upstairs_tiles = {
+            "home": [(14, 8, "b"), (18, 19, "t"), (47, 8, "P"), (48, 19, "s")],
+            "general_store": [(14, 8, "s"), (47, 8, "$"), (18, 19, "d"), (48, 19, "s")],
+            "inn": [(14, 8, "b"), (47, 8, "b"), (14, 19, "b"), (47, 19, "b")],
+            "clinic": [(14, 8, "b"), (47, 8, "+"), (18, 19, "s"), (48, 19, "d")],
+            "library": [(14, 8, "l"), (47, 8, "l"), (18, 19, "P"), (48, 19, "d")],
+            "carpenter": [(14, 8, "w"), (47, 8, "a"), (18, 19, "x"), (48, 19, "s")],
+            "workshop": [(14, 8, "w"), (47, 8, "a"), (18, 19, "x"), (48, 19, "s")],
+            "town_hall": [(14, 8, "d"), (47, 8, "P"), (18, 19, "s"), (48, 19, "d")],
+        }
+        for x, y, ch in upstairs_tiles.get(type_id, upstairs_tiles["home"]):
+            if 0 <= y < height and 0 <= x < width and grid[y][x] == ".":
+                grid[y][x] = ch
+        return ["".join(row) for row in grid]
+
+    x1, y1, x2, y2 = 8, 4, width - 9, height - 2
+    for y in range(y1, y2 + 1):
+        for x in range(x1, x2 + 1):
+            grid[y][x] = "#" if y in {y1, y2} or x in {x1, x2} else "."
+    door_x = (x1 + x2) // 2
+    grid[y2][door_x] = "D"
+    for y in range(12, y2):
+        grid[y][door_x] = "."
+    for y in range(5, y2 - 1):
+        if y in {9, 16}:
+            continue
+        grid[y][door_x - 7] = "-"
+        grid[y][door_x + 7] = "-"
+    for x in range(x1 + 2, x2 - 1):
+        if x in range(door_x - 1, door_x + 2):
+            continue
+        if x % 2 == 0:
+            grid[9][x] = "-"
+    type_id = building_type if building_type in BUILDING_TEMPLATE_TYPES else "home"
+    starter_tiles = {
+        "home": [(door_x + 4, 21, "&"), (14, 8, "b"), (13, 17, "f"), (48, 8, "s")],
+        "general_store": [(door_x + 4, 21, "&"), (14, 8, "$"), (48, 8, "s"), (48, 20, "$")],
+        "inn": [(door_x + 4, 21, "&"), (14, 8, "b"), (48, 8, "b"), (13, 17, "f"), (48, 21, "$")],
+        "clinic": [(door_x + 4, 21, "&"), (14, 8, "+"), (48, 8, "b"), (48, 20, "s")],
+        "library": [(door_x + 4, 21, "&"), (14, 8, "l"), (48, 8, "l"), (31, 8, "P")],
+        "carpenter": [(door_x + 4, 21, "&"), (14, 8, "w"), (48, 8, "a"), (31, 8, "x")],
+        "workshop": [(door_x + 4, 21, "&"), (14, 8, "w"), (48, 8, "a"), (31, 8, "x")],
+        "town_hall": [(door_x + 4, 21, "&"), (14, 8, "d"), (48, 8, "P"), (48, 20, "s")],
+    }
+    for x, y, ch in starter_tiles.get(type_id, starter_tiles["home"]):
+        if 0 <= y < height and 0 <= x < width and grid[y][x] == ".":
+            grid[y][x] = ch
+    return ["".join(row) for row in grid]
+
+
+def _normalized_building_rows(
+    raw_rows: object,
+    building_type: str,
+    *,
+    floor_index: int = 0,
+    require_door: bool = True,
+) -> List[List[str]]:
+    default_rows = default_custom_building_template_rows(building_type, floor_index)
+    source_rows = raw_rows if isinstance(raw_rows, list) else default_rows
+    rows: List[List[str]] = []
+    for y in range(BUILDING_TEMPLATE_HEIGHT):
+        raw_row = str(source_rows[y]) if y < len(source_rows) else ""
+        clean_row = []
+        for x in range(BUILDING_TEMPLATE_WIDTH):
+            ch = raw_row[x] if x < len(raw_row) else " "
+            clean_row.append(ch if ch in BUILDING_TEMPLATE_ALLOWED_TILES else ".")
+        rows.append(clean_row)
+    if not any(ch == "." or ch == "D" for row in rows for ch in row):
+        rows = [list(row) for row in default_rows]
+    door_positions = [
+        (x, y)
+        for y, row in enumerate(rows)
+        for x, ch in enumerate(row)
+        if ch == "D"
+    ]
+    if require_door and not door_positions:
+        floor_positions = [
+            (x, y)
+            for y, row in enumerate(rows)
+            for x, ch in enumerate(row)
+            if ch not in {" ", "#", "-", "_", "D", "<", "U", ">"}
+        ]
+        if floor_positions:
+            min_x = min(x for x, _y in floor_positions)
+            max_x = max(x for x, _y in floor_positions)
+            max_y = max(y for _x, y in floor_positions)
+            door_x = (min_x + max_x) // 2
+            rows[max_y][door_x] = "D"
+            if max_y > 0 and rows[max_y - 1][door_x] in {"#", "-", " "}:
+                rows[max_y - 1][door_x] = "."
+        else:
+            rows = [list(row) for row in default_rows]
+    if not require_door:
+        for y, row in enumerate(rows):
+            for x, ch in enumerate(row):
+                if ch == "D":
+                    rows[y][x] = "."
+    return rows
+
+
+def _custom_building_floor_positions(rows: List[List[str]]) -> List[Tuple[int, int]]:
+    blocking = {" ", "#", "-", "D", "<", "U", ">", "_"}
+    return [
+        (x, y)
+        for y, row in enumerate(rows)
+        for x, ch in enumerate(row)
+        if ch not in blocking
+    ]
+
+
+def _place_required_custom_building_tiles(
+    rows: List[List[str]],
+    building_type: str,
+    zones: List[Dict[str, object]],
+    floor_index: int = 0,
+) -> None:
+    # Zones are schedule/room metadata. They must not auto-place furniture;
+    # otherwise simply designating a room mutates the player's drawn template.
+    _ = zones
+    if int(floor_index) != 0:
+        return
+    required = BUILDING_TEMPLATE_REQUIRED_TILES.get(building_type, ("&",))
+    floor_positions = _custom_building_floor_positions(rows)
+    if not floor_positions:
+        return
+    preferred = [
+        (36, 21), (28, 21), (12, 8), (50, 8), (12, 20), (50, 20),
+        (30, 8), (30, 23), (18, 14), (46, 14),
+    ]
+    for tile in required:
+        if any(ch == tile for row in rows for ch in row):
+            continue
+        placed = False
+        for x, y in preferred + floor_positions:
+            if 0 <= y < len(rows) and 0 <= x < len(rows[y]) and rows[y][x] == ".":
+                rows[y][x] = tile
+                placed = True
+                break
+        if not placed:
+            x, y = floor_positions[0]
+            rows[y][x] = tile
+
+
+def _building_template_floor_name(raw_name: object, floor_index: int) -> str:
+    fallback = "Ground Floor" if floor_index == 0 else f"Floor {floor_index + 1}"
+    return _clean_text(raw_name, 28) or fallback
+
+
+def _normalized_building_floors(raw: Dict[str, object], building_type: str) -> List[Dict[str, object]]:
+    raw_floors = raw.get("floors")
+    source_floors: List[Dict[str, object]] = []
+    if isinstance(raw_floors, list):
+        for _index, raw_floor in enumerate(raw_floors[:BUILDING_TEMPLATE_MAX_FLOORS]):
+            if isinstance(raw_floor, dict):
+                source_floors.append({
+                    "name": raw_floor.get("name"),
+                    "rows": raw_floor.get("rows"),
+                })
+            elif isinstance(raw_floor, list):
+                source_floors.append({"name": None, "rows": raw_floor})
+    if not source_floors:
+        source_floors = [{"name": "Ground Floor", "rows": raw.get("rows")}]
+
+    floors: List[Dict[str, object]] = []
+    for floor_index, raw_floor in enumerate(source_floors):
+        rows = _normalized_building_rows(
+            raw_floor.get("rows"),
+            building_type,
+            floor_index=floor_index,
+            require_door=floor_index == 0,
+        )
+        floors.append({
+            "name": _building_template_floor_name(raw_floor.get("name"), floor_index),
+            "rows": rows,
+        })
+    if not floors:
+        floors.append({
+            "name": "Ground Floor",
+            "rows": _normalized_building_rows(
+                None,
+                building_type,
+                floor_index=0,
+                require_door=True,
+            ),
+        })
+    return floors
+
+
+def _place_custom_building_stair_if_missing(
+    rows: List[List[str]],
+    symbol: str,
+    preferred: Sequence[Tuple[int, int]],
+) -> None:
+    if any(ch == symbol for row in rows for ch in row):
+        return
+    floor_positions = _custom_building_floor_positions(rows)
+    for x, y in list(preferred) + floor_positions:
+        if 0 <= y < len(rows) and 0 <= x < len(rows[y]) and rows[y][x] == ".":
+            rows[y][x] = symbol
+            return
+
+
+def _ensure_custom_building_floor_stairs(floors: List[Dict[str, object]]) -> None:
+    if len(floors) <= 1:
+        return
+    up_preferences = [(35, 20), (31, 20), (35, 17), (31, 17), (42, 20), (24, 20)]
+    down_preferences = [(31, 22), (35, 22), (31, 19), (35, 19), (24, 22), (42, 22)]
+    for floor_index, floor in enumerate(floors):
+        rows = floor.get("rows")
+        if not isinstance(rows, list):
+            continue
+        if floor_index < len(floors) - 1:
+            _place_custom_building_stair_if_missing(rows, "<", up_preferences)
+        if floor_index > 0:
+            _place_custom_building_stair_if_missing(rows, ">", down_preferences)
+
+
+def sanitize_custom_building_template(raw: object) -> Optional[Dict[str, object]]:
+    if not isinstance(raw, dict):
+        return None
+    name = _clean_text(raw.get("name"), 32)
+    if not name:
+        return None
+    building_type = str(raw.get("building_type", "home") or "home")
+    if building_type not in BUILDING_TEMPLATE_TYPES:
+        building_type = "home"
+    floors = _normalized_building_floors(raw, building_type)
+    max_zone_floor = max(0, len(floors) - 1)
+    zones: List[Dict[str, object]] = []
+    raw_zones = raw.get("zones", [])
+    for raw_zone in raw_zones if isinstance(raw_zones, list) else []:
+        if not isinstance(raw_zone, dict):
+            continue
+        kind = str(raw_zone.get("kind", ""))
+        if kind not in BUILDING_TEMPLATE_ZONE_KINDS:
+            continue
+        x1 = _clean_int(raw_zone.get("x1"), 0, 0, BUILDING_TEMPLATE_WIDTH - 1)
+        y1 = _clean_int(raw_zone.get("y1"), 0, 0, BUILDING_TEMPLATE_HEIGHT - 1)
+        x2 = _clean_int(raw_zone.get("x2"), x1, 0, BUILDING_TEMPLATE_WIDTH - 1)
+        y2 = _clean_int(raw_zone.get("y2"), y1, 0, BUILDING_TEMPLATE_HEIGHT - 1)
+        floor = _clean_int(raw_zone.get("floor"), 0, 0, max_zone_floor)
+        zones.append({
+            "kind": kind,
+            "floor": floor,
+            "x1": min(x1, x2),
+            "y1": min(y1, y2),
+            "x2": max(x1, x2),
+            "y2": max(y1, y2),
+        })
+        if len(zones) >= 16:
+            break
+    spawns: List[Dict[str, object]] = []
+    raw_spawns = raw.get("spawns", [])
+    for raw_spawn in raw_spawns if isinstance(raw_spawns, list) else []:
+        if not isinstance(raw_spawn, dict):
+            continue
+        floor = _clean_int(raw_spawn.get("floor"), 0, 0, max_zone_floor)
+        spawns.append({
+            "floor": floor,
+            "x": _clean_int(raw_spawn.get("x"), BUILDING_TEMPLATE_WIDTH // 2, 0, BUILDING_TEMPLATE_WIDTH - 1),
+            "y": _clean_int(raw_spawn.get("y"), BUILDING_TEMPLATE_HEIGHT // 2, 0, BUILDING_TEMPLATE_HEIGHT - 1),
+        })
+        if len(spawns) >= BUILDING_TEMPLATE_MAX_SPAWNS:
+            break
+    color_map: Dict[Tuple[int, int, int], str] = {}
+    raw_colors = raw.get("colors", [])
+    for raw_color in raw_colors if isinstance(raw_colors, list) else []:
+        if not isinstance(raw_color, dict):
+            continue
+        color = _clean_building_template_color(raw_color.get("color"))
+        floor = _clean_int(raw_color.get("floor"), 0, 0, max_zone_floor)
+        x = _clean_int(raw_color.get("x"), 0, 0, BUILDING_TEMPLATE_WIDTH - 1)
+        y = _clean_int(raw_color.get("y"), 0, 0, BUILDING_TEMPLATE_HEIGHT - 1)
+        key = (floor, x, y)
+        if color == "default":
+            color_map.pop(key, None)
+        else:
+            color_map[key] = color
+        if len(color_map) >= BUILDING_TEMPLATE_MAX_COLOR_MARKS:
+            break
+    colors = [
+        {"floor": floor, "x": x, "y": y, "color": color}
+        for (floor, x, y), color in sorted(color_map.items())
+    ]
+    for floor_index, floor in enumerate(floors):
+        rows = floor.get("rows")
+        if isinstance(rows, list):
+            _place_required_custom_building_tiles(rows, building_type, zones, floor_index)
+    _ensure_custom_building_floor_stairs(floors)
+    floor_records = [
+        {
+            "name": str(floor["name"]),
+            "rows": ["".join(row) for row in floor["rows"]],
+        }
+        for floor in floors
+    ]
+    rows = list(floor_records[0]["rows"])
+    return {
+        "name": name,
+        "description": _clean_text(raw.get("description"), 220) or "A custom procedural-town building template.",
+        "building_type": building_type,
+        "max_occupancy": _clean_int(raw.get("max_occupancy"), 4 if building_type == "home" else 0, 0, 24),
+        "enabled": bool(raw.get("enabled", True)),
+        "rows": rows,
+        "floors": floor_records,
+        "zones": zones,
+        "spawns": spawns,
+        "colors": colors,
+    }
+
+
+def custom_building_template_summary(record: Dict[str, object]) -> List[str]:
+    template = sanitize_custom_building_template(record)
+    if template is None:
+        return ["Invalid custom building template."]
+    zone_lines = [
+        (
+            f"- F{int(zone.get('floor', 0)) + 1} {BUILDING_TEMPLATE_ZONE_LABELS.get(str(zone['kind']), str(zone['kind']))}: "
+            f"{zone['x1']},{zone['y1']} to {zone['x2']},{zone['y2']}"
+        )
+        for zone in template["zones"]
+    ]
+    floor_lines: List[str] = []
+    for index, floor in enumerate(template.get("floors", []) or []):
+        floor_lines.append(f"F{index + 1}: {floor.get('name', 'Floor')}")
+    return [
+        str(template["name"]).upper(),
+        "",
+        str(template["description"]),
+        (
+            f"Type: {BUILDING_TEMPLATE_TYPE_LABELS.get(str(template['building_type']), template['building_type'])} | "
+            f"Max occupancy: {template['max_occupancy']} | "
+            f"Status: {'enabled' if template['enabled'] else 'disabled'}"
+        ),
+        (
+            f"Floors: {len(template.get('floors', []) or [template['rows']])} | "
+            f"Zones: {len(template['zones'])} | "
+            f"Paint: {len(template.get('colors', []) or [])} | "
+            f"NPC spawns: {len(template.get('spawns', []) or [])}"
+        ),
+        *(floor_lines[:BUILDING_TEMPLATE_MAX_FLOORS] or ["F1: Ground Floor"]),
+        "",
+        *(zone_lines[:8] or ["- No functional zones designated."]),
+        "",
+        "Ground floor preview:",
+        *template["rows"],
+        "",
+        "Enabled templates join the procedural pool for their building type. Stairs: < up, > down.",
+    ]
+
+
+def custom_building_template_signature(record: Dict[str, object]) -> str:
+    template = sanitize_custom_building_template(record)
+    if template is None:
+        return ""
+    total = 2166136261
+    signature_text = "|".join([
+        str(template["name"]),
+        str(template["building_type"]),
+        str(template["max_occupancy"]),
+        str(template["enabled"]),
+        *[
+            f"F{index}:{floor.get('name', '')}:{row}"
+            for index, floor in enumerate(template.get("floors", []) or [])
+            for row in floor.get("rows", [])
+        ],
+        *[
+            f"{zone['kind']}:{zone.get('floor', 0)}:{zone['x1']}:{zone['y1']}:{zone['x2']}:{zone['y2']}"
+            for zone in template["zones"]
+        ],
+        *[
+            f"S{spawn.get('floor', 0)}:{spawn.get('x', 0)}:{spawn.get('y', 0)}"
+            for spawn in template.get("spawns", []) or []
+        ],
+        *[
+            f"C{color.get('floor', 0)}:{color.get('x', 0)}:{color.get('y', 0)}:{color.get('color', '')}"
+            for color in template.get("colors", []) or []
+        ],
+    ])
+    for char in signature_text:
+        total ^= ord(char)
+        total = (total * 16777619) & 0xFFFFFFFF
+    return f"{template['building_type']}:{template['name']}:{total:08x}"
+
+
+def custom_building_template_records(
+    building_type: str = "",
+    enabled_only: bool = False,
+) -> List[Dict[str, object]]:
+    from ascii_farmstead_custom_content import load_custom_content
+
+    content, _warnings = load_custom_content()
+    templates = []
+    for raw in content.get("building_templates", []):
+        template = sanitize_custom_building_template(raw)
+        if template is None:
+            continue
+        if building_type and str(template["building_type"]) != str(building_type):
+            continue
+        if enabled_only and not template["enabled"]:
+            continue
+        templates.append(template)
+    return templates
+
+
+def stamp_custom_building_template(template: Dict[str, object], floor: int = 0) -> Optional[List[List[str]]]:
+    clean = sanitize_custom_building_template(template)
+    if clean is None or not clean["enabled"]:
+        return None
+    floors = clean.get("floors", []) if isinstance(clean.get("floors"), list) else []
+    floor_index = max(0, min(len(floors) - 1, int(floor or 0))) if floors else 0
+    floor_record = floors[floor_index] if floors else {"rows": clean["rows"]}
+    return [list(str(row)) for row in floor_record.get("rows", clean["rows"])]
 
 
 def stamp_custom_dungeon_room(

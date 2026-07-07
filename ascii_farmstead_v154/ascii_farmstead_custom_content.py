@@ -16,6 +16,15 @@ CUSTOM_CONTENT_VERSION = 1
 CUSTOM_CONTENT_BACKUP_COUNT = 3
 CUSTOM_CONTENT_PATH = GAME_DATA_DIRECTORY / "custom_content.json"
 CUSTOM_CONTENT_EXPORT_PATH = GAME_DATA_DIRECTORY / "custom_content_export.json"
+CUSTOM_CONTENT_FIELDS = (
+    "abilities",
+    "classes",
+    "enemies",
+    "equipment",
+    "maps",
+    "dungeon_rooms",
+    "building_templates",
+)
 
 ABILITY_EFFECTS = ("damage", "heal", "guard", "cleanse", "restore_mp")
 ABILITY_SHAPES = ("point", "burst", "strip", "cone", "cross", "multishot")
@@ -56,6 +65,7 @@ def empty_custom_content() -> Dict[str, object]:
         "equipment": [],
         "maps": [],
         "dungeon_rooms": [],
+        "building_templates": [],
     }
 
 
@@ -278,6 +288,7 @@ def sanitize_custom_content(raw: object) -> Dict[str, object]:
         sanitize_custom_dungeon_room,
         sanitize_custom_enemy,
         sanitize_custom_equipment,
+        sanitize_custom_building_template,
         sanitize_custom_map,
     )
 
@@ -303,6 +314,7 @@ def sanitize_custom_content(raw: object) -> Dict[str, object]:
         ("equipment", sanitize_custom_equipment),
         ("maps", sanitize_custom_map),
         ("dungeon_rooms", sanitize_custom_dungeon_room),
+        ("building_templates", sanitize_custom_building_template),
     ):
         names = set()
         values = raw.get(field_name, [])
@@ -410,7 +422,7 @@ def save_custom_content(content: object, path: Optional[Path] = None) -> Tuple[b
             pass
         total = sum(
             len(clean[field])
-            for field in ("abilities", "classes", "enemies", "equipment", "maps", "dungeon_rooms")
+            for field in CUSTOM_CONTENT_FIELDS
         )
         return True, f"Saved {total} custom content records."
     except (OSError, ValueError, TypeError) as exc:
@@ -431,7 +443,7 @@ def import_custom_content() -> Tuple[Optional[Dict[str, object]], str]:
     suffix = f" {' '.join(warnings)}" if warnings else ""
     total = sum(
         len(content[field])
-        for field in ("abilities", "classes", "enemies", "equipment", "maps", "dungeon_rooms")
+        for field in CUSTOM_CONTENT_FIELDS
     )
     return content, f"Imported {total} custom content records.{suffix}"
 

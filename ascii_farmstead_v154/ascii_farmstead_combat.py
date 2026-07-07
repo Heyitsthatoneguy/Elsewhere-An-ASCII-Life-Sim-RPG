@@ -1964,7 +1964,13 @@ def mine_battle_request_for_enemy(
     companions = clean_companion_profiles(companion_profiles, party_limit)
     progression_keys = {str(player_profile["name"]): "player"}
     for companion in companions:
-        companion_id = str(companion.get("id", companion.get("npc_id", companion.get("name", ""))) or "")
+        companion_id = str(
+            companion.get(
+                "progression_id",
+                companion.get("id", companion.get("npc_id", companion.get("name", ""))),
+            )
+            or ""
+        )
         companion_name = str(companion.get("battle_id", companion.get("name", "")) or "")
         if companion_id and companion_name:
             progression_keys[companion_name] = companion_id

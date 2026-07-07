@@ -522,6 +522,7 @@ class GameState:
     tool_levels: Dict[str, int] = None
     farm_expansions: List[str] = None
     house_upgrades: List[str] = None
+    custom_house_map_rows: List[str] = None
     held_object: Optional[str] = None
     wilderness_seed: int = 1337
     wilderness_chunk_x: int = 0
@@ -533,6 +534,7 @@ class GameState:
     procedural_settlement_populations: Dict[str, Dict[str, object]] = None
     current_procedural_settlement_key: str = ""
     current_procedural_building_id: str = ""
+    current_procedural_building_floor: int = 0
     procedural_settlement_return_x: int = 0
     procedural_settlement_return_y: int = 0
     player_properties: Dict[str, Dict[str, object]] = None
@@ -666,6 +668,7 @@ class GameState:
     wilderness_dungeon_state: Dict[str, Dict[str, object]] = None
     wilderness_strongholds_cleared: int = 0
     wilderness_stronghold_state: Dict[str, Dict[str, object]] = None
+    wilderness_poi_state: Dict[str, Dict[str, object]] = None
     mine_floor: int = 1
     deepest_mine_floor: int = 1
     unlocked_mine_elevators: List[int] = None
@@ -1464,6 +1467,13 @@ class GameState:
             self.farm_expansions = []
         if self.house_upgrades is None:
             self.house_upgrades = []
+        if not isinstance(self.custom_house_map_rows, list):
+            self.custom_house_map_rows = []
+        self.custom_house_map_rows = [
+            str(row)[:120]
+            for row in self.custom_house_map_rows
+            if isinstance(row, str)
+        ][:80]
         if not self.held_object:
             self.held_object = None
         if not isinstance(self.wilderness_seed, int):
@@ -1549,6 +1559,13 @@ class GameState:
             self.current_procedural_building_id or ""
         )
         try:
+            self.current_procedural_building_floor = max(
+                0,
+                min(3, int(self.current_procedural_building_floor or 0)),
+            )
+        except Exception:
+            self.current_procedural_building_floor = 0
+        try:
             self.procedural_settlement_return_x = int(
                 self.procedural_settlement_return_x or 0
             )
@@ -1591,7 +1608,10 @@ class GameState:
         except Exception:
             self.wilderness_caves_discovered = 0
         self.current_dungeon_key = str(self.current_dungeon_key or "")
-        self.current_dungeon_floor = 1
+        try:
+            self.current_dungeon_floor = max(1, int(self.current_dungeon_floor or 1))
+        except Exception:
+            self.current_dungeon_floor = 1
         try:
             self.wilderness_dungeons_discovered = max(0, int(self.wilderness_dungeons_discovered))
         except Exception:
@@ -1616,6 +1636,14 @@ class GameState:
                 if isinstance(record, dict):
                     cleaned_stronghold_state[str(stronghold_key)] = dict(record)
             self.wilderness_stronghold_state = cleaned_stronghold_state
+        if not isinstance(self.wilderness_poi_state, dict):
+            self.wilderness_poi_state = {}
+        else:
+            cleaned_poi_state: Dict[str, Dict[str, object]] = {}
+            for poi_key, record in self.wilderness_poi_state.items():
+                if isinstance(record, dict):
+                    cleaned_poi_state[str(poi_key)] = dict(record)
+            self.wilderness_poi_state = cleaned_poi_state
         self.mine_floor = normalize_mine_floor(self.mine_floor)
         self.deepest_mine_floor = max(normalize_mine_floor(self.deepest_mine_floor), self.mine_floor)
         self.unlocked_mine_elevators = sorted(

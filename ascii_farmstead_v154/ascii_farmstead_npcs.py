@@ -4072,19 +4072,19 @@ class NpcMixin:
         if self.town_routine_phase() in ["wake", "late"]:
             return {
                 "HouseInterior": self.spouse_farmhouse_position(),
-                "GeneralStoreInterior": (15, 4),
-                "BlacksmithInterior": (15, 4),
-                "LibraryInterior": (15, 4),
-                "MayorHouseInterior": (15, 4),
-                "InnInterior": (39, 4),
-                "FurnitureStoreInterior": (15, 4),
-                "CarpenterStoreInterior": (15, 4),
-                "AnimalStoreInterior": (15, 4),
-                "ClinicInterior": (15, 4),
-                "TownHallInterior": (15, 4),
-                "MarketRowInterior": (39, 4),
-                "MuseumInterior": (15, 4),
-            }.get(location, (15, 4))
+                "GeneralStoreInterior": (27, 9),
+                "BlacksmithInterior": (27, 9),
+                "LibraryInterior": (27, 9),
+                "MayorHouseInterior": (27, 9),
+                "InnInterior": (27, 9),
+                "FurnitureStoreInterior": (27, 9),
+                "CarpenterStoreInterior": (27, 9),
+                "AnimalStoreInterior": (27, 9),
+                "ClinicInterior": (27, 9),
+                "TownHallInterior": (27, 9),
+                "MarketRowInterior": (27, 9),
+                "MuseumInterior": (27, 9),
+            }.get(location, (27, 9))
         return {
             "HouseInterior": self.spouse_farmhouse_position(),
             "GeneralStoreInterior": (27, 8),

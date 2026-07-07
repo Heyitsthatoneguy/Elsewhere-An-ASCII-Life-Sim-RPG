@@ -55,6 +55,11 @@ def sanitize_player_properties(value: object) -> Dict[str, Dict[str, object]]:
                 in {"Private", "Guesthouse", "Rental"}
                 else "Private"
             ),
+            "furnishings_level": max(-1, min(3, int(raw.get("furnishings_level", -1)))),
+            "original_residents_rehoused": max(
+                0,
+                int(raw.get("original_residents_rehoused", 0)),
+            ),
             "lifetime_income": max(0, int(raw.get("lifetime_income", 0))),
             "last_income_ordinal": max(0, int(raw.get("last_income_ordinal", 0))),
         }

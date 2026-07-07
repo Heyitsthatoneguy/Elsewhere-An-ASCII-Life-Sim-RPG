@@ -12,6 +12,7 @@ tools/
 
 # Runtime data and private development records
 *.log
+*.log.*
 ascii_farmstead_crash_report.txt
 ascii_farmstead_error.log
 ascii_farmstead_save.json

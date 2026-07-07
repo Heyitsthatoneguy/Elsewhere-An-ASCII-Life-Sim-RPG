@@ -299,6 +299,257 @@ class CivicEconomyMixin:
             self.property_id_for_building(plan, building)
         )
 
+    def procedural_property_object_location_key(self, property_id: str) -> str:
+        return f"Residence:{property_id}"
+
+    def current_procedural_residence_property(self) -> Optional[Dict[str, object]]:
+        if not hasattr(self, "on_procedural_town_interior") or not self.on_procedural_town_interior():
+            return None
+        plan = self.current_procedural_town_plan()
+        building = self.current_procedural_town_building()
+        if (
+            not plan
+            or not building
+            or str(building.get("type_id", "")) != "home"
+        ):
+            return None
+        return self.player_property_for_building(plan, building)
+
+    def on_player_owned_procedural_residence(self) -> bool:
+        return self.current_procedural_residence_property() is not None
+
+    def procedural_residence_has_furnishing(
+        self,
+        property_record: Optional[Dict[str, object]],
+        obj_name: str,
+    ) -> bool:
+        if not property_record:
+            return False
+        location_key = self.procedural_property_object_location_key(
+            str(property_record.get("id", ""))
+        )
+        placed_objects = getattr(self.state, "placed_objects", {})
+        if not isinstance(placed_objects, dict):
+            return False
+        prefix = f"{location_key}:"
+        return any(
+            str(key).startswith(prefix) and str(value) == obj_name
+            for key, value in placed_objects.items()
+        )
+
+    def procedural_residence_furnishing_stage(
+        self,
+        property_record: Dict[str, object],
+    ) -> int:
+        upgrade_level = int(property_record.get("upgrade_level", 0))
+        stage = 0
+        if bool(property_record.get("built")) or upgrade_level >= 1:
+            stage = 1
+        if bool(property_record.get("household_moved")) or upgrade_level >= 2:
+            stage = 2
+        if upgrade_level >= 3:
+            stage = 3
+        return stage
+
+    def ensure_procedural_residence_furnishings(
+        self,
+        property_record: Dict[str, object],
+        building: Optional[Dict[str, object]] = None,
+    ) -> int:
+        """Seed movable player furniture into a bought procedural residence."""
+        if not isinstance(getattr(self.state, "placed_objects", None), dict):
+            self.state.placed_objects = {}
+        if not isinstance(property_record, dict):
+            return 0
+        property_id = str(property_record.get("id", ""))
+        if not property_id:
+            return 0
+        location_key = self.procedural_property_object_location_key(property_id)
+        target_stage = self.procedural_residence_furnishing_stage(property_record)
+        try:
+            current_stage = int(property_record.get("furnishings_level", -1))
+        except (TypeError, ValueError):
+            current_stage = -1
+        if current_stage >= target_stage:
+            return 0
+
+        stage_layouts: Dict[int, List[Tuple[str, int, int]]] = {
+            0: [
+                ("Bed", 8, 8),
+                ("Nightstand", 12, 8),
+                ("Dresser", 14, 8),
+                ("Wall Calendar", 17, 8),
+                ("Chest", 10, 12),
+                ("Television", 49, 8),
+                ("Bookshelf", 10, 21),
+                ("Writing Desk", 13, 21),
+                ("Wooden Table", 27, 23),
+                ("Wooden Chair", 29, 24),
+                ("Decorative Rug", 34, 22),
+            ],
+            1: [
+                ("Kitchen Counter", 9, 16),
+                ("Pantry", 14, 16),
+                ("Wash Basin", 17, 16),
+                ("Tea Table", 50, 21),
+            ],
+            2: [
+                ("Family Table", 46, 15),
+                ("Couch", 46, 21),
+                ("Child Bed", 49, 12),
+                ("Toy Shelf", 54, 12),
+                ("Study Desk", 49, 15),
+            ],
+            3: [
+                ("Fireplace", 26, 3),
+                ("Armchair", 31, 3),
+                ("Keepsake Chest", 36, 3),
+                ("Wall Art", 48, 3),
+                ("House Plant", 56, 3),
+                ("Large Rug", 25, 20),
+            ],
+        }
+
+        def footprint_tiles(obj_name: str, x: int, y: int) -> List[Tuple[int, int]]:
+            if hasattr(self, "object_footprint_tiles"):
+                return list(self.object_footprint_tiles(obj_name, x, y))
+            return [(x, y)]
+
+        def parsed_object_key(key: str) -> Optional[Tuple[str, int, int]]:
+            if hasattr(self, "parse_object_key"):
+                return self.parse_object_key(key)
+            try:
+                location, coords = str(key).rsplit(":", 1)
+                x_text, y_text = coords.split(",", 1)
+                return location, int(x_text), int(y_text)
+            except Exception:
+                return None
+
+        def location_tiles() -> set:
+            occupied = set()
+            for key, existing_name in list(self.state.placed_objects.items()):
+                parsed = parsed_object_key(str(key))
+                if not parsed:
+                    continue
+                location, ax, ay = parsed
+                if location != location_key:
+                    continue
+                occupied.update(footprint_tiles(str(existing_name), ax, ay))
+            return occupied
+
+        added = 0
+        occupied_tiles = location_tiles()
+        for stage in range(max(-1, current_stage) + 1, target_stage + 1):
+            for obj_name, x, y in stage_layouts.get(stage, []):
+                key = f"{location_key}:{x},{y}"
+                new_tiles = set(footprint_tiles(obj_name, x, y))
+                if key in self.state.placed_objects or occupied_tiles.intersection(new_tiles):
+                    continue
+                self.state.placed_objects[key] = obj_name
+                occupied_tiles.update(new_tiles)
+                added += 1
+        property_record["furnishings_level"] = target_stage
+        return added
+
+    def vacate_procedural_residence_for_player(
+        self,
+        plan: Dict[str, object],
+        building: Dict[str, object],
+        property_record: Optional[Dict[str, object]] = None,
+    ) -> int:
+        """Move generated residents out of a home after the player buys it."""
+        population = self.procedural_settlement_population(
+            int(plan.get("chunk_x", 0)),
+            int(plan.get("chunk_y", 0)),
+        )
+        if not population:
+            return 0
+        buildings = plan.get("buildings", {})
+        old_home_id = str(building.get("id", ""))
+        town_key = self.civic_town_key(plan)
+        owned_home_ids = {
+            str(record.get("building_id", ""))
+            for record in self.state.player_properties.values()
+            if str(record.get("town_key", "")) == town_key
+        }
+        replacement_buildings = [
+            candidate
+            for candidate in buildings.values()
+            if isinstance(candidate, dict)
+            and str(candidate.get("id", "")) != old_home_id
+            and str(candidate.get("id", "")) not in owned_home_ids
+            and str(candidate.get("type_id", "")) == "home"
+        ]
+        if not replacement_buildings:
+            replacement_buildings = [
+                candidate
+                for candidate in buildings.values()
+                if isinstance(candidate, dict)
+                and str(candidate.get("id", "")) != old_home_id
+                and str(candidate.get("type_id", "")) == "inn"
+            ]
+        if not replacement_buildings:
+            replacement_buildings = [
+                candidate
+                for candidate in buildings.values()
+                if isinstance(candidate, dict)
+                and str(candidate.get("id", "")) != old_home_id
+            ]
+        if not replacement_buildings:
+            return 0
+
+        def replacement_id_for(seed_text: str) -> str:
+            index = stable_text_seed(f"{plan.get('seed')}:{old_home_id}:{seed_text}") % len(replacement_buildings)
+            return str(replacement_buildings[index].get("id", ""))
+
+        moved_households: Dict[str, str] = {}
+        for household_id, household in list(population.get("households", {}).items()):
+            if not isinstance(household, dict):
+                continue
+            if str(household.get("home_building_id", "")) != old_home_id:
+                continue
+            new_home_id = replacement_id_for(str(household_id))
+            household["home_building_id"] = new_home_id
+            moved_households[str(household_id)] = new_home_id
+
+        moved_residents = 0
+        builder = self.procedural_npc_builder() if hasattr(self, "procedural_npc_builder") else None
+        for resident_id, resident in list(population.get("residents", {}).items()):
+            if not isinstance(resident, dict):
+                continue
+            household_id = str(resident.get("household_id", ""))
+            should_move = (
+                str(resident.get("home_building_id", "")) == old_home_id
+                or household_id in moved_households
+            )
+            if not should_move:
+                continue
+            new_home_id = moved_households.get(household_id) or replacement_id_for(str(resident_id))
+            resident["home_building_id"] = new_home_id
+            resident["runtime_location"] = "outdoor"
+            resident["runtime_x"] = -1
+            resident["runtime_y"] = -1
+            resident["runtime_activity"] = "settling into new housing after a property sale"
+            memories = list(resident.get("memories", []) or [])
+            memories.append(
+                f"Relocated from {building.get('name', 'a former home')} after it became a private player residence."
+            )
+            resident["memories"] = memories[-10:]
+            if builder and new_home_id in buildings:
+                try:
+                    resident["schedule"] = builder.resident_schedule(plan, resident, buildings)
+                except Exception:
+                    pass
+            moved_residents += 1
+
+        if property_record is not None:
+            property_record["original_residents_rehoused"] = int(
+                property_record.get("original_residents_rehoused", 0)
+            ) + moved_residents
+        if moved_residents:
+            self._procedural_resident_runtime_signature = None
+        return moved_residents
+
     def player_business_for_building(
         self,
         plan: Dict[str, object],
@@ -554,22 +805,36 @@ class CivicEconomyMixin:
             "kind": "built_annex" if built else "residence",
             "purchase_price": price,
             "purchased_day": str(getattr(self.state, "date_label", "")),
-            "comfort": 1 + self.procedural_town_development_rank(plan),
+            "comfort": min(10, 3 + self.procedural_town_development_rank(plan) + (1 if built else 0)),
             "built": bool(built),
             "upgrade_level": 0,
             "household_moved": False,
             "use_mode": "Private",
+            "furnishings_level": -1,
+            "original_residents_rehoused": 0,
             "lifetime_income": 0,
             "last_income_ordinal": self.civic_date_ordinal(),
         }
         self.state.player_properties[property_id] = record
+        moved_residents = self.vacate_procedural_residence_for_player(
+            plan,
+            building,
+            record,
+        )
+        self.ensure_procedural_residence_furnishings(record, building)
+        self._procedural_town_interior_cache = {}
         self.adjust_procedural_town_reputation(
             8,
             "Established a permanent residence",
             plan,
         )
+        relocation_note = (
+            f" {moved_residents} former resident{'s' if moved_residents != 1 else ''} relocated within town."
+            if moved_residents
+            else ""
+        )
         self.autosave_with_message(
-            f"Acquired {record['name']} for {price}g."
+            f"Acquired {record['name']} for {price}g. Starter furnishings are in place.{relocation_note}"
         )
         return True
 
@@ -614,6 +879,15 @@ class CivicEconomyMixin:
             other["household_moved"] = False
         property_record["household_moved"] = True
         self.state.primary_residence_id = str(property_id)
+        plan = self.civic_plan_for_key(str(property_record.get("town_key", "")))
+        building = (
+            plan.get("buildings", {}).get(str(property_record.get("building_id", "")))
+            if isinstance(plan, dict)
+            else None
+        )
+        if isinstance(building, dict):
+            self.ensure_procedural_residence_furnishings(property_record, building)
+            self._procedural_town_interior_cache = {}
         self.autosave_with_message(
             f"Your household moved to {property_record.get('name')}."
         )
@@ -629,6 +903,14 @@ class CivicEconomyMixin:
             35 + level * 20,
             20 + level * 15,
         )
+
+    def procedural_residence_has_kitchen(
+        self,
+        property_record: Optional[Dict[str, object]],
+    ) -> bool:
+        if not property_record:
+            return False
+        return bool(property_record.get("built")) or int(property_record.get("upgrade_level", 0)) >= 1
 
     def upgrade_procedural_residence(self, property_id: str) -> bool:
         self.ensure_civic_economy_state()
@@ -657,6 +939,15 @@ class CivicEconomyMixin:
             10,
             int(property_record.get("comfort", 1)) + 1,
         )
+        plan = self.civic_plan_for_key(str(property_record.get("town_key", "")))
+        building = (
+            plan.get("buildings", {}).get(str(property_record.get("building_id", "")))
+            if isinstance(plan, dict)
+            else None
+        )
+        if isinstance(building, dict):
+            self.ensure_procedural_residence_furnishings(property_record, building)
+            self._procedural_town_interior_cache = {}
         self.autosave_with_message(
             f"Completed {RESIDENCE_UPGRADE_NAMES[level]} at "
             f"{property_record.get('name')}."
