@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.9.0-beta.2
+
+- Added wilderness-town sheriff offices, Sheriff/Deputy jobs, weekly bounty
+  boards, active bounty tracking, overworld bounty markers, wilderness bounty
+  targets, tactical bounty combat, turn-in rewards, and an Adventure >
+  Bounties dashboard.
+- Improved generated and player-founded town support for the new public-safety
+  buildings while preserving residential population variety.
+- Fixed bounty target spawning so it no longer recursively conflicts with
+  wilderness animal placement.
+- Improved civic exterior marker placement for more varied procedural town
+  layouts.
+
 ## 0.9.0-beta.1
 
 First public beta of **Elsewhere: an ASCII Life-Sim RPG**.

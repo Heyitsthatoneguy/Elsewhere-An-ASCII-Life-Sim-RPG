@@ -65,7 +65,7 @@ def visible_terminal_len(text: object) -> int:
 def main() -> int:
     assert support.GAME_TITLE == "Elsewhere: an ASCII Life-Sim RPG"
     assert support.GAME_SHORT_TITLE == "Elsewhere"
-    assert support.GAME_VERSION == "0.9.0-beta.1"
+    assert support.GAME_VERSION == "0.9.0-beta.2"
     assert elsewhere.main is farmstead_main.main
     packaged_names = support.packaged_legacy_data_names()
     assert "custom_content.json" in packaged_names
