@@ -167,11 +167,21 @@ from ascii_farmstead_saves import SaveLoadMixin
 from ascii_farmstead_npcs import NpcMixin
 from ascii_farmstead_building import BuildingMixin
 from ascii_farmstead_actors import ActorNavigationMixin
-from ascii_farmstead_town_builder import TownBuilderMixin
-from ascii_farmstead_npc_builder import ProceduralNpcBuilderMixin
+from ascii_farmstead_town_builder import (
+    SETTLEMENT_BUILDING_CATALOG,
+    SETTLEMENT_PHASES,
+    TownBuilderMixin,
+    settlement_phase_requirements,
+)
+from ascii_farmstead_npc_builder import (
+    ProceduralNpcBuilderMixin,
+    procedural_population_key,
+    sanitize_procedural_job_profile,
+)
 from ascii_farmstead_npc_dialogue import ProceduralNpcDialogueMixin
 from ascii_farmstead_procedural_towns import (
     PROCEDURAL_TOWN_INTERIOR_LOCATION,
+    PROCEDURAL_TOWN_OPEN_BUILDINGS,
     PROCEDURAL_TOWN_OVERWORLD_SYMBOL,
     PROCEDURAL_TOWN_SIGN_SYMBOL,
     ProceduralTownRuntimeMixin,
@@ -185,6 +195,111 @@ from ascii_battle_prototype.combat.loot import loot_profile_for_enemy as tactica
 from ascii_battle_prototype.combat.missions import mission_builtin_presets as tactical_mission_builtin_presets
 from ascii_battle_prototype.combat.results import BattleRequest
 
+
+RECLAIMED_STRONGHOLD_BUILD_BOARD_SYMBOL = "n"
+
+RECLAIMED_STRONGHOLD_BUILDING_ORDER = (
+    "town_hall",
+    "general_store",
+    "clinic",
+    "sheriff_office",
+    "inn",
+    "home",
+    "library",
+    "carpenter",
+    "workshop",
+    "market_stall",
+    "well",
+    "park",
+)
+
+RECLAIMED_STRONGHOLD_BUILDING_COSTS: Dict[str, int] = {
+    "town_hall": 1800,
+    "general_store": 1250,
+    "clinic": 1400,
+    "sheriff_office": 1350,
+    "inn": 1500,
+    "home": 850,
+    "library": 1300,
+    "carpenter": 1200,
+    "workshop": 1100,
+    "market_stall": 450,
+    "well": 350,
+    "park": 500,
+}
+
+RECLAIMED_STRONGHOLD_FEATURE_CATALOG: Dict[str, Dict[str, object]] = {
+    "road": {
+        "name": "Road",
+        "kind": "road",
+        "symbol": ":",
+        "width": 1,
+        "height": 1,
+        "cost": 10,
+        "walkable": True,
+        "description": "A packed-earth town road tile for connecting the reclaimed site.",
+    },
+    "plaza_path": {
+        "name": "Plaza Path",
+        "kind": "road",
+        "symbol": ",",
+        "width": 1,
+        "height": 1,
+        "cost": 15,
+        "walkable": True,
+        "description": "A finished plaza path tile for civic squares and market approaches.",
+    },
+    "bench": {
+        "name": "Bench",
+        "kind": "decoration",
+        "symbol": "b",
+        "width": 2,
+        "height": 1,
+        "cost": 80,
+        "walkable": False,
+        "description": "A simple public bench for the founded town.",
+    },
+    "lamp_post": {
+        "name": "Lamp Post",
+        "kind": "decoration",
+        "symbol": "l",
+        "width": 1,
+        "height": 1,
+        "cost": 90,
+        "walkable": False,
+        "description": "A sturdy lamp post marking safer streets at the old stronghold.",
+    },
+    "flower_bed": {
+        "name": "Flower Bed",
+        "kind": "decoration",
+        "symbol": "f",
+        "width": 2,
+        "height": 1,
+        "cost": 60,
+        "walkable": False,
+        "description": "A small planted bed softening the reclaimed outpost grounds.",
+    },
+    "notice_sign": {
+        "name": "Notice Sign",
+        "kind": "decoration",
+        "symbol": "?",
+        "width": 1,
+        "height": 1,
+        "cost": 50,
+        "walkable": False,
+        "description": "A public notice sign for the new settlement.",
+    },
+    "shade_tree": {
+        "name": "Shade Tree",
+        "kind": "decoration",
+        "symbol": "T",
+        "width": 1,
+        "height": 1,
+        "cost": 120,
+        "walkable": False,
+        "description": "A planted shade tree for a town green.",
+    },
+}
 
 
 
@@ -1039,6 +1154,808 @@ class FarmGame(
             if choice.value == "bestiary":
                 self.show_combat_bestiary_menu()
                 continue
+
+    def ensure_bounty_state(self) -> None:
+        if not isinstance(getattr(self.state, "bounty_board_offers", None), dict):
+            self.state.bounty_board_offers = {}
+        if not isinstance(getattr(self.state, "active_bounties", None), dict):
+            self.state.active_bounties = {}
+        if not isinstance(getattr(self.state, "completed_bounty_log", None), list):
+            self.state.completed_bounty_log = []
+
+    def bounty_week_key(self) -> str:
+        week_index = max(0, (int(self.state.day) - 1) // 7)
+        return f"{self.state.year}-{self.state.month}-W{week_index}"
+
+    def active_bounty_records(self) -> List[Dict[str, object]]:
+        self.ensure_bounty_state()
+        records = [
+            record
+            for record in self.state.active_bounties.values()
+            if isinstance(record, dict) and str(record.get("status", "")) != "claimed"
+        ]
+        return sorted(
+            records,
+            key=lambda record: (
+                str(record.get("status", "accepted")) != "defeated",
+                str(record.get("posted_town_name", "")),
+                str(record.get("title", "")),
+            ),
+        )
+
+    def active_bounty_count(self) -> int:
+        return len(self.active_bounty_records())
+
+    def bounty_menu_hint(self) -> str:
+        active = self.active_bounty_records()
+        ready = sum(1 for bounty in active if str(bounty.get("status", "")) == "defeated")
+        if ready:
+            return f"{ready} ready, {len(active)}/3 active"
+        return f"{len(active)}/3 active"
+
+    def bounty_reward_text(self, bounty: Dict[str, object]) -> str:
+        parts: List[str] = []
+        money = int(bounty.get("reward_money", 0) or 0)
+        if money:
+            parts.append(f"${money}")
+        items = bounty.get("reward_items", {}) if isinstance(bounty.get("reward_items"), dict) else {}
+        if items:
+            parts.append(format_drops({str(k): int(v) for k, v in items.items()}))
+        return ", ".join(parts) if parts else "town reputation"
+
+    def bounty_status_label(self, bounty: Dict[str, object]) -> str:
+        status = str(bounty.get("status", "available") or "available")
+        if status == "defeated" or bool(bounty.get("target_defeated", False)):
+            return "Ready to turn in"
+        if status == "accepted":
+            return "Active"
+        if status == "claimed":
+            return "Claimed"
+        return "Available"
+
+    def bounty_target_depth(self, bounty: Dict[str, object]) -> int:
+        distance = abs(int(bounty.get("chunk_x", 0) or 0)) + abs(int(bounty.get("chunk_y", 0) or 0))
+        difficulty = str(bounty.get("difficulty", "Standard"))
+        bonus = {"Low": 0, "Standard": 2, "Dangerous": 5, "Elite": 8}.get(difficulty, 2)
+        return max(2, min(MINE_MAX_FLOOR, 3 + distance * 2 + bonus))
+
+    def bounty_board_context(self) -> Optional[Dict[str, object]]:
+        plan = self.current_procedural_town_plan()
+        if not plan:
+            return None
+        try:
+            chunk_x = int(plan.get("chunk_x", self.state.wilderness_chunk_x))
+            chunk_y = int(plan.get("chunk_y", self.state.wilderness_chunk_y))
+        except Exception:
+            chunk_x, chunk_y = self.state.wilderness_chunk_x, self.state.wilderness_chunk_y
+        key = self.wilderness_chunk_key(chunk_x, chunk_y)
+        return {
+            "town_key": key,
+            "town_name": str(plan.get("name", "Wilderness Town") or "Wilderness Town"),
+            "chunk_x": chunk_x,
+            "chunk_y": chunk_y,
+        }
+
+    def bounty_candidate_target_chunk(
+        self,
+        origin_x: int,
+        origin_y: int,
+        rng: random.Random,
+        used: set,
+    ) -> Tuple[int, int]:
+        for radius in [2, 3, 4, 5, 6]:
+            for _attempt in range(40):
+                dx = rng.randint(-radius, radius)
+                dy = rng.randint(-radius, radius)
+                if abs(dx) + abs(dy) < 2:
+                    continue
+                tx, ty = int(origin_x) + dx, int(origin_y) + dy
+                key = self.wilderness_chunk_key(tx, ty)
+                if key in used or (tx == origin_x and ty == origin_y):
+                    continue
+                if self.wilderness_chunk_has_procedural_settlement(tx, ty):
+                    continue
+                if self.wilderness_chunk_has_stronghold(tx, ty):
+                    continue
+                if self.wilderness_chunk_has_dungeon_site(tx, ty):
+                    continue
+                used.add(key)
+                return tx, ty
+        # Fallback stays deterministic and comfortably away from the issuing town.
+        tx, ty = int(origin_x) + 3 + len(used), int(origin_y) + 2
+        used.add(self.wilderness_chunk_key(tx, ty))
+        return tx, ty
+
+    def bounty_offer_template(
+        self,
+        rng: random.Random,
+        distance: int,
+        index: int,
+    ) -> Dict[str, object]:
+        outlaw_names = [
+            "Kestrel Vale", "Mara Flint", "Rook Calder", "Silas Pike",
+            "Juniper Cross", "Tobin Ash", "Nell Blackroad", "Corvin Dusk",
+        ]
+        monster_titles = [
+            "Old Fang", "Red-Eyed Howler", "Mirejaw", "Glassback",
+            "Briar Maw", "Hollow-Wing", "Ashsnout", "Moon-Spined Horror",
+        ]
+        kind_roll = rng.random()
+        if kind_roll < 0.38:
+            species = rng.choice(["Bandit", "Bandit", "Shield Guard"])
+            target_name = rng.choice(outlaw_names)
+            kind = "Outlaw"
+            description = f"{target_name} has been robbing travelers and hiding beyond town patrol routes."
+        elif kind_roll < 0.76:
+            species = rng.choice(["Wolf", "Razor Hare", "Marsh Toad", "Thornback", "Sporeling"])
+            target_name = f"{rng.choice(monster_titles)} the {species.replace('Elite ', '')}"
+            kind = "Monster"
+            description = f"Travelers report {target_name} stalking a wilderness route."
+        else:
+            species = rng.choice(["Ruin Bat", "Moss Haunt", "Hollow Sentinel", "Clockwork Beetle"])
+            target_name = f"{rng.choice(monster_titles)}"
+            kind = "Ruin Threat"
+            description = f"{target_name} is keeping scavengers and survey crews away from old stones."
+        difficulty = "Low"
+        if distance >= 5 or index >= 2:
+            difficulty = "Dangerous"
+        elif distance >= 3:
+            difficulty = "Standard"
+        if rng.random() > 0.86:
+            difficulty = "Elite"
+            if not str(species).startswith("Elite "):
+                species = f"Elite {species}"
+        return {
+            "kind": kind,
+            "target_name": target_name,
+            "species": species,
+            "difficulty": difficulty,
+            "description": description,
+        }
+
+    def generate_bounty_board_offers(self, context: Dict[str, object]) -> Dict[str, object]:
+        self.ensure_bounty_state()
+        week_key = self.bounty_week_key()
+        town_key = str(context["town_key"])
+        seed_text = f"{self.state.wilderness_seed}:{town_key}:{week_key}:bounty-board"
+        rng = random.Random(sum((index + 1) * ord(ch) for index, ch in enumerate(seed_text)))
+        offers: List[Dict[str, object]] = []
+        used_chunks: set = set()
+        active_ids = set(self.state.active_bounties.keys())
+        for index in range(5):
+            chunk_x, chunk_y = self.bounty_candidate_target_chunk(
+                int(context["chunk_x"]),
+                int(context["chunk_y"]),
+                rng,
+                used_chunks,
+            )
+            distance = abs(chunk_x - int(context["chunk_x"])) + abs(chunk_y - int(context["chunk_y"]))
+            template = self.bounty_offer_template(rng, distance, index)
+            difficulty_bonus = {"Low": 0, "Standard": 25, "Dangerous": 70, "Elite": 130}.get(str(template["difficulty"]), 25)
+            reward_money = 90 + distance * 32 + difficulty_bonus + rng.randint(0, 35)
+            reward_items: Dict[str, int] = {}
+            if template["kind"] == "Outlaw":
+                reward_items = {"Old Coin": 1 + (1 if distance >= 4 else 0)}
+            elif template["kind"] == "Monster":
+                reward_items = {"Small Pelt": 1} if "Wolf" in str(template["species"]) else {"Cave Herbs": 1}
+            else:
+                reward_items = {"Ruin Scrap": 1}
+            if str(template["difficulty"]) == "Elite":
+                reward_items["Iron Ore"] = reward_items.get("Iron Ore", 0) + 1
+            bounty_id = f"bounty:{town_key.replace(',', '_')}:{week_key}:{index}"
+            if bounty_id in active_ids:
+                continue
+            offers.append({
+                "id": bounty_id,
+                "title": f"Wanted: {template['target_name']}",
+                "kind": template["kind"],
+                "target_name": template["target_name"],
+                "species": template["species"],
+                "description": template["description"],
+                "difficulty": template["difficulty"],
+                "chunk_x": chunk_x,
+                "chunk_y": chunk_y,
+                "target_x": -1,
+                "target_y": -1,
+                "reward_money": reward_money,
+                "reward_items": reward_items,
+                "posted_town_key": town_key,
+                "posted_town_name": str(context["town_name"]),
+                "week_key": week_key,
+                "accepted_day": "",
+                "defeated_day": "",
+                "claimed_day": "",
+                "status": "available",
+                "target_spawned": False,
+                "target_defeated": False,
+            })
+        return {
+            "week_key": week_key,
+            "town_key": town_key,
+            "town_name": str(context["town_name"]),
+            "offers": offers,
+        }
+
+    def ensure_bounty_board_offers(self, context: Optional[Dict[str, object]] = None) -> Optional[Dict[str, object]]:
+        self.ensure_bounty_state()
+        context = context or self.bounty_board_context()
+        if not context:
+            return None
+        town_key = str(context["town_key"])
+        board = self.state.bounty_board_offers.get(town_key)
+        if not isinstance(board, dict) or str(board.get("week_key", "")) != self.bounty_week_key():
+            board = self.generate_bounty_board_offers(context)
+            self.state.bounty_board_offers[town_key] = board
+        return board
+
+    def bounty_detail_lines(self, bounty: Dict[str, object]) -> List[str]:
+        target_x = int(bounty.get("chunk_x", 0) or 0)
+        target_y = int(bounty.get("chunk_y", 0) or 0)
+        status = self.bounty_status_label(bounty)
+        depth = self.bounty_target_depth(bounty)
+        species = str(bounty.get("species", "Bandit"))
+        base_species = species.replace("Elite ", "").strip()
+        profile = mine_enemy_profile(base_species)
+        lines = [
+            str(bounty.get("title", "Wanted Target")).upper(),
+            "",
+            f"Status: {status}",
+            f"Posted by: {bounty.get('posted_town_name', 'Wilderness sheriff office')}",
+            f"Category: {bounty.get('kind', 'Bounty')}",
+            f"Target: {bounty.get('target_name', 'Wanted Target')}",
+            f"Combat type: {species}",
+            f"Difficulty: {bounty.get('difficulty', 'Standard')} (depth {depth})",
+            f"Coordinates: chunk ({target_x},{target_y})",
+            f"Reward: {self.bounty_reward_text(bounty)}",
+            "",
+            str(bounty.get("description", "Track the target, defeat it, and return to a bounty board.")),
+            "",
+            "Instructions:",
+            "- Accept the bounty from a sheriff office board.",
+            "- Travel to the listed wilderness chunk.",
+            "- The chunk appears as a red ! on the overworld map while active.",
+            "- Defeat the target, then return to any bounty board to claim the reward.",
+        ]
+        if profile:
+            lines.extend(["", f"Target note: {profile.get('description', '')}"])
+        if str(bounty.get("status", "")) == "defeated":
+            lines.extend(["", "Turn-in: ready. Visit a bounty board to claim the posted reward."])
+        return lines
+
+    def active_bounty_overview_lines(self) -> List[str]:
+        active = self.active_bounty_records()
+        claimed = list(getattr(self.state, "completed_bounty_log", []) or [])
+        lines = [
+            "ACTIVE BOUNTIES",
+            "",
+            f"Active: {len(active)}/3",
+            f"Ready to turn in: {sum(1 for bounty in active if str(bounty.get('status', '')) == 'defeated')}",
+            f"Completed: {len(claimed)}",
+        ]
+        if not active:
+            lines.extend([
+                "",
+                "No active bounties.",
+                "Find a sheriff office in a wilderness town and check its bounty board.",
+            ])
+            return lines
+        lines.extend(["", "Current contracts:"])
+        for bounty in active:
+            marker = "!" if str(bounty.get("status", "")) == "defeated" else "-"
+            lines.append(
+                f"{marker} {bounty.get('title', 'Wanted Target')} [{self.bounty_status_label(bounty)}]"
+            )
+            lines.append(
+                f"  Chunk ({bounty.get('chunk_x', 0)},{bounty.get('chunk_y', 0)}) | "
+                f"{bounty.get('difficulty', 'Standard')} | Reward {self.bounty_reward_text(bounty)}"
+            )
+        return lines
+
+    def accept_bounty(self, bounty: Dict[str, object]) -> bool:
+        self.ensure_bounty_state()
+        bounty_id = str(bounty.get("id", "") or "")
+        if not bounty_id:
+            self.set_message("That bounty record is unreadable.")
+            return False
+        if bounty_id in self.state.active_bounties:
+            self.set_message("That bounty is already active.")
+            return False
+        if self.active_bounty_count() >= 3:
+            self.set_message("You can only keep 3 active bounties at once.")
+            return False
+        record = dict(bounty)
+        record["status"] = "accepted"
+        record["accepted_day"] = self.errand_day_key()
+        record["target_defeated"] = False
+        record["target_spawned"] = False
+        record["target_x"] = -1
+        record["target_y"] = -1
+        self.state.active_bounties[bounty_id] = record
+        self.autosave_with_message(
+            f"Accepted {record.get('title', 'bounty')}. Target chunk marked at ({record.get('chunk_x')},{record.get('chunk_y')})."
+        )
+        return True
+
+    def claim_bounty_reward(self, bounty_id: str) -> bool:
+        self.ensure_bounty_state()
+        bounty = self.state.active_bounties.get(str(bounty_id))
+        if not isinstance(bounty, dict):
+            self.set_message("That bounty is not active.")
+            return False
+        if str(bounty.get("status", "")) != "defeated" and not bool(bounty.get("target_defeated", False)):
+            self.set_message("Defeat the bounty target before claiming the reward.")
+            return False
+        money = int(bounty.get("reward_money", 0) or 0)
+        items = bounty.get("reward_items", {}) if isinstance(bounty.get("reward_items"), dict) else {}
+        if money:
+            self.state.money += money
+        if items:
+            add_inventory_items(self.state.inventory, {str(k): int(v) for k, v in items.items()})
+        bounty["status"] = "claimed"
+        bounty["claimed_day"] = self.errand_day_key()
+        bounty["target_defeated"] = True
+        self.state.completed_bounty_log.append(dict(bounty))
+        self.state.completed_bounty_log = self.state.completed_bounty_log[-30:]
+        self.state.active_bounties.pop(str(bounty_id), None)
+        if self.current_procedural_town_plan() and hasattr(self, "adjust_procedural_town_reputation"):
+            self.adjust_procedural_town_reputation(3, f"Turned in {bounty.get('title', 'a bounty')}")
+        self.autosave_with_message(
+            f"Claimed bounty reward for {bounty.get('target_name', 'the target')}: {self.bounty_reward_text(bounty)}."
+        )
+        return True
+
+    def show_bounty_board_menu(self):
+        context = self.bounty_board_context()
+        if not context:
+            self.set_message("No sheriff office bounty board is available here.")
+            return MENU_BACK
+        while True:
+            board = self.ensure_bounty_board_offers(context) or {"offers": []}
+            active = self.active_bounty_records()
+            active_ids = {str(bounty.get("id", "")) for bounty in active}
+            ready = [bounty for bounty in active if str(bounty.get("status", "")) == "defeated"]
+            items: List[MenuItem] = []
+            for bounty in ready:
+                items.append(MenuItem(
+                    label=f"! Turn in: {bounty.get('target_name', 'Target')}",
+                    value=f"claim:{bounty.get('id')}",
+                    enabled=True,
+                    hint=self.bounty_reward_text(bounty),
+                ))
+            for offer in board.get("offers", []) or []:
+                if str(offer.get("id", "")) in active_ids:
+                    continue
+                items.append(MenuItem(
+                    label=str(offer.get("title", "Wanted Target")),
+                    value=f"offer:{offer.get('id')}",
+                    enabled=True,
+                    hint=f"({offer.get('chunk_x')},{offer.get('chunk_y')}) {offer.get('difficulty')} {self.bounty_reward_text(offer)}",
+                ))
+            items.extend([
+                MenuItem(label="Active bounties", value="active", enabled=True, hint=self.bounty_menu_hint()),
+                MenuItem(label="Board summary", value="summary", enabled=True, hint=str(board.get("week_key", self.bounty_week_key()))),
+                MenuItem(label="Back", value=MENU_BACK, enabled=True),
+            ])
+            choice = self.vertical_panel_select("Bounty Board", items, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT, return_back=True)
+            if choice is None or choice.value == MENU_BACK:
+                self.set_message("Closed bounty board.")
+                return MENU_BACK
+            value = str(choice.value)
+            if value == "active":
+                self.show_active_bounties_menu()
+                continue
+            if value == "summary":
+                lines = [
+                    "BOUNTY BOARD",
+                    "",
+                    f"Town: {context['town_name']}",
+                    f"Refresh: weekly ({self.bounty_week_key()})",
+                    f"Active limit: {self.active_bounty_count()}/3",
+                    f"Ready turn-ins: {len(ready)}",
+                    "",
+                    "Accepted bounties persist until turned in.",
+                    "New board offers refresh each week without erasing active contracts.",
+                ]
+                self.vertical_panel_view("Bounty Board", lines, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
+                continue
+            if value.startswith("claim:"):
+                bounty_id = value.split(":", 1)[1]
+                bounty = self.state.active_bounties.get(bounty_id, {})
+                self.vertical_panel_view("Bounty Turn-In", self.bounty_detail_lines(bounty), LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
+                confirm = self.vertical_panel_select(
+                    "Claim Bounty Reward",
+                    [
+                        MenuItem(label="Claim reward", value="claim", enabled=True, hint=self.bounty_reward_text(bounty)),
+                        MenuItem(label="Back", value=MENU_BACK, enabled=True),
+                    ],
+                    LEFT_PANEL_WIDTH,
+                    LEFT_PANEL_HEIGHT,
+                    return_back=True,
+                )
+                if confirm and confirm.value == "claim":
+                    self.claim_bounty_reward(bounty_id)
+                continue
+            if value.startswith("offer:"):
+                bounty_id = value.split(":", 1)[1]
+                offer = next(
+                    (candidate for candidate in board.get("offers", []) or [] if str(candidate.get("id", "")) == bounty_id),
+                    None,
+                )
+                if not isinstance(offer, dict):
+                    self.set_message("That bounty is no longer posted.")
+                    continue
+                self.vertical_panel_view("Posted Bounty", self.bounty_detail_lines(offer), LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
+                confirm = self.vertical_panel_select(
+                    "Accept Bounty",
+                    [
+                        MenuItem(
+                            label="Accept bounty",
+                            value="accept",
+                            enabled=self.active_bounty_count() < 3,
+                            hint="track target on overworld map",
+                        ),
+                        MenuItem(label="Back", value=MENU_BACK, enabled=True),
+                    ],
+                    LEFT_PANEL_WIDTH,
+                    LEFT_PANEL_HEIGHT,
+                    return_back=True,
+                )
+                if confirm and confirm.value == "accept":
+                    self.accept_bounty(offer)
+                continue
+
+    def show_active_bounties_menu(self):
+        while True:
+            active = self.active_bounty_records()
+            items: List[MenuItem] = [
+                MenuItem(label="Bounty overview", value="overview", enabled=True, hint=self.bounty_menu_hint()),
+            ]
+            for bounty in active:
+                marker = "!" if str(bounty.get("status", "")) == "defeated" else "-"
+                items.append(MenuItem(
+                    label=f"{marker} {bounty.get('target_name', 'Wanted Target')}",
+                    value=str(bounty.get("id", "")),
+                    enabled=True,
+                    hint=f"({bounty.get('chunk_x')},{bounty.get('chunk_y')}) {self.bounty_status_label(bounty)}",
+                ))
+            items.append(MenuItem(label="Back", value=MENU_BACK, enabled=True))
+            choice = self.vertical_panel_select("Active Bounties", items, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT, return_back=True)
+            if choice is None or choice.value == MENU_BACK:
+                self.set_message("Closed active bounties.")
+                return MENU_BACK
+            if choice.value == "overview":
+                self.vertical_panel_view("Active Bounties", self.active_bounty_overview_lines(), LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
+                continue
+            bounty = self.state.active_bounties.get(str(choice.value))
+            if isinstance(bounty, dict):
+                self.vertical_panel_view("Active Bounty", self.bounty_detail_lines(bounty), LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
+            else:
+                self.set_message("That bounty is no longer active.")
+
+    def active_bounty_for_chunk(self, chunk_x: int, chunk_y: int) -> Optional[Dict[str, object]]:
+        for bounty in self.active_bounty_records():
+            if str(bounty.get("status", "")) not in {"accepted", "defeated"}:
+                continue
+            if str(bounty.get("status", "")) == "defeated" or bool(bounty.get("target_defeated", False)):
+                continue
+            try:
+                if int(bounty.get("chunk_x", 0)) == int(chunk_x) and int(bounty.get("chunk_y", 0)) == int(chunk_y):
+                    return bounty
+            except Exception:
+                continue
+        return None
+
+    def bounty_target_passable_tile(
+        self,
+        x: int,
+        y: int,
+        chunk_x: Optional[int] = None,
+        chunk_y: Optional[int] = None,
+        ignore_bounty_id: str = "",
+    ) -> bool:
+        cx = self.state.wilderness_chunk_x if chunk_x is None else int(chunk_x)
+        cy = self.state.wilderness_chunk_y if chunk_y is None else int(chunk_y)
+        if not self.stronghold_enemy_passable_tile(x, y, cx, cy):
+            return False
+        if self.on_wilderness() and cx == self.state.wilderness_chunk_x and cy == self.state.wilderness_chunk_y:
+            self.ensure_wilderness_animals()
+            animal_key = self.wilderness_animal_key(cx, cy)
+            for animal in self.wilderness_animals.get(animal_key, []):
+                try:
+                    if int(animal.get("x", -1)) == int(x) and int(animal.get("y", -1)) == int(y):
+                        return False
+                except Exception:
+                    continue
+            if self.procedural_town_building_at(x, y):
+                return False
+        for bounty in self.get_bounty_targets_for_chunk(cx, cy, create=False):
+            if ignore_bounty_id and str(bounty.get("id", "")) == ignore_bounty_id:
+                continue
+            try:
+                if int(bounty.get("x", -1)) == int(x) and int(bounty.get("y", -1)) == int(y):
+                    return False
+            except Exception:
+                continue
+        return True
+
+    def nearest_bounty_target_spawn_tile(self, bounty: Dict[str, object]) -> Tuple[int, int]:
+        cx = int(bounty.get("chunk_x", self.state.wilderness_chunk_x))
+        cy = int(bounty.get("chunk_y", self.state.wilderness_chunk_y))
+        grid = self.get_wilderness_chunk_map(cx, cy)
+        h = len(grid)
+        w = len(grid[0]) if h else WIDTH
+        rng = random.Random(sum(ord(ch) for ch in str(bounty.get("id", ""))) + int(self.state.wilderness_seed))
+        preferred = [
+            (w // 2 + rng.randint(-16, 16), h // 2 + rng.randint(-8, 8))
+            for _ in range(16)
+        ]
+        preferred.append((w // 2, h // 2))
+        for anchor_x, anchor_y in preferred:
+            for radius in range(1, 18):
+                candidates = []
+                for yy in range(max(2, anchor_y - radius), min(h - 2, anchor_y + radius + 1)):
+                    for xx in range(max(2, anchor_x - radius), min(w - 2, anchor_x + radius + 1)):
+                        if self.on_wilderness() and cx == self.state.wilderness_chunk_x and cy == self.state.wilderness_chunk_y:
+                            if abs(xx - self.state.player_x) + abs(yy - self.state.player_y) <= 5:
+                                continue
+                        if self.bounty_target_passable_tile(xx, yy, cx, cy, ignore_bounty_id=str(bounty.get("id", ""))):
+                            candidates.append((xx, yy))
+                if candidates:
+                    return rng.choice(candidates)
+        return w // 2, h // 2
+
+    def bounty_record_as_enemy(self, bounty: Dict[str, object]) -> Dict[str, object]:
+        if int(bounty.get("target_x", -1) or -1) < 0 or int(bounty.get("target_y", -1) or -1) < 0:
+            x, y = self.nearest_bounty_target_spawn_tile(bounty)
+            bounty["target_x"] = x
+            bounty["target_y"] = y
+            bounty["target_spawned"] = True
+        bounty["x"] = int(bounty.get("target_x", 0) or 0)
+        bounty["y"] = int(bounty.get("target_y", 0) or 0)
+        bounty["floor"] = self.bounty_target_depth(bounty)
+        bounty["boss"] = str(bounty.get("difficulty", "")) == "Elite" or str(bounty.get("species", "")).startswith("Elite ")
+        bounty["alert"] = bool(bounty.get("alert", False))
+        bounty["bounty_id"] = str(bounty.get("id", ""))
+        return bounty
+
+    def get_bounty_targets_for_chunk(
+        self,
+        chunk_x: Optional[int] = None,
+        chunk_y: Optional[int] = None,
+        create: bool = True,
+    ) -> List[Dict[str, object]]:
+        self.ensure_bounty_state()
+        cx = self.state.wilderness_chunk_x if chunk_x is None else int(chunk_x)
+        cy = self.state.wilderness_chunk_y if chunk_y is None else int(chunk_y)
+        targets: List[Dict[str, object]] = []
+        for bounty in self.active_bounty_records():
+            if str(bounty.get("status", "")) != "accepted" or bool(bounty.get("target_defeated", False)):
+                continue
+            try:
+                if int(bounty.get("chunk_x", 0)) != cx or int(bounty.get("chunk_y", 0)) != cy:
+                    continue
+            except Exception:
+                continue
+            targets.append(self.bounty_record_as_enemy(bounty) if create else bounty)
+        return targets
+
+    def bounty_target_at(self, x: int, y: int) -> Optional[Dict[str, object]]:
+        if not self.on_wilderness():
+            return None
+        for bounty in self.get_bounty_targets_for_chunk():
+            try:
+                if int(bounty.get("x", -1)) == int(x) and int(bounty.get("y", -1)) == int(y):
+                    return bounty
+            except Exception:
+                continue
+        return None
+
+    def nearest_engaging_bounty_target(self) -> Optional[Dict[str, object]]:
+        if not self.on_wilderness():
+            return None
+        px, py = self.state.player_x, self.state.player_y
+        nearby = []
+        for bounty in self.get_bounty_targets_for_chunk():
+            try:
+                ex, ey = int(bounty.get("x", -1)), int(bounty.get("y", -1))
+            except Exception:
+                continue
+            if max(abs(ex - px), abs(ey - py)) <= 1:
+                nearby.append((abs(ex - px) + abs(ey - py), bounty))
+        if not nearby:
+            return None
+        return sorted(nearby, key=lambda pair: pair[0])[0][1]
+
+    def move_bounty_target(self, bounty: Dict[str, object]) -> None:
+        try:
+            ex, ey = int(bounty.get("x", bounty.get("target_x", 0))), int(bounty.get("y", bounty.get("target_y", 0)))
+            cx = int(bounty.get("chunk_x", self.state.wilderness_chunk_x))
+            cy = int(bounty.get("chunk_y", self.state.wilderness_chunk_y))
+        except Exception:
+            return
+        distance = abs(ex - self.state.player_x) + abs(ey - self.state.player_y)
+        chase = distance <= (9 if bounty.get("boss") else 7)
+        bounty["alert"] = bool(chase or bounty.get("alert", False))
+        options = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+        if chase:
+            options.sort(key=lambda step: abs((ex + step[0]) - self.state.player_x) + abs((ey + step[1]) - self.state.player_y))
+        else:
+            random.shuffle(options)
+        move_chance = 0.58 if chase else 0.36
+        if bounty.get("boss"):
+            move_chance += 0.08
+        if random.random() > move_chance:
+            return
+        for ox, oy in options:
+            nx, ny = ex + ox, ey + oy
+            if self.bounty_target_passable_tile(nx, ny, cx, cy, ignore_bounty_id=str(bounty.get("id", ""))):
+                bounty["x"] = nx
+                bounty["y"] = ny
+                bounty["target_x"] = nx
+                bounty["target_y"] = ny
+                return
+
+    def update_bounty_targets(self) -> None:
+        if not self.on_wilderness():
+            return
+        for bounty in list(self.get_bounty_targets_for_chunk()):
+            self.move_bounty_target(bounty)
+
+    def startle_bounty_target(self, bounty: Dict[str, object]) -> None:
+        try:
+            ex, ey = int(bounty.get("x", 0)), int(bounty.get("y", 0))
+            cx = int(bounty.get("chunk_x", self.state.wilderness_chunk_x))
+            cy = int(bounty.get("chunk_y", self.state.wilderness_chunk_y))
+        except Exception:
+            return
+        dx = 1 if ex >= self.state.player_x else -1
+        dy = 1 if ey >= self.state.player_y else -1
+        for ox, oy in [(dx, 0), (0, dy), (dx, dy), (-dy, dx), (dy, -dx), (-dx, 0), (0, -dy)]:
+            nx, ny = ex + ox, ey + oy
+            if self.bounty_target_passable_tile(nx, ny, cx, cy, ignore_bounty_id=str(bounty.get("id", ""))):
+                bounty["x"] = nx
+                bounty["y"] = ny
+                bounty["target_x"] = nx
+                bounty["target_y"] = ny
+                return
+
+    def check_bounty_target_engagement(self, reason: str = "nearby") -> bool:
+        bounty = self.nearest_engaging_bounty_target()
+        if not bounty:
+            return False
+        self.start_bounty_combat_encounter(bounty, reason=reason)
+        return True
+
+    def mark_bounty_target_defeated(self, bounty: Dict[str, object]) -> None:
+        bounty_id = str(bounty.get("id", bounty.get("bounty_id", "")) or "")
+        record = self.state.active_bounties.get(bounty_id)
+        if not isinstance(record, dict):
+            return
+        record["status"] = "defeated"
+        record["target_defeated"] = True
+        record["defeated_day"] = self.errand_day_key()
+        record["target_x"] = int(bounty.get("x", record.get("target_x", -1)) or -1)
+        record["target_y"] = int(bounty.get("y", record.get("target_y", -1)) or -1)
+
+    def apply_bounty_battle_result(self, bounty: Dict[str, object], result: object):
+        outcome = combat_result_outcome(result)
+        species = str(bounty.get("species", "enemy"))
+        defeated = list(getattr(result, "defeated_enemies", []) or [])
+        remaining_items = apply_party_status_to_combat_state(self.state, result)
+        result_context = getattr(result, "return_context", {}) or {}
+        starting_items = result_context.get("farm_player_items", {}) if isinstance(result_context, dict) else {}
+        used_items = consumed_combat_items(starting_items, remaining_items)
+        for item_name, qty in used_items.items():
+            self.state.inventory[item_name] = max(0, int(self.state.inventory.get(item_name, 0)) - int(qty))
+        tactical_lines = self.apply_tactical_progression_result(result)
+        depth = self.bounty_target_depth(bounty)
+
+        if outcome == "victory":
+            loot = self.combat_loot_for_result(result)
+            money, items = self.grant_farm_combat_loot(loot)
+            exp_gain = mine_combat_exp_for_defeated(defeated or [species], depth)
+            if bounty.get("boss"):
+                exp_gain += 8
+            _amount, level_lines = grant_combat_exp(self.state, exp_gain)
+            self.mark_bounty_target_defeated(bounty)
+            self.state.mine_combat_victories += 1
+            self.state.mine_enemies_defeated += max(1, len(defeated))
+            minutes = self.apply_combat_time_cost(result, "mine")
+            profile = farmstead_combat_profile(self.state)
+            progress_lines = list(level_lines)
+            progress_lines.extend(tactical_lines)
+            progress_lines.extend(self.grant_party_relationship_after_battle("victory"))
+            progress_lines.extend(self.companion_after_battle_lines("victory"))
+            progress_lines.append(f"Return to a bounty board to claim {self.bounty_reward_text(bounty)}.")
+            level_text = " " + " ".join(progress_lines) if progress_lines else ""
+            summary = self.combat_summary_text(
+                f"Bounty defeated: {species}",
+                exp_gain,
+                money,
+                items,
+                used_items,
+                minutes,
+                f"HP {profile['current_hp']}/{profile['max_hp']}",
+            )
+            self.autosave_with_message(f"{summary}.{level_text}")
+            return
+
+        if outcome == "defeat":
+            self.state.mine_combat_defeats += 1
+            self.state.combat_current_hp = max(1, int(getattr(self.state, "combat_current_hp", 1)))
+            minutes = self.apply_combat_time_cost(result, "mine")
+            profile = farmstead_combat_profile(self.state)
+            party_lines = self.companion_after_battle_lines("defeat")
+            party_text = " " + " ".join(party_lines) if party_lines else ""
+            summary = self.combat_summary_text(
+                f"Defeat: {species}",
+                0,
+                0,
+                {},
+                used_items,
+                minutes,
+                f"HP {profile['current_hp']}/{profile['max_hp']}",
+            )
+            self.return_from_wilderness_to_town(emergency=True)
+            self.autosave_with_message(f"{summary}. The bounty remains active, but you were driven back to town.{party_text}")
+            return
+
+        self.state.mine_combat_flees += 1
+        self.startle_bounty_target(bounty)
+        minutes = self.apply_combat_time_cost(result, "mine")
+        profile = farmstead_combat_profile(self.state)
+        party_lines = self.companion_after_battle_lines("fled")
+        party_text = " " + " ".join(party_lines) if party_lines else ""
+        summary = self.combat_summary_text(
+            f"Retreat: {species}",
+            0,
+            0,
+            {},
+            used_items,
+            minutes,
+            f"HP {profile['current_hp']}/{profile['max_hp']}",
+        )
+        self.autosave_with_message(f"{summary}. The bounty target slips away nearby.{party_text}")
+
+    def start_bounty_combat_encounter(self, bounty: Dict[str, object], reason: str = "nearby"):
+        species = str(bounty.get("species", "enemy"))
+        bounty_id = str(bounty.get("id", bounty.get("bounty_id", "bounty")))
+        depth = self.bounty_target_depth(bounty)
+        self.set_message(f"{species} engages you. Entering bounty combat...")
+        self.invalidate_draw_cache()
+        request = mine_battle_request_for_enemy(
+            depth,
+            bounty,
+            self.state,
+            self.active_farmstead_companion_profiles(),
+            self.party_total_limit(),
+            encounter_kind="bounty",
+        )
+        request.mission_id = f"bounty-{bounty_id.replace(':', '-').replace(',', '_')}"
+        request.mission_name = str(bounty.get("title", "Wilderness Bounty"))
+        request.reward_theme = "bounty"
+        request.difficulty_hint = f"bounty-depth:{depth}"
+        request.return_context.update({
+            "location": "Wilderness",
+            "farm_combat_depth": depth,
+            "bounty_id": bounty_id,
+            "enemy_id": bounty_id,
+            "enemy_name": species,
+            "mission_id": request.mission_id,
+            "mission_name": request.mission_name,
+        })
+        request.world_flags_on_victory = [f"bounty:{bounty_id}:target_defeated"]
+        request.world_flags_on_defeat = [f"bounty:{bounty_id}:party_defeated"]
+        try:
+            result = run_mine_battle(request)
+        except Exception as exc:
+            append_debug_log(f"Bounty combat handoff error: {type(exc).__name__}: {exc}")
+            write_debug_report(self, exc, f"bounty_combat_handoff id={bounty_id} enemy={species} reason={reason}")
+            self.set_message(f"Combat could not start. Error logged to {CRASH_REPORT_PATH.name}: {exc}")
+            self.invalidate_draw_cache()
+            return
+        self.invalidate_draw_cache()
+        self.apply_bounty_battle_result(bounty, result)
 
     def completed_resident_request_ids(self) -> set:
         if not isinstance(getattr(self.state, "completed_resident_request_ids", None), list):
@@ -5127,7 +6044,8 @@ class FarmGame(
                     continue
                 grid[yy][xx] = rng.choice(["B", "^", ":", "."])
         else:
-            self.dress_reclaimed_stronghold_site(grid, cx, cy)
+            self.dress_reclaimed_stronghold_site(grid, cx, cy, record)
+            self.apply_reclaimed_stronghold_features_to_grid(chunk_x, chunk_y, grid)
 
         grid[cy][cx] = "!"
         self.wilderness_force_travel_corridor(grid, (w // 2, h // 2), (cx, cy), rng, width=0)
@@ -6644,10 +7562,17 @@ class FarmGame(
             for xx in range(max(1, self.state.player_x - 1), min(w - 1, self.state.player_x + 2)):
                 if self.wilderness_map[yy][xx] not in ["~", "=", "S", "V", "X", WILDERNESS_CLAIM_SYMBOL]:
                     self.wilderness_map[yy][xx] = "."
+        if self.wilderness_chunk_has_stronghold(cx, cy):
+            record = self.wilderness_stronghold_record(cx, cy, create=False)
+            if record and record.get("cleared"):
+                self.ensure_reclaimed_stronghold_build_board(cx, cy)
+                self.apply_reclaimed_stronghold_features_to_grid(cx, cy, self.wilderness_map)
+                self.reconcile_reclaimed_stronghold_population(cx, cy)
         self.wilderness_maps[key] = self.wilderness_map
         self.ensure_wilderness_animals()
         self.get_wilderness_animals(cx, cy)
         self.get_wilderness_stronghold_enemies(cx, cy)
+        self.get_bounty_targets_for_chunk(cx, cy)
         self.discover_procedural_town(cx, cy)
         append_debug_log(f"set_wilderness_chunk: done key={key} elapsed={time.perf_counter() - t0:.3f}s size={w}x{h}")
 
@@ -8285,6 +9210,8 @@ class FarmGame(
         key = f"{cx},{cy}"
         if key in (self.state.owned_wilderness_claims or {}):
             return WILDERNESS_CLAIM_SYMBOL
+        if self.active_bounty_for_chunk(cx, cy):
+            return "!"
         settlement = self.procedural_town_plan(cx, cy)
         if settlement and bool(settlement.get("discovered", False)):
             return PROCEDURAL_TOWN_OVERWORLD_SYMBOL
@@ -8336,6 +9263,8 @@ class FarmGame(
 
     def overworld_chunk_colored_symbol(self, cx: int, cy: int, symbol: str) -> str:
         if symbol == "!":
+            if self.active_bounty_for_chunk(cx, cy):
+                return colorize(symbol, C.HOSTILE)
             record = self.wilderness_stronghold_record(cx, cy, create=False)
             return colorize(symbol, C.CROP_READY if record.get("cleared") else C.HOSTILE)
         return self.color_overworld_symbol(symbol)
@@ -8351,6 +9280,9 @@ class FarmGame(
         if key in (self.state.owned_wilderness_claims or {}):
             claim = self.state.owned_wilderness_claims[key]
             details.append(f"Owned claim: {claim.get('name', key)}")
+        bounty = self.active_bounty_for_chunk(cx, cy)
+        if bounty:
+            details.append(f"Bounty target: {bounty.get('target_name', 'Wanted Target')}")
         settlement = self.procedural_town_plan(cx, cy)
         if settlement and bool(settlement.get("discovered", False)):
             details.append(f"Wilderness town: {settlement.get('name', key)}")
@@ -8419,7 +9351,7 @@ class FarmGame(
             (colorize("*", C.CROP_READY), "visited"),
             (colorize(WILDERNESS_CLAIM_SYMBOL, C.BIN), "owned claim"),
             (colorize(WILDERNESS_SURVEY_PREVIEW_SYMBOL, C.DIM), "survey"),
-            (colorize("!", C.HOSTILE), "stronghold"),
+            (colorize("!", C.HOSTILE), "bounty/stronghold"),
             (colorize("!", C.CROP_READY), "reclaimed"),
             (colorize("X", C.STONE), "dungeon"),
             (colorize("V", C.WATER), "known cave"),
@@ -10518,6 +11450,7 @@ class FarmGame(
             Dict[Tuple[int, int], Dict[str, object]]
         ] = None,
         procedural_town_active: Optional[bool] = None,
+        procedural_town_color_lookup: Optional[Dict[Tuple[int, int], str]] = None,
     ) -> str:
         """Return a one-character tile with location/season-aware color applied."""
         tile_map = tile_map if tile_map is not None else self.active_map()
@@ -10562,6 +11495,17 @@ class FarmGame(
                 )
 
         tile = tile_map[y][x]
+        if self.on_wilderness() and tile == RECLAIMED_STRONGHOLD_BUILD_BOARD_SYMBOL:
+            return colorize(tile, C.SHOP)
+        if self.on_wilderness():
+            _feature_id, stronghold_feature = self.reclaimed_stronghold_feature_at(x, y)
+            if stronghold_feature:
+                feature_color = {
+                    "road": C.DIM,
+                    "building": C.SHOP,
+                    "decoration": C.CROP_READY,
+                }.get(str(stronghold_feature.get("kind", "")), C.PLACEMENT)
+                return colorize(tile, feature_color)
         if self.on_wilderness() and tile == "!":
             record = self.wilderness_stronghold_record(create=False)
             return colorize(tile, C.CROP_READY if record.get("cleared") else C.HOSTILE)
@@ -10594,9 +11538,13 @@ class FarmGame(
                 ">": C.LAMP,
             }
             custom_color_key = (
-                self.procedural_town_custom_tile_color_key(x, y)
-                if hasattr(self, "procedural_town_custom_tile_color_key")
-                else ""
+                procedural_town_color_lookup.get((int(x), int(y)), "")
+                if procedural_town_color_lookup is not None
+                else (
+                    self.procedural_town_custom_tile_color_key(x, y)
+                    if hasattr(self, "procedural_town_custom_tile_color_key")
+                    else ""
+                )
             )
             custom_colors = {
                 "white": C.PLAYER,
@@ -10990,7 +11938,14 @@ class FarmGame(
                 return False
             return tile not in ["#", " ", "r", "O", "I", "G", "M", "q", "c", "g", "B", "?"]
         if self.on_wilderness():
+            if self.bounty_target_at(x, y):
+                return False
             if self.wilderness_stronghold_enemy_at(x, y):
+                return False
+            if self.reclaimed_stronghold_build_board_at(x, y):
+                return False
+            _feature_id, stronghold_feature = self.reclaimed_stronghold_feature_at(x, y)
+            if stronghold_feature and not bool(stronghold_feature.get("walkable", False)):
                 return False
             if self.current_procedural_town_plan() and (
                 self.procedural_town_building_at(x, y)
@@ -11253,6 +12208,13 @@ class FarmGame(
         if self.on_procedural_town_interior():
             building = self.current_procedural_town_building()
             tile = self.active_map()[y][x]
+            if building and str(building.get("type_id", "")) == "sheriff_office":
+                if tile == "&":
+                    return "Sheriff desk: use Z/Enter for the bounty board"
+                if tile == "P":
+                    return "Wanted board: use Z/Enter to view bounties"
+                if tile == "d":
+                    return "Patrol desk with reports, maps, and witness notes"
             return {
                 "#": "Interior wall",
                 "-": "Interior partition",
@@ -11357,6 +12319,14 @@ class FarmGame(
                 " ": "Museum wall",
             }.get(tile, f"Museum tile '{tile}'")
         if self.on_wilderness():
+            bounty = self.bounty_target_at(x, y)
+            if bounty:
+                species = str(bounty.get("species", "enemy"))
+                return (
+                    f"{bounty.get('target_name', species)} ({self.bounty_status_label(bounty)} bounty): "
+                    f"{self.mine_enemy_description(bounty).replace('this mine floor', 'this wilderness chunk')} "
+                    "Bump or step close to start combat."
+                )
             enemy = self.wilderness_stronghold_enemy_at(x, y)
             if enemy:
                 species = str(enemy.get("species", "enemy"))
@@ -11372,6 +12342,18 @@ class FarmGame(
             if crop:
                 return self.describe_crop(crop)
             tile = self.active_map()[y][x]
+            if self.reclaimed_stronghold_build_board_at(x, y):
+                plan = self.wilderness_settlement_plan(self.state.wilderness_chunk_x, self.state.wilderness_chunk_y)
+                if plan:
+                    return f"{plan.get('name', 'Founded town')} build board: use Z/Enter to place buildings, roads, and town features"
+                return "Reclaimed stronghold build board: use Z/Enter to found a town here"
+            _feature_id, stronghold_feature = self.reclaimed_stronghold_feature_at(x, y)
+            if stronghold_feature:
+                return (
+                    f"{stronghold_feature.get('name', 'Town feature')} "
+                    f"({stronghold_feature.get('width', 1)}x{stronghold_feature.get('height', 1)}): "
+                    "placed from the reclaimed stronghold build board"
+                )
             building = self.procedural_town_building_at(x, y)
             if building:
                 if int(building.get("door_x", -1)) == x and int(building.get("door_y", -1)) == y:
@@ -11704,6 +12686,11 @@ class FarmGame(
             if self.wilderness_stronghold_enemy_at(x, y):
                 return "Combat: hostile stronghold patrol"
             tile = self.active_map()[y][x]
+            if self.reclaimed_stronghold_build_board_at(x, y):
+                return "Z: open stronghold build board | I: inspect"
+            _feature_id, stronghold_feature = self.reclaimed_stronghold_feature_at(x, y)
+            if stronghold_feature:
+                return f"Z: inspect {stronghold_feature.get('name', 'town feature')} | I: inspect"
             tool = self.state.selected_tool
             if self.on_owned_wilderness_claim():
                 placed = self.get_placed_object(x, y)
@@ -11957,6 +12944,19 @@ class FarmGame(
                 ])
 
         if self.on_wilderness():
+            bounty = self.bounty_target_at(x, y)
+            if bounty:
+                species = str(bounty.get("species", "enemy"))
+                lines.extend([
+                    "",
+                    "Bounty target:",
+                    str(bounty.get("target_name", species)),
+                    f"Contract: {bounty.get('title', 'Wanted Target')}",
+                    f"Coordinates: chunk ({bounty.get('chunk_x', 0)},{bounty.get('chunk_y', 0)})",
+                    f"Reward: {self.bounty_reward_text(bounty)}",
+                    self.mine_enemy_description(bounty).replace("this mine floor", "this wilderness chunk"),
+                    "Combat starts if you bump it or move within 1 tile.",
+                ])
             enemy = self.wilderness_stronghold_enemy_at(x, y)
             if enemy:
                 species = str(enemy.get("species", "enemy"))
@@ -12060,10 +13060,8 @@ class FarmGame(
 
     def draw_with_look_cursor(self, cursor_x: int, cursor_y: int):
         self.sync_travel_followers()
-        self.invalidate_draw_cache()
-        clear_screen()
-        for line in self.header_lines():
-            print(line)
+        lines: List[str] = []
+        lines.extend(self.header_lines())
 
         tile_map = self.active_map()
         map_h = len(tile_map)
@@ -12093,6 +13091,7 @@ class FarmGame(
                 mine_enemy = actor_lookups["mine_enemies"].get(position)
                 dungeon_enemy = actor_lookups["dungeon_enemies"].get(position)
                 stronghold_enemy = actor_lookups["stronghold_enemies"].get(position)
+                bounty_target = actor_lookups["bounty_targets"].get(position)
                 wilderness_animal = actor_lookups["wilderness_animals"].get(position)
                 farm_animal = actor_lookups["farm_animals"].get(position)
                 follower_id = actor_lookups["followers"].get(position)
@@ -12108,6 +13107,8 @@ class FarmGame(
                     line.append(self.render_mine_enemy(dungeon_enemy))
                 elif stronghold_enemy:
                     line.append(self.render_mine_enemy(stronghold_enemy))
+                elif bounty_target:
+                    line.append(self.render_mine_enemy(bounty_target))
                 elif wilderness_animal:
                     line.append(self.render_animal(wilderness_animal))
                 elif farm_animal:
@@ -12134,12 +13135,23 @@ class FarmGame(
                                 procedural_town_active,
                             )
                         )
-            print("".join(line))
+            lines.append("".join(line))
 
-        for line in self.footer_lines():
-            print(line)
-        print(f"Look cursor: ({cursor_x},{cursor_y}) {self.describe_tile(cursor_x, cursor_y)}")
-        print("WASD/Arrows move cursor | Z/Enter details | I details | X/L/Esc/Q/Tab exit")
+        lines.extend(self.footer_lines())
+        lines.append(f"Look cursor: ({cursor_x},{cursor_y}) {self.describe_tile(cursor_x, cursor_y)}")
+        lines.append("WASD/Arrows move cursor | Z/Enter details | I details | X/L/Esc/Q/Tab exit")
+        frame = "".join("\033[2K" + str(line) + "\n" for line in lines)
+        if frame == self._last_draw_frame and not self._force_full_redraw:
+            return
+        self.prepare_terminal_for_fast_draw()
+        try:
+            sys.stdout.write("\033[H" + frame + "\033[J")
+            sys.stdout.flush()
+        except Exception:
+            clear_screen()
+            print(frame, end="")
+        self._last_draw_frame = frame
+        self._force_full_redraw = False
 
     def look_mode(self):
         if self.on_wilderness_overworld():
@@ -12654,7 +13666,13 @@ class FarmGame(
             items["Field Snack"] = items.get("Field Snack", 0) + 1
         return money, items
 
-    def dress_reclaimed_stronghold_site(self, grid: List[List[str]], marker_x: int, marker_y: int):
+    def dress_reclaimed_stronghold_site(
+        self,
+        grid: List[List[str]],
+        marker_x: int,
+        marker_y: int,
+        record: Optional[Dict[str, object]] = None,
+    ):
         h = len(grid)
         w = len(grid[0]) if h else 0
         if not h or not w or not (1 <= marker_x < w - 1 and 1 <= marker_y < h - 1):
@@ -12674,6 +13692,13 @@ class FarmGame(
             if 1 <= px < w - 1 and 1 <= py < h - 1 and grid[py][px] not in ["~", "=", "S", "V", "X", WILDERNESS_CLAIM_SYMBOL]:
                 grid[py][px] = ch
         grid[marker_y][marker_x] = "!"
+        board_x, board_y = self.reclaimed_stronghold_build_board_position(grid, marker_x, marker_y)
+        if record is not None:
+            record["build_board_x"] = board_x
+            record["build_board_y"] = board_y
+        if 1 <= board_x < w - 1 and 1 <= board_y < h - 1 and (board_x, board_y) != (marker_x, marker_y):
+            if grid[board_y][board_x] not in ["~", "=", "S", "V", "X", WILDERNESS_CLAIM_SYMBOL, "!"]:
+                grid[board_y][board_x] = RECLAIMED_STRONGHOLD_BUILD_BOARD_SYMBOL
 
     def reclaim_wilderness_stronghold_map(self, chunk_x: int, chunk_y: int):
         key = self.wilderness_stronghold_key(chunk_x, chunk_y)
@@ -12692,7 +13717,8 @@ class FarmGame(
                 if grid[yy][xx] in ["#", "B", "^"]:
                     grid[yy][xx] = "." if (xx + yy) % 3 else ":"
         if 0 <= marker_y < h and 0 <= marker_x < w:
-            self.dress_reclaimed_stronghold_site(grid, marker_x, marker_y)
+            self.dress_reclaimed_stronghold_site(grid, marker_x, marker_y, record)
+            self.apply_reclaimed_stronghold_features_to_grid(chunk_x, chunk_y, grid)
         self.wilderness_maps[key] = grid
         if key == self.wilderness_chunk_key():
             self.wilderness_map = grid
@@ -12843,6 +13869,1239 @@ class FarmGame(
         self.invalidate_draw_cache()
         self.apply_wilderness_stronghold_battle_result(enemy, result)
 
+    def reclaimed_stronghold_settlement_style(self, chunk_x: int, chunk_y: int) -> str:
+        theme = self.wilderness_stronghold_theme(int(chunk_x), int(chunk_y))
+        return {
+            "camp": "Crossroads",
+            "watch": "Main Street",
+            "thorn": "Market Ring",
+            "ember": "Market Ring",
+            "flood": "Main Street",
+        }.get(theme, "Crossroads")
+
+    def reclaimed_stronghold_town_name(
+        self,
+        chunk_x: int,
+        chunk_y: int,
+        record: Optional[Dict[str, object]] = None,
+    ) -> str:
+        record = record if isinstance(record, dict) else self.wilderness_stronghold_record(chunk_x, chunk_y)
+        base_name = str(record.get("name", "Reclaimed Stronghold") or "Reclaimed Stronghold").strip()
+        theme = str(record.get("theme", self.wilderness_stronghold_theme(chunk_x, chunk_y)) or "watch")
+        suffix = {
+            "camp": "Freehold",
+            "watch": "Township",
+            "thorn": "Haven",
+            "ember": "Hearth",
+            "flood": "Harbor",
+        }.get(theme, "Township")
+        if base_name.lower().endswith(tuple(word.lower() for word in ("Freehold", "Township", "Haven", "Hearth", "Harbor"))):
+            return base_name
+        return f"{base_name} {suffix}"
+
+    def can_found_town_at_reclaimed_stronghold(
+        self,
+        chunk_x: Optional[int] = None,
+        chunk_y: Optional[int] = None,
+    ) -> Tuple[bool, str]:
+        cx = self.state.wilderness_chunk_x if chunk_x is None else int(chunk_x)
+        cy = self.state.wilderness_chunk_y if chunk_y is None else int(chunk_y)
+        if not self.wilderness_chunk_has_stronghold(cx, cy):
+            return False, "There is no stronghold here to reclaim into a town."
+        record = self.wilderness_stronghold_record(cx, cy, create=False)
+        if not record or not bool(record.get("cleared", False)):
+            return False, "Clear the stronghold before founding a town here."
+        if self.wilderness_settlement_plan(cx, cy):
+            return False, "A settlement blueprint already exists at this stronghold."
+        has_generated_town = getattr(self, "wilderness_chunk_has_procedural_settlement", None)
+        if callable(has_generated_town):
+            try:
+                if bool(has_generated_town(cx, cy)):
+                    return False, "A wilderness town already occupies this chunk."
+            except Exception:
+                pass
+        return True, "This reclaimed stronghold can become a founded town."
+
+    def found_town_at_reclaimed_stronghold(
+        self,
+        name: str = "",
+        chunk_x: Optional[int] = None,
+        chunk_y: Optional[int] = None,
+        autosave: bool = True,
+    ) -> Optional[Dict[str, object]]:
+        cx = self.state.wilderness_chunk_x if chunk_x is None else int(chunk_x)
+        cy = self.state.wilderness_chunk_y if chunk_y is None else int(chunk_y)
+        allowed, reason = self.can_found_town_at_reclaimed_stronghold(cx, cy)
+        if not allowed:
+            self.set_message(reason)
+            return None
+
+        record = self.wilderness_stronghold_record(cx, cy)
+        style = self.reclaimed_stronghold_settlement_style(cx, cy)
+        town_name = str(name or self.reclaimed_stronghold_town_name(cx, cy, record)).strip()[:48]
+        plan = self.create_wilderness_settlement_plan(cx, cy, style=style, name=town_name, replace=False)
+        plan["source"] = "reclaimed_stronghold"
+        plan["auto_generated"] = False
+        plan["discovered"] = True
+        plan["discovered_day"] = self.errand_day_key()
+        plan["specialty"] = f"Reclaimed {str(record.get('theme', 'watch')).title()} Stronghold"
+        notes = plan.get("notes", [])
+        if not isinstance(notes, list):
+            notes = []
+        notes.extend([
+            f"Founded from {record.get('name', 'a reclaimed stronghold')}.",
+            "Founders Hall is queued as the first civic project.",
+            "Use the reclaimed stronghold menu to queue buildings, contribute supplies, and work construction shifts.",
+        ])
+        plan["notes"] = [str(note) for note in notes if str(note or "").strip()][-20:]
+
+        key = self.wilderness_stronghold_key(cx, cy)
+        record["founded_settlement_key"] = key
+        record["founded_settlement_id"] = str(plan.get("id", f"settlement:{key}"))
+        record["founded_settlement_name"] = town_name
+        record["founded_settlement_style"] = style
+        record["founded_settlement_day"] = self.errand_day_key()
+
+        buildings = plan.get("buildings", {}) if isinstance(plan.get("buildings", {}), dict) else {}
+        town_hall_id = next(
+            (
+                str(building_id)
+                for building_id, building in buildings.items()
+                if isinstance(building, dict) and str(building.get("type_id")) == "town_hall"
+            ),
+            "",
+        )
+        first_building_id = town_hall_id or next(iter(buildings.keys()), "")
+        if first_building_id:
+            self.queue_wilderness_settlement_building(cx, cy, str(first_building_id))
+
+        message = f"Founded {town_name} at {record.get('name', 'the reclaimed stronghold')}. Founders Hall is queued for construction."
+        if autosave:
+            self.autosave_with_message(message)
+        else:
+            self.set_message(message)
+        return plan
+
+    def reclaimed_stronghold_build_board_position(
+        self,
+        grid: List[List[str]],
+        marker_x: int,
+        marker_y: int,
+    ) -> Tuple[int, int]:
+        h = len(grid)
+        w = len(grid[0]) if h else 0
+        candidates = [
+            (marker_x + 4, marker_y - 1),
+            (marker_x + 5, marker_y),
+            (marker_x - 5, marker_y),
+            (marker_x + 4, marker_y + 1),
+            (marker_x - 4, marker_y - 1),
+        ]
+        blocked = {"~", "=", "S", "V", "X", WILDERNESS_CLAIM_SYMBOL, "!"}
+        for bx, by in candidates:
+            if 1 <= bx < w - 1 and 1 <= by < h - 1 and grid[by][bx] not in blocked:
+                return bx, by
+        return max(1, min(w - 2, marker_x + 1)), max(1, min(h - 2, marker_y - 1))
+
+    def ensure_reclaimed_stronghold_build_board(
+        self,
+        chunk_x: Optional[int] = None,
+        chunk_y: Optional[int] = None,
+    ) -> Optional[Tuple[int, int]]:
+        cx = self.state.wilderness_chunk_x if chunk_x is None else int(chunk_x)
+        cy = self.state.wilderness_chunk_y if chunk_y is None else int(chunk_y)
+        if not self.wilderness_chunk_has_stronghold(cx, cy):
+            return None
+        record = self.wilderness_stronghold_record(cx, cy, create=False)
+        if not record or not record.get("cleared"):
+            return None
+        grid = self.get_wilderness_chunk_map(cx, cy)
+        h = len(grid)
+        w = len(grid[0]) if h else 0
+        if not h or not w:
+            return None
+        marker_x = int(record.get("marker_x", 0) or 0)
+        marker_y = int(record.get("marker_y", 0) or 0)
+        if not (0 <= marker_y < h and 0 <= marker_x < w):
+            markers = [(xx, yy) for yy, row in enumerate(grid) for xx, ch in enumerate(row) if ch == "!"]
+            if markers:
+                marker_x, marker_y = markers[0]
+                record["marker_x"] = marker_x
+                record["marker_y"] = marker_y
+        bx = int(record.get("build_board_x", -1) or -1)
+        by = int(record.get("build_board_y", -1) or -1)
+        if not (1 <= bx < w - 1 and 1 <= by < h - 1) or grid[by][bx] in {"~", "=", "S", "V", "X", WILDERNESS_CLAIM_SYMBOL, "!"}:
+            bx, by = self.reclaimed_stronghold_build_board_position(grid, marker_x, marker_y)
+            record["build_board_x"] = bx
+            record["build_board_y"] = by
+        if 1 <= bx < w - 1 and 1 <= by < h - 1 and (bx, by) != (marker_x, marker_y):
+            if grid[by][bx] not in {"~", "=", "S", "V", "X", WILDERNESS_CLAIM_SYMBOL, "!"}:
+                grid[by][bx] = RECLAIMED_STRONGHOLD_BUILD_BOARD_SYMBOL
+        key = self.wilderness_stronghold_key(cx, cy)
+        self.wilderness_maps[key] = grid
+        if self.on_wilderness() and cx == self.state.wilderness_chunk_x and cy == self.state.wilderness_chunk_y:
+            self.wilderness_map = grid
+        return bx, by
+
+    def reclaimed_stronghold_build_board_at(
+        self,
+        x: int,
+        y: int,
+        chunk_x: Optional[int] = None,
+        chunk_y: Optional[int] = None,
+    ) -> bool:
+        cx = self.state.wilderness_chunk_x if chunk_x is None else int(chunk_x)
+        cy = self.state.wilderness_chunk_y if chunk_y is None else int(chunk_y)
+        record = self.wilderness_stronghold_record(cx, cy, create=False)
+        if not record or not record.get("cleared"):
+            return False
+        return int(record.get("build_board_x", -999)) == int(x) and int(record.get("build_board_y", -999)) == int(y)
+
+    def reclaimed_stronghold_build_catalog(self) -> Dict[str, Dict[str, object]]:
+        catalog: Dict[str, Dict[str, object]] = {}
+        for type_id in RECLAIMED_STRONGHOLD_BUILDING_ORDER:
+            building = SETTLEMENT_BUILDING_CATALOG.get(type_id, {})
+            if not isinstance(building, dict):
+                continue
+            item_id = f"building:{type_id}"
+            catalog[item_id] = {
+                "id": item_id,
+                "type_id": type_id,
+                "name": str(building.get("name", type_id.replace("_", " ").title())),
+                "kind": "building",
+                "symbol": str(building.get("symbol", "?"))[:1],
+                "width": int(building.get("width", 5)),
+                "height": int(building.get("height", 4)),
+                "cost": int(RECLAIMED_STRONGHOLD_BUILDING_COSTS.get(type_id, 1000)),
+                "walkable": False,
+                "description": f"Place a {building.get('name', 'building')} footprint directly on this reclaimed stronghold site.",
+            }
+        for item_id, feature in RECLAIMED_STRONGHOLD_FEATURE_CATALOG.items():
+            merged = dict(feature)
+            merged["id"] = item_id
+            catalog[item_id] = merged
+        return catalog
+
+    def reclaimed_stronghold_build_item_footprint(
+        self,
+        item: Dict[str, object],
+        x: int,
+        y: int,
+    ) -> List[Tuple[int, int]]:
+        width = max(1, int(item.get("width", 1) or 1))
+        height = max(1, int(item.get("height", 1) or 1))
+        return [(int(x) + dx, int(y) + dy) for dy in range(height) for dx in range(width)]
+
+    def reclaimed_stronghold_feature_records(
+        self,
+        record: Optional[Dict[str, object]] = None,
+        chunk_x: Optional[int] = None,
+        chunk_y: Optional[int] = None,
+    ) -> Dict[str, Dict[str, object]]:
+        if record is None:
+            cx = self.state.wilderness_chunk_x if chunk_x is None else int(chunk_x)
+            cy = self.state.wilderness_chunk_y if chunk_y is None else int(chunk_y)
+            record = self.wilderness_stronghold_record(cx, cy)
+        features = record.get("founded_town_features") if isinstance(record, dict) else {}
+        if not isinstance(features, dict):
+            features = {}
+            if isinstance(record, dict):
+                record["founded_town_features"] = features
+        return features
+
+    def reclaimed_stronghold_feature_at(
+        self,
+        x: int,
+        y: int,
+        chunk_x: Optional[int] = None,
+        chunk_y: Optional[int] = None,
+    ) -> Tuple[str, Optional[Dict[str, object]]]:
+        cx = self.state.wilderness_chunk_x if chunk_x is None else int(chunk_x)
+        cy = self.state.wilderness_chunk_y if chunk_y is None else int(chunk_y)
+        record = self.wilderness_stronghold_record(cx, cy, create=False)
+        if not record or not record.get("cleared"):
+            return "", None
+        for feature_id, feature in self.reclaimed_stronghold_feature_records(record).items():
+            if not isinstance(feature, dict):
+                continue
+            fx = int(feature.get("x", -999))
+            fy = int(feature.get("y", -999))
+            width = max(1, int(feature.get("width", 1) or 1))
+            height = max(1, int(feature.get("height", 1) or 1))
+            if fx <= int(x) < fx + width and fy <= int(y) < fy + height:
+                return str(feature_id), feature
+        return "", None
+
+    def stamp_reclaimed_stronghold_feature(self, grid: List[List[str]], feature: Dict[str, object]):
+        symbol = str(feature.get("symbol", "?") or "?")[:1]
+        for tx, ty in self.reclaimed_stronghold_build_item_footprint(feature, int(feature.get("x", 0)), int(feature.get("y", 0))):
+            if 0 <= ty < len(grid) and grid and 0 <= tx < len(grid[0]):
+                grid[ty][tx] = symbol
+
+    def apply_reclaimed_stronghold_features_to_grid(
+        self,
+        chunk_x: int,
+        chunk_y: int,
+        grid: Optional[List[List[str]]] = None,
+    ) -> List[List[str]]:
+        grid = grid if grid is not None else self.get_wilderness_chunk_map(chunk_x, chunk_y)
+        record = self.wilderness_stronghold_record(chunk_x, chunk_y, create=False)
+        if not record or not record.get("cleared"):
+            return grid
+        for feature in self.reclaimed_stronghold_feature_records(record).values():
+            if isinstance(feature, dict):
+                self.stamp_reclaimed_stronghold_feature(grid, feature)
+        bx = int(record.get("build_board_x", -1) or -1)
+        by = int(record.get("build_board_y", -1) or -1)
+        if 0 <= by < len(grid) and grid and 0 <= bx < len(grid[0]):
+            grid[by][bx] = RECLAIMED_STRONGHOLD_BUILD_BOARD_SYMBOL
+        key = self.wilderness_stronghold_key(chunk_x, chunk_y)
+        self.wilderness_maps[key] = grid
+        if self.on_wilderness() and chunk_x == self.state.wilderness_chunk_x and chunk_y == self.state.wilderness_chunk_y:
+            self.wilderness_map = grid
+        return grid
+
+    def reclaimed_stronghold_population_building_id(self, feature_id: object) -> str:
+        cleaned = "".join(
+            ch if ch.isalnum() else "_"
+            for ch in str(feature_id or "building")
+        ).strip("_")
+        return f"reclaimed_{cleaned or 'building'}"
+
+    def reclaimed_stronghold_feature_access_tile(
+        self,
+        feature: Dict[str, object],
+        chunk_x: int,
+        chunk_y: int,
+        grid: Optional[List[List[str]]] = None,
+    ) -> Tuple[int, int]:
+        grid = grid if grid is not None else self.get_wilderness_chunk_map(chunk_x, chunk_y)
+        h = len(grid)
+        w = len(grid[0]) if h else 0
+        fx = int(feature.get("x", 0) or 0)
+        fy = int(feature.get("y", 0) or 0)
+        width = max(1, int(feature.get("width", 1) or 1))
+        height = max(1, int(feature.get("height", 1) or 1))
+        center_x = fx + width // 2
+        center_y = fy + height // 2
+        record = self.wilderness_stronghold_record(chunk_x, chunk_y, create=False)
+        board = (
+            int(record.get("build_board_x", -999) or -999),
+            int(record.get("build_board_y", -999) or -999),
+        ) if record else (-999, -999)
+        marker = (
+            int(record.get("marker_x", -999) or -999),
+            int(record.get("marker_y", -999) or -999),
+        ) if record else (-999, -999)
+        blocked_tiles = {
+            "#", "~", "=", "S", "V", "X", WILDERNESS_CLAIM_SYMBOL, "!",
+            RECLAIMED_STRONGHOLD_BUILD_BOARD_SYMBOL,
+        }
+
+        def tile_allowed(tx: int, ty: int) -> bool:
+            if not (1 <= tx < w - 1 and 1 <= ty < h - 1):
+                return False
+            if (tx, ty) in {board, marker}:
+                return False
+            tile = grid[ty][tx]
+            if tile in blocked_tiles:
+                return False
+            feature_id, existing = self.reclaimed_stronghold_feature_at(tx, ty, chunk_x, chunk_y)
+            if not existing:
+                return True
+            if existing is feature:
+                return False
+            return str(existing.get("kind", "")) == "road" or str(feature_id).startswith("road:")
+
+        candidates: List[Tuple[int, int]] = []
+        for tx in range(fx, fx + width):
+            candidates.append((tx, fy + height))
+            candidates.append((tx, fy - 1))
+        for ty in range(fy, fy + height):
+            candidates.append((fx - 1, ty))
+            candidates.append((fx + width, ty))
+        for radius in range(2, 6):
+            for tx in range(center_x - radius, center_x + radius + 1):
+                candidates.append((tx, center_y - radius))
+                candidates.append((tx, center_y + radius))
+            for ty in range(center_y - radius + 1, center_y + radius):
+                candidates.append((center_x - radius, ty))
+                candidates.append((center_x + radius, ty))
+
+        unique_candidates = list(dict.fromkeys(candidates))
+
+        def candidate_score(pos: Tuple[int, int]) -> Tuple[int, int, int, int]:
+            tx, ty = pos
+            tile = grid[ty][tx] if 0 <= ty < h and 0 <= tx < w else "#"
+            feature_id, existing = self.reclaimed_stronghold_feature_at(tx, ty, chunk_x, chunk_y)
+            roadish = tile in {":", ","} or (
+                isinstance(existing, dict)
+                and (str(existing.get("kind", "")) == "road" or str(feature_id).startswith("road:"))
+            )
+            return (
+                0 if roadish else 1,
+                abs(tx - center_x) + abs(ty - center_y),
+                ty,
+                tx,
+            )
+
+        allowed = [pos for pos in unique_candidates if tile_allowed(pos[0], pos[1])]
+        if allowed:
+            return min(allowed, key=candidate_score)
+        return max(1, min(w - 2, center_x)), max(1, min(h - 2, fy + height))
+
+    def reclaimed_stronghold_population_plan(
+        self,
+        chunk_x: Optional[int] = None,
+        chunk_y: Optional[int] = None,
+    ) -> Optional[Dict[str, object]]:
+        cx = self.state.wilderness_chunk_x if chunk_x is None else int(chunk_x)
+        cy = self.state.wilderness_chunk_y if chunk_y is None else int(chunk_y)
+        if not self.wilderness_chunk_has_stronghold(cx, cy):
+            return None
+        record = self.wilderness_stronghold_record(cx, cy, create=False)
+        if not record or not record.get("cleared"):
+            return None
+        source_plan = self.wilderness_settlement_plan(cx, cy)
+        if not isinstance(source_plan, dict) or str(source_plan.get("source", "")) != "reclaimed_stronghold":
+            return None
+        features = self.reclaimed_stronghold_feature_records(record)
+        grid = self.get_wilderness_chunk_map(cx, cy)
+        map_h = len(grid)
+        map_w = len(grid[0]) if map_h else 86
+        buildings: Dict[str, Dict[str, object]] = {}
+        revision_parts: List[str] = []
+        for feature_id, feature in sorted(features.items(), key=lambda row: str(row[0])):
+            if not isinstance(feature, dict) or str(feature.get("kind", "")) != "building":
+                continue
+            type_id = str(feature.get("type_id", "") or "")
+            catalog = SETTLEMENT_BUILDING_CATALOG.get(type_id)
+            if not isinstance(catalog, dict):
+                continue
+            access_x, access_y = self.reclaimed_stronghold_feature_access_tile(feature, cx, cy, grid)
+            building_id = self.reclaimed_stronghold_population_building_id(feature_id)
+            building = {
+                "id": building_id,
+                "type_id": type_id,
+                "name": str(feature.get("name", catalog.get("name", type_id.replace("_", " ").title()))),
+                "zone": str(catalog.get("zone", "Residential")),
+                "x": int(feature.get("x", 0) or 0),
+                "y": int(feature.get("y", 0) or 0),
+                "width": max(1, int(feature.get("width", catalog.get("width", 5)) or 1)),
+                "height": max(1, int(feature.get("height", catalog.get("height", 4)) or 1)),
+                "symbol": str(feature.get("symbol", catalog.get("symbol", "?")) or "?")[:1],
+                "phase_index": len(SETTLEMENT_PHASES) - 1,
+                "status": "complete",
+                "priority": len(buildings) + 1,
+                "capacity": int(catalog.get("capacity", 0) or 0),
+                "service": int(catalog.get("service", 0) or 0),
+                "door_x": int(access_x),
+                "door_y": int(access_y),
+                "access_x": int(access_x),
+                "access_y": int(access_y),
+                "placed_feature_id": str(feature_id),
+                "source": "reclaimed_stronghold_build_board",
+            }
+            buildings[building_id] = building
+            revision_parts.append(
+                f"{feature_id}:{type_id}:{building['x']}:{building['y']}:{building['width']}:{building['height']}"
+            )
+        if not buildings:
+            return None
+
+        roads = set()
+        for feature in features.values():
+            if not isinstance(feature, dict):
+                continue
+            if str(feature.get("kind", "")) != "road":
+                continue
+            for tx, ty in self.reclaimed_stronghold_build_item_footprint(
+                feature,
+                int(feature.get("x", 0) or 0),
+                int(feature.get("y", 0) or 0),
+            ):
+                if 0 <= ty < map_h and 0 <= tx < map_w:
+                    roads.add(f"{tx},{ty}")
+        for building in buildings.values():
+            roads.add(f"{int(building['access_x'])},{int(building['access_y'])}")
+        board_x = int(record.get("build_board_x", -1) or -1)
+        board_y = int(record.get("build_board_y", -1) or -1)
+        marker_x = int(record.get("marker_x", map_w // 2) or map_w // 2)
+        marker_y = int(record.get("marker_y", map_h // 2) or map_h // 2)
+        entrance_x, entrance_y = (
+            (board_x, board_y)
+            if 0 <= board_x < map_w and 0 <= board_y < map_h
+            else (marker_x, marker_y)
+        )
+        roads.add(f"{max(1, min(map_w - 2, entrance_x))},{max(1, min(map_h - 2, entrance_y))}")
+        revision_text = "|".join(revision_parts)
+        revision = sum((index + 1) * ord(char) for index, char in enumerate(revision_text)) % 2147483647
+        population_status = "established" if any(int(b.get("capacity", 0) or 0) > 0 for b in buildings.values()) else "needs_housing"
+        seed = int(source_plan.get("seed", self.wilderness_chunk_seed(cx, cy) + 88000) or 0)
+        return {
+            "version": int(source_plan.get("version", 1) or 1),
+            "id": str(source_plan.get("id", f"settlement:{cx},{cy}") or f"settlement:{cx},{cy}"),
+            "name": str(record.get("founded_settlement_name", source_plan.get("name", "Founded Town"))),
+            "chunk_x": int(cx),
+            "chunk_y": int(cy),
+            "width": int(map_w),
+            "height": int(map_h),
+            "seed": seed,
+            "style": str(record.get("founded_settlement_style", source_plan.get("style", "Crossroads"))),
+            "source": "reclaimed_stronghold",
+            "source_plan_id": str(source_plan.get("id", "")),
+            "status": population_status,
+            "discovered": True,
+            "map_applied": True,
+            "revision": revision,
+            "entrance": {"x": int(entrance_x), "y": int(entrance_y)},
+            "roads": sorted(roads, key=lambda value: tuple(int(part) for part in str(value).split(",", 1))),
+            "buildings": buildings,
+            "construction_queue": [],
+            "notes": [
+                "Population plan derived from visible buildings placed at a reclaimed stronghold.",
+                "Homes create households; shops and civic buildings create jobs as housing allows.",
+            ],
+        }
+
+    def reconcile_reclaimed_stronghold_population(
+        self,
+        chunk_x: Optional[int] = None,
+        chunk_y: Optional[int] = None,
+        force: bool = False,
+    ) -> Optional[Dict[str, object]]:
+        cx = self.state.wilderness_chunk_x if chunk_x is None else int(chunk_x)
+        cy = self.state.wilderness_chunk_y if chunk_y is None else int(chunk_y)
+        plan = self.reclaimed_stronghold_population_plan(cx, cy)
+        if not plan:
+            return None
+        populations = self.ensure_procedural_settlement_populations()
+        key = procedural_population_key(cx, cy)
+        existing = None if force else populations.get(key)
+        population = self.procedural_npc_builder().create_population(plan, existing=existing)
+        population["source"] = "reclaimed_stronghold"
+        notes = population.get("notes", [])
+        if not isinstance(notes, list):
+            notes = []
+        notes.append("Residents were generated from placed reclaimed-stronghold town buildings.")
+        population["notes"] = [str(note) for note in notes if str(note or "").strip()][-20:]
+        populations[key] = population
+        record = self.wilderness_stronghold_record(cx, cy)
+        summary = self.procedural_npc_builder().summary(population)
+        record["founded_population_count"] = int(summary.get("population", 0))
+        record["founded_household_count"] = int(summary.get("households", 0))
+        record["founded_job_vacancies"] = int(summary.get("vacancies", 0))
+        record["founded_population_revision"] = int(plan.get("revision", 0) or 0)
+        return population
+
+    def reclaimed_stronghold_population_report_lines(
+        self,
+        chunk_x: Optional[int] = None,
+        chunk_y: Optional[int] = None,
+    ) -> List[str]:
+        cx = self.state.wilderness_chunk_x if chunk_x is None else int(chunk_x)
+        cy = self.state.wilderness_chunk_y if chunk_y is None else int(chunk_y)
+        plan = self.reclaimed_stronghold_population_plan(cx, cy)
+        if not plan:
+            return [
+                "RECLAIMED TOWN RESIDENTS",
+                "",
+                "No placed homes or workplaces are ready for residents yet.",
+                "Use the build board to place at least one Settler Home.",
+            ]
+        population = self.reconcile_reclaimed_stronghold_population(cx, cy)
+        if not population:
+            return ["No resident population could be generated for this reclaimed town."]
+        summary = self.procedural_npc_builder().summary(population)
+        validation = self.procedural_npc_builder().validate(population, plan)
+        roles = summary.get("roles", {}) if isinstance(summary.get("roles", {}), dict) else {}
+        lines = [
+            "RECLAIMED TOWN RESIDENTS",
+            "",
+            f"Town: {population.get('settlement_name', plan.get('name', 'Founded Town'))}",
+            f"Population: {summary.get('population', 0)}",
+            f"Households: {summary.get('households', 0)}",
+            f"Employed: {summary.get('employed', 0)}",
+            f"Job vacancies: {summary.get('vacancies', 0)}",
+            f"Average job skill: {summary.get('average_job_skill', 0)}/5",
+            f"Average job morale: {summary.get('average_job_morale', 0)}/100",
+            f"Weekly wages represented: ${summary.get('weekly_wages', 0)}",
+            (
+                f"Ages: {summary.get('children', 0)} child, {summary.get('teens', 0)} teen, "
+                f"{summary.get('adults', 0)} adult, {summary.get('elders', 0)} elder"
+            ),
+            "",
+            "Service coverage:",
+        ]
+        service_tags = summary.get("service_tags", {}) if isinstance(summary.get("service_tags", {}), dict) else {}
+        if service_tags:
+            for tag, count in sorted(service_tags.items(), key=lambda row: (-int(row[1]), str(row[0])))[:8]:
+                lines.append(f"- {tag}: {count}")
+        else:
+            lines.append("- No job services yet.")
+        lines.extend([
+            "",
+            "Roles:",
+        ])
+        if roles:
+            for role, count in sorted(roles.items(), key=lambda row: (-int(row[1]), str(row[0]))):
+                lines.append(f"- {role}: {count}")
+        else:
+            lines.append("- None yet")
+        residents = population.get("residents", {}) if isinstance(population.get("residents", {}), dict) else {}
+        lines.extend(["", "Residents:"])
+        if residents:
+            for resident in list(residents.values())[:12]:
+                job_profile = sanitize_procedural_job_profile(
+                    resident.get("job_profile", {}),
+                    resident.get("role", "Settler"),
+                )
+                lines.append(
+                    f"- {resident.get('name', 'Resident')} ({job_profile.get('quality')} "
+                    f"{job_profile.get('title')}, skill {job_profile.get('skill')}/5, "
+                    f"morale {job_profile.get('morale')}/100)"
+                )
+        else:
+            lines.append("- No residents until housing exists.")
+        warnings = validation.get("warnings", []) if isinstance(validation, dict) else []
+        errors = validation.get("errors", []) if isinstance(validation, dict) else []
+        if errors or warnings:
+            lines.extend(["", "Notes:"])
+            for text in (errors + warnings)[:6]:
+                lines.append(f"- {text}")
+        return lines
+
+    def current_procedural_town_plan(self) -> Optional[Dict[str, object]]:
+        plan = ProceduralTownRuntimeMixin.current_procedural_town_plan(self)
+        if plan:
+            return plan
+        location = str(getattr(self.state, "location", ""))
+        if location == PROCEDURAL_TOWN_INTERIOR_LOCATION:
+            key = str(getattr(self.state, "current_procedural_settlement_key", "") or "")
+            try:
+                cx_text, cy_text = key.split(",", 1)
+                return self.reclaimed_stronghold_population_plan(int(cx_text), int(cy_text))
+            except Exception:
+                return None
+        if location != "Wilderness":
+            return None
+        return self.reclaimed_stronghold_population_plan(
+            int(getattr(self.state, "wilderness_chunk_x", 0)),
+            int(getattr(self.state, "wilderness_chunk_y", 0)),
+        )
+
+    def can_place_reclaimed_stronghold_build_item(
+        self,
+        item_id: str,
+        x: int,
+        y: int,
+        chunk_x: Optional[int] = None,
+        chunk_y: Optional[int] = None,
+        check_money: bool = True,
+    ) -> Tuple[bool, str]:
+        cx = self.state.wilderness_chunk_x if chunk_x is None else int(chunk_x)
+        cy = self.state.wilderness_chunk_y if chunk_y is None else int(chunk_y)
+        if not self.wilderness_chunk_has_stronghold(cx, cy):
+            return False, "not a stronghold site"
+        record = self.wilderness_stronghold_record(cx, cy, create=False)
+        if not record or not record.get("cleared"):
+            return False, "clear the stronghold first"
+        if not self.wilderness_settlement_plan(cx, cy):
+            return False, "found a town here first"
+        catalog = self.reclaimed_stronghold_build_catalog()
+        item = catalog.get(str(item_id))
+        if not item:
+            return False, "unknown town build item"
+        cost = int(item.get("cost", 0) or 0)
+        if check_money and int(self.state.money) < cost:
+            return False, f"needs ${cost}"
+        grid = self.get_wilderness_chunk_map(cx, cy)
+        h = len(grid)
+        w = len(grid[0]) if h else 0
+        kind = str(item.get("kind", "building"))
+        board_position = self.ensure_reclaimed_stronghold_build_board(cx, cy)
+        protected = {
+            "~", "=", "S", "V", "X", WILDERNESS_CLAIM_SYMBOL, "!", RECLAIMED_STRONGHOLD_BUILD_BOARD_SYMBOL,
+            "R", "H", "B", "J", "P", "K", "Q", "Y", "u", "W", "N", "F", "O", "L", "e", "p", "M", "G", "Z",
+            "T", "o", "*", "^",
+        }
+        for tx, ty in self.reclaimed_stronghold_build_item_footprint(item, x, y):
+            if not (1 <= tx < w - 1 and 1 <= ty < h - 1):
+                return False, "outside buildable bounds"
+            if self.on_wilderness() and cx == self.state.wilderness_chunk_x and cy == self.state.wilderness_chunk_y:
+                if (tx, ty) == (self.state.player_x, self.state.player_y):
+                    return False, "player is standing there"
+                if self.wilderness_stronghold_enemy_at(tx, ty) or self.animal_at(tx, ty):
+                    return False, "occupied"
+            if board_position and (tx, ty) == board_position:
+                return False, "build board must stay open"
+            feature_id, feature = self.reclaimed_stronghold_feature_at(tx, ty, cx, cy)
+            if feature:
+                return False, f"overlaps {feature.get('name', feature_id)}"
+            tile = grid[ty][tx]
+            if kind == "road":
+                if tile in {":", ","}:
+                    return False, "already road or path"
+                if tile in protected:
+                    return False, "blocked terrain"
+            else:
+                if tile in {":", ","}:
+                    return False, "keep roads and center lanes open"
+                if tile in protected or tile == "#":
+                    return False, "blocked terrain"
+        return True, "OK"
+
+    def place_reclaimed_stronghold_build_item(
+        self,
+        item_id: str,
+        x: int,
+        y: int,
+        chunk_x: Optional[int] = None,
+        chunk_y: Optional[int] = None,
+        autosave: bool = True,
+    ) -> bool:
+        cx = self.state.wilderness_chunk_x if chunk_x is None else int(chunk_x)
+        cy = self.state.wilderness_chunk_y if chunk_y is None else int(chunk_y)
+        allowed, reason = self.can_place_reclaimed_stronghold_build_item(item_id, x, y, cx, cy)
+        catalog = self.reclaimed_stronghold_build_catalog()
+        item = catalog.get(str(item_id), {})
+        name = str(item.get("name", item_id))
+        if not allowed:
+            self.set_message(f"Cannot place {name}: {reason}.")
+            return False
+        cost = int(item.get("cost", 0) or 0)
+        self.state.money = max(0, int(self.state.money) - cost)
+        record = self.wilderness_stronghold_record(cx, cy)
+        features = self.reclaimed_stronghold_feature_records(record)
+        kind = str(item.get("kind", "building"))
+        if kind == "road":
+            feature_id = f"{str(item_id)}:{int(x)},{int(y)}"
+        else:
+            next_id = max(1, int(record.get("founded_town_next_feature_id", 1) or 1))
+            feature_id = f"feature:{next_id}"
+            record["founded_town_next_feature_id"] = next_id + 1
+        feature = {
+            "id": feature_id,
+            "item_id": str(item_id),
+            "type_id": str(item.get("type_id", "")),
+            "name": name,
+            "kind": kind,
+            "symbol": str(item.get("symbol", "?"))[:1],
+            "x": int(x),
+            "y": int(y),
+            "width": max(1, int(item.get("width", 1) or 1)),
+            "height": max(1, int(item.get("height", 1) or 1)),
+            "cost": cost,
+            "walkable": bool(item.get("walkable", False)),
+            "built_day": self.errand_day_key(),
+        }
+        features[feature_id] = feature
+        grid = self.get_wilderness_chunk_map(cx, cy)
+        self.stamp_reclaimed_stronghold_feature(grid, feature)
+        self.ensure_reclaimed_stronghold_build_board(cx, cy)
+        self.apply_reclaimed_stronghold_features_to_grid(cx, cy, grid)
+        plan = self.wilderness_settlement_plan(cx, cy)
+        if plan:
+            notes = plan.get("notes", [])
+            if not isinstance(notes, list):
+                notes = []
+            notes.append(f"Placed {name} at {int(x)},{int(y)} from the reclaimed stronghold build board.")
+            plan["notes"] = [str(note) for note in notes if str(note or "").strip()][-20:]
+        population = self.reconcile_reclaimed_stronghold_population(cx, cy)
+        message = f"Placed {name} at {int(x)},{int(y)} for ${cost}."
+        if kind == "building" and population:
+            summary = self.procedural_npc_builder().summary(population)
+            count = int(summary.get("population", 0) or 0)
+            if count:
+                message = f"{message} {count} resident(s) now have a place in town."
+        if autosave:
+            self.autosave_with_message(message)
+        else:
+            self.set_message(message)
+        return True
+
+    def reclaimed_stronghold_feature_lines(self, feature: Dict[str, object]) -> List[str]:
+        return [
+            str(feature.get("name", "Town Feature")).upper(),
+            "",
+            f"Kind: {str(feature.get('kind', 'feature')).title()}",
+            f"Position: {feature.get('x')},{feature.get('y')}",
+            f"Size: {feature.get('width', 1)}x{feature.get('height', 1)}",
+            f"Cost paid: ${feature.get('cost', 0)}",
+            "",
+            "This was placed from the reclaimed stronghold build board.",
+            "It is part of the founded town's visible stronghold site.",
+        ]
+
+    def show_reclaimed_stronghold_feature(self, feature: Dict[str, object]):
+        self.vertical_panel_view(
+            str(feature.get("name", "Town Feature")),
+            self.reclaimed_stronghold_feature_lines(feature),
+            LEFT_PANEL_WIDTH,
+            LEFT_PANEL_HEIGHT,
+        )
+        self.set_message(f"Inspected {feature.get('name', 'town feature')}.")
+
+    def draw_reclaimed_stronghold_build_cursor(
+        self,
+        item_id: str,
+        cursor_x: int,
+        cursor_y: int,
+    ):
+        catalog = self.reclaimed_stronghold_build_catalog()
+        item = catalog.get(str(item_id), {})
+        ok, reason = self.can_place_reclaimed_stronghold_build_item(item_id, cursor_x, cursor_y)
+        footprint = set(self.reclaimed_stronghold_build_item_footprint(item, cursor_x, cursor_y)) if item else {(cursor_x, cursor_y)}
+        anchor = (int(cursor_x), int(cursor_y))
+        tile_map = self.active_map()
+        map_h = len(tile_map)
+        map_w = len(tile_map[0]) if map_h else 0
+        cam_x, cam_y = self.camera_origin_for_cursor(cursor_x, cursor_y)
+        actor_lookups = self.frame_actor_position_lookups(map_w, map_h)
+        lines: List[str] = []
+        lines.extend(self.header_lines())
+        for screen_y in range(VIEW_HEIGHT):
+            world_y = cam_y + screen_y
+            line = []
+            for screen_x in range(VIEW_WIDTH):
+                world_x = cam_x + screen_x
+                position = (world_x, world_y)
+                if world_x >= map_w or world_y >= map_h:
+                    line.append(" ")
+                elif position in footprint:
+                    marker = "X" if position == anchor else "x"
+                    line.append(colorize(marker, C.PLACEMENT if ok else C.PLACEMENT_BAD))
+                elif world_x == self.state.player_x and world_y == self.state.player_y:
+                    line.append(self.render_player())
+                elif actor_lookups["wilderness_animals"].get(position):
+                    line.append(self.render_animal(actor_lookups["wilderness_animals"][position]))
+                elif actor_lookups["followers"].get(position):
+                    line.append(self.render_travel_follower(str(actor_lookups["followers"][position])))
+                else:
+                    line.append(self.render_tile(world_x, world_y, tile_map))
+            lines.append("".join(line))
+        lines.extend(self.footer_lines())
+        size = f"{item.get('width', 1)}x{item.get('height', 1)}"
+        lines.append(
+            f"Build Board: {item.get('name', item_id)} | ${item.get('cost', 0)} | {size} | "
+            f"{'OK' if ok else 'Blocked: ' + reason}"
+        )
+        lines.append("WASD/Arrows move cursor | Z/Enter place | I inspect | X/Esc/Q/Tab cancel")
+        frame = "".join("\033[2K" + str(line) + "\n" for line in lines)
+        if frame == self._last_draw_frame and not self._force_full_redraw:
+            return
+        self.prepare_terminal_for_fast_draw()
+        try:
+            sys.stdout.write("\033[H" + frame + "\033[J")
+            sys.stdout.flush()
+        except Exception:
+            clear_screen()
+            print(frame, end="")
+        self._last_draw_frame = frame
+        self._force_full_redraw = False
+
+    def reclaimed_stronghold_cursor_place_build_item(self, item_id: str):
+        catalog = self.reclaimed_stronghold_build_catalog()
+        item = catalog.get(str(item_id))
+        if not item:
+            self.set_message("That build option is no longer available.")
+            return
+        board_pos = self.ensure_reclaimed_stronghold_build_board()
+        if board_pos:
+            cursor_x, cursor_y = board_pos
+        else:
+            cursor_x, cursor_y = self.target_tile_pos()
+        if not self.in_active_bounds(cursor_x, cursor_y):
+            cursor_x, cursor_y = self.state.player_x, self.state.player_y
+        self.set_message(f"Placing {item.get('name', item_id)}. Move the cursor and press Z/Enter.")
+        while True:
+            self.draw_reclaimed_stronghold_build_cursor(item_id, cursor_x, cursor_y)
+            key = normalize_key(read_key())
+            if len(key) == 1 and key.isalpha():
+                key = key.lower()
+            if key in ["\t", "\x1b", "q", "x", "b"]:
+                self.set_message("Stronghold build placement cancelled.")
+                self.invalidate_draw_cache()
+                return
+            dx, dy = 0, 0
+            if key in ["w", "UP"]:
+                dy = -1
+            elif key in ["s", "DOWN"]:
+                dy = 1
+            elif key in ["a", "LEFT"]:
+                dx = -1
+            elif key in ["d", "RIGHT"]:
+                dx = 1
+            if dx or dy:
+                cursor_x = max(0, min(self.active_map_width() - 1, cursor_x + dx))
+                cursor_y = max(0, min(self.active_map_height() - 1, cursor_y + dy))
+                continue
+            if key == "i":
+                self.vertical_panel_view(
+                    "Build Placement",
+                    self.look_tile_lines(cursor_x, cursor_y),
+                    LEFT_PANEL_WIDTH,
+                    LEFT_PANEL_HEIGHT,
+                )
+                self.invalidate_draw_cache()
+                continue
+            if key in MENU_CONFIRM_KEYS:
+                if self.place_reclaimed_stronghold_build_item(item_id, cursor_x, cursor_y):
+                    if str(item.get("kind", "building")) != "road":
+                        self.invalidate_draw_cache()
+                        return
+                continue
+            self.set_message("Stronghold build mode: move cursor, Z place, I inspect, X cancel.")
+
+    def show_reclaimed_stronghold_build_board(self):
+        if not self.wilderness_chunk_has_stronghold():
+            self.set_message("There is no reclaimed stronghold build board here.")
+            return
+        record = self.wilderness_stronghold_record()
+        if not record.get("cleared"):
+            self.set_message("Clear the stronghold before using its build board.")
+            return
+        self.ensure_reclaimed_stronghold_build_board()
+        plan = self.wilderness_settlement_plan(self.state.wilderness_chunk_x, self.state.wilderness_chunk_y)
+        if not plan:
+            items = [
+                MenuItem(label="Found town here", value="found", enabled=True, hint="create town blueprint"),
+                MenuItem(label="Stronghold details", value="details", enabled=True),
+                MenuItem(label="Back", value=MENU_BACK, enabled=True),
+            ]
+            choice = self.vertical_panel_select("Stronghold Build Board", items, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT, return_back=True)
+            if choice is None or choice.value == MENU_BACK:
+                self.set_message("Left the stronghold build board.")
+                return
+            if choice.value == "details":
+                self.vertical_panel_view(str(record.get("name", "Stronghold")), self.wilderness_stronghold_status_lines(), LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
+                return
+            if choice.value == "found":
+                self.found_town_at_reclaimed_stronghold()
+                return
+        while True:
+            features = self.reclaimed_stronghold_feature_records(record)
+            items = [
+                MenuItem(label="Town overview", value="overview", enabled=True, hint=f"{len(features)} placed"),
+                MenuItem(label="View blueprint", value="blueprint", enabled=True),
+                MenuItem(label="Residents", value="residents", enabled=True, hint="households and jobs"),
+            ]
+            for item_id, item in self.reclaimed_stronghold_build_catalog().items():
+                cost = int(item.get("cost", 0) or 0)
+                size = f"{item.get('width', 1)}x{item.get('height', 1)}"
+                items.append(MenuItem(
+                    label=str(item.get("name", item_id)),
+                    value=item_id,
+                    enabled=int(self.state.money) >= cost,
+                    hint=f"${cost} {size}",
+                ))
+            items.append(MenuItem(label="Back", value=MENU_BACK, enabled=True))
+            choice = self.vertical_panel_select(str(plan.get("name", "Founded Town")), items, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT, return_back=True)
+            if choice is None or choice.value == MENU_BACK:
+                self.set_message("Left the stronghold build board.")
+                return
+            if choice.value == "overview":
+                self.vertical_panel_view(str(plan.get("name", "Founded Town")), self.reclaimed_stronghold_town_overview_lines(), LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
+                continue
+            if choice.value == "blueprint":
+                self.show_wilderness_settlement_blueprint(self.state.wilderness_chunk_x, self.state.wilderness_chunk_y)
+                continue
+            if choice.value == "residents":
+                self.vertical_panel_view(
+                    str(plan.get("name", "Founded Town")),
+                    self.reclaimed_stronghold_population_report_lines(
+                        self.state.wilderness_chunk_x,
+                        self.state.wilderness_chunk_y,
+                    ),
+                    LEFT_PANEL_WIDTH,
+                    LEFT_PANEL_HEIGHT,
+                )
+                continue
+            self.reclaimed_stronghold_cursor_place_build_item(str(choice.value))
+            return
+
+    def wilderness_settlement_building_phase_label(self, building: Dict[str, object]) -> str:
+        try:
+            index = max(0, min(len(SETTLEMENT_PHASES) - 1, int(building.get("phase_index", 0))))
+        except Exception:
+            index = 0
+        return SETTLEMENT_PHASES[index]
+
+    def wilderness_settlement_building_need_summary(self, building: Dict[str, object]) -> str:
+        requirements = settlement_phase_requirements(building)
+        contributed = building.get("material_contributions", {})
+        if not isinstance(contributed, dict):
+            contributed = {}
+        needed_materials: Dict[str, int] = {}
+        for item, amount in requirements.get("materials", {}).items():
+            remaining = max(0, int(amount) - int(contributed.get(item, 0)))
+            if remaining:
+                needed_materials[str(item)] = remaining
+        money_needed = max(0, int(requirements.get("money", 0)) - int(building.get("money_contributed", 0)))
+        labor_needed = max(0, int(requirements.get("labor", 0)) - int(building.get("labor_done", 0)))
+        parts: List[str] = []
+        if needed_materials:
+            parts.append(format_drops(needed_materials))
+        if money_needed:
+            parts.append(f"${money_needed}")
+        if labor_needed:
+            parts.append(f"{labor_needed} labor")
+        return "; ".join(parts) if parts else "ready for next phase"
+
+    def reclaimed_stronghold_town_buildings(
+        self,
+        chunk_x: Optional[int] = None,
+        chunk_y: Optional[int] = None,
+        queued_only: bool = False,
+    ) -> List[Dict[str, object]]:
+        cx = self.state.wilderness_chunk_x if chunk_x is None else int(chunk_x)
+        cy = self.state.wilderness_chunk_y if chunk_y is None else int(chunk_y)
+        plan = self.wilderness_settlement_plan(cx, cy)
+        if not plan:
+            return []
+        buildings = plan.get("buildings", {})
+        if not isinstance(buildings, dict):
+            return []
+        queue = [str(building_id) for building_id in plan.get("construction_queue", []) if str(building_id) in buildings]
+        if queued_only:
+            ordered = [buildings[building_id] for building_id in queue if isinstance(buildings.get(building_id), dict)]
+        else:
+            ordered = [building for building in buildings.values() if isinstance(building, dict)]
+            ordered.sort(key=lambda building: (int(building.get("priority", 0)), str(building.get("name", ""))))
+        return [
+            building
+            for building in ordered
+            if int(building.get("phase_index", 0)) < len(SETTLEMENT_PHASES) - 1
+        ]
+
+    def reclaimed_stronghold_town_ready_buildings(
+        self,
+        chunk_x: Optional[int] = None,
+        chunk_y: Optional[int] = None,
+    ) -> List[Dict[str, object]]:
+        return [
+            building
+            for building in self.reclaimed_stronghold_town_buildings(chunk_x, chunk_y, queued_only=True)
+            if self.wilderness_town_builder().phase_funded(building)
+        ]
+
+    def reclaimed_stronghold_town_overview_lines(
+        self,
+        chunk_x: Optional[int] = None,
+        chunk_y: Optional[int] = None,
+    ) -> List[str]:
+        cx = self.state.wilderness_chunk_x if chunk_x is None else int(chunk_x)
+        cy = self.state.wilderness_chunk_y if chunk_y is None else int(chunk_y)
+        plan = self.wilderness_settlement_plan(cx, cy)
+        if not plan:
+            return ["No founded town exists at this reclaimed stronghold."]
+        summary = self.wilderness_town_builder().summary(plan)
+        features = self.reclaimed_stronghold_feature_records(chunk_x=cx, chunk_y=cy)
+        placed_buildings = sum(1 for feature in features.values() if isinstance(feature, dict) and feature.get("kind") == "building")
+        placed_roads = sum(1 for feature in features.values() if isinstance(feature, dict) and feature.get("kind") == "road")
+        placed_decor = sum(1 for feature in features.values() if isinstance(feature, dict) and feature.get("kind") == "decoration")
+        population = self.reconcile_reclaimed_stronghold_population(cx, cy) if placed_buildings else None
+        population_summary = (
+            self.procedural_npc_builder().summary(population)
+            if isinstance(population, dict)
+            else {"population": 0, "households": 0, "vacancies": 0}
+        )
+        lines = [
+            "FOUNDED STRONGHOLD TOWN",
+            "",
+            f"Name: {plan.get('name', 'Founded Town')}",
+            f"Chunk: {cx},{cy}",
+            f"Style: {plan.get('style', 'Crossroads')}",
+            f"Status: {plan.get('status', 'planning')}",
+            f"Development: {summary['tier']}",
+            f"Buildings complete: {summary['buildings_complete']}/{summary['buildings_planned']}",
+            f"Housing capacity: {summary['housing_capacity']}",
+            f"Construction queue: {summary['queued']}",
+            f"Placed at stronghold: {placed_buildings} building(s), {placed_roads} road/path tile(s), {placed_decor} decoration(s)",
+            f"Residents: {population_summary['population']} across {population_summary['households']} household(s)",
+            f"Job vacancies: {population_summary['vacancies']}",
+            "",
+            "Build flow:",
+            "- Queue a planned building.",
+            "- Contribute carried materials and money.",
+            "- Work a construction shift once that phase is funded.",
+            "- Projects advance through planned, foundation, frame, and complete.",
+            "- Use the build board for cursor placement of visible roads, buildings, and decorations.",
+            "",
+            "Queued projects:",
+        ]
+        queued = self.reclaimed_stronghold_town_buildings(cx, cy, queued_only=True)
+        if queued:
+            for building in queued[:10]:
+                lines.append(
+                    f"- {building.get('name', building.get('id', 'Project'))}: "
+                    f"{self.wilderness_settlement_building_phase_label(building)}; "
+                    f"needs {self.wilderness_settlement_building_need_summary(building)}"
+                )
+        else:
+            lines.append("- No active queue. Queue a planned building to begin.")
+        return lines
+
+    def queue_reclaimed_stronghold_town_building(
+        self,
+        chunk_x: Optional[int] = None,
+        chunk_y: Optional[int] = None,
+    ) -> bool:
+        cx = self.state.wilderness_chunk_x if chunk_x is None else int(chunk_x)
+        cy = self.state.wilderness_chunk_y if chunk_y is None else int(chunk_y)
+        plan = self.wilderness_settlement_plan(cx, cy)
+        if not plan:
+            self.set_message("Found a town here before queueing town construction.")
+            return False
+        buildings = self.reclaimed_stronghold_town_buildings(cx, cy, queued_only=False)
+        if not buildings:
+            self.set_message(f"All planned buildings at {plan.get('name', 'this town')} are complete.")
+            return False
+        queued_ids = set(str(building_id) for building_id in plan.get("construction_queue", []) or [])
+        items = [
+            MenuItem(
+                label=f"{building.get('name', building.get('id', 'Project'))} ({self.wilderness_settlement_building_phase_label(building)})",
+                value=str(building.get("id", "")),
+                enabled=str(building.get("id", "")) not in queued_ids,
+                hint="queued" if str(building.get("id", "")) in queued_ids else self.wilderness_settlement_building_need_summary(building),
+            )
+            for building in buildings
+        ]
+        items.append(MenuItem(label="Back", value=MENU_BACK, enabled=True))
+        choice = self.vertical_panel_select("Queue Town Project", items, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT, return_back=True)
+        if choice is None or choice.value == MENU_BACK:
+            self.set_message("No town project queued.")
+            return False
+        building_id = str(choice.value)
+        if self.queue_wilderness_settlement_building(cx, cy, building_id):
+            building = plan.get("buildings", {}).get(building_id, {})
+            self.autosave_with_message(f"Queued {building.get('name', building_id)} at {plan.get('name', 'the founded town')}.")
+            return True
+        self.set_message("That building could not be queued.")
+        return False
+
+    def contribute_to_reclaimed_stronghold_town_building(
+        self,
+        chunk_x: Optional[int] = None,
+        chunk_y: Optional[int] = None,
+    ) -> bool:
+        cx = self.state.wilderness_chunk_x if chunk_x is None else int(chunk_x)
+        cy = self.state.wilderness_chunk_y if chunk_y is None else int(chunk_y)
+        plan = self.wilderness_settlement_plan(cx, cy)
+        if not plan:
+            self.set_message("Found a town here before contributing to construction.")
+            return False
+        queued = self.reclaimed_stronghold_town_buildings(cx, cy, queued_only=True)
+        if not queued:
+            self.set_message("Queue a town project before contributing supplies.")
+            return False
+        items = [
+            MenuItem(
+                label=f"{building.get('name', building.get('id', 'Project'))} ({self.wilderness_settlement_building_phase_label(building)})",
+                value=str(building.get("id", "")),
+                enabled=True,
+                hint=self.wilderness_settlement_building_need_summary(building),
+            )
+            for building in queued
+        ]
+        items.append(MenuItem(label="Back", value=MENU_BACK, enabled=True))
+        choice = self.vertical_panel_select("Contribute Supplies", items, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT, return_back=True)
+        if choice is None or choice.value == MENU_BACK:
+            self.set_message("No supplies contributed.")
+            return False
+        building_id = str(choice.value)
+        building = plan.get("buildings", {}).get(building_id, {})
+        accepted = self.contribute_to_wilderness_settlement(cx, cy, building_id, use_available=True)
+        parts: List[str] = []
+        if accepted.get("materials"):
+            parts.append(format_drops(accepted["materials"]))
+        if int(accepted.get("money", 0)):
+            parts.append(f"${int(accepted.get('money', 0))}")
+        if not parts:
+            self.set_message(f"{building.get('name', building_id)} still needs {self.wilderness_settlement_building_need_summary(building)}.")
+            return False
+        self.autosave_with_message(f"Contributed {', '.join(parts)} to {building.get('name', building_id)}.")
+        return True
+
+    def work_on_reclaimed_stronghold_town(
+        self,
+        chunk_x: Optional[int] = None,
+        chunk_y: Optional[int] = None,
+        labor: int = 4,
+        minutes: int = 90,
+        stamina_cost: int = 12,
+    ) -> bool:
+        cx = self.state.wilderness_chunk_x if chunk_x is None else int(chunk_x)
+        cy = self.state.wilderness_chunk_y if chunk_y is None else int(chunk_y)
+        plan = self.wilderness_settlement_plan(cx, cy)
+        if not plan:
+            self.set_message("Found a town here before working on construction.")
+            return False
+        queued = self.reclaimed_stronghold_town_buildings(cx, cy, queued_only=True)
+        if not queued:
+            self.set_message("Queue a town project before working construction.")
+            return False
+        ready = self.reclaimed_stronghold_town_ready_buildings(cx, cy)
+        if not ready:
+            first = queued[0]
+            self.set_message(f"{first.get('name', 'The queued project')} needs {self.wilderness_settlement_building_need_summary(first)} first.")
+            return False
+        if not self.spend_stamina(stamina_cost):
+            return False
+        completed = self.advance_wilderness_settlement_construction(cx, cy, labor)
+        self.advance_time(minutes)
+        if completed:
+            progress = "; ".join(completed[:3])
+            if len(completed) > 3:
+                progress += f"; +{len(completed) - 3} more"
+            self.autosave_with_message(f"Worked a town construction shift at {plan.get('name', 'the founded town')}. {progress}. Time passed: {minutes} minutes.")
+        else:
+            active = ready[0]
+            self.autosave_with_message(f"Worked on {active.get('name', 'town construction')} at {plan.get('name', 'the founded town')}. Time passed: {minutes} minutes.")
+        return True
+
+    def show_reclaimed_stronghold_town_construction(self):
+        cx = self.state.wilderness_chunk_x
+        cy = self.state.wilderness_chunk_y
+        plan = self.wilderness_settlement_plan(cx, cy)
+        if not plan:
+            self.set_message("No founded town exists at this reclaimed stronghold.")
+            return
+        while True:
+            queued = self.reclaimed_stronghold_town_buildings(cx, cy, queued_only=True)
+            ready = self.reclaimed_stronghold_town_ready_buildings(cx, cy)
+            items = [
+                MenuItem(label="Open build board", value="build_board", enabled=True, hint="cursor place"),
+                MenuItem(label="Town overview", value="overview", enabled=True),
+                MenuItem(label="View blueprint", value="blueprint", enabled=True),
+                MenuItem(label="Queue building", value="queue", enabled=True),
+                MenuItem(label="Contribute supplies", value="contribute", enabled=bool(queued), hint="materials/money" if queued else "queue first"),
+                MenuItem(label="Work construction shift", value="work", enabled=bool(ready), hint="90 min, stamina" if ready else "fund a phase first"),
+                MenuItem(label="Back", value=MENU_BACK, enabled=True),
+            ]
+            choice = self.vertical_panel_select(str(plan.get("name", "Founded Town")), items, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT, return_back=True)
+            if choice is None or choice.value == MENU_BACK:
+                self.set_message(f"Closed {plan.get('name', 'the founded town')} construction.")
+                return
+            if choice.value == "build_board":
+                self.show_reclaimed_stronghold_build_board()
+                return
+            if choice.value == "overview":
+                self.vertical_panel_view(str(plan.get("name", "Founded Town")), self.reclaimed_stronghold_town_overview_lines(cx, cy), LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
+                continue
+            if choice.value == "blueprint":
+                self.show_wilderness_settlement_blueprint(cx, cy)
+                continue
+            if choice.value == "queue":
+                self.queue_reclaimed_stronghold_town_building(cx, cy)
+                return
+            if choice.value == "contribute":
+                self.contribute_to_reclaimed_stronghold_town_building(cx, cy)
+                return
+            if choice.value == "work":
+                self.work_on_reclaimed_stronghold_town(cx, cy)
+                return
+
     def wilderness_stronghold_status_lines(self, chunk_x: Optional[int] = None, chunk_y: Optional[int] = None) -> List[str]:
         cx = self.state.wilderness_chunk_x if chunk_x is None else int(chunk_x)
         cy = self.state.wilderness_chunk_y if chunk_y is None else int(chunk_y)
@@ -12880,6 +15139,26 @@ class FarmGame(
                     "- Reclaimed outpost dressing adds a shelter, fire ring, and small supply point on the map.",
                     "- Overworld travel discount when traveling from or to this waypoint.",
                 ])
+                plan = self.wilderness_settlement_plan(cx, cy)
+                rows.extend(["", "Town foundation:"])
+                if plan:
+                    summary = self.wilderness_town_builder().summary(plan)
+                    features = self.reclaimed_stronghold_feature_records(chunk_x=cx, chunk_y=cy)
+                    rows.extend([
+                        f"- {plan.get('name', 'Founded Town')} is founded here.",
+                        f"- Status: {plan.get('status', 'planning')}; {summary['buildings_complete']}/{summary['buildings_planned']} buildings complete.",
+                        f"- Build board placements: {len(features)} visible road/building/decoration item(s).",
+                        "- Use the nearby build board to place roads, buildings, and decorations with a cursor.",
+                    ])
+                else:
+                    can_found, reason = self.can_found_town_at_reclaimed_stronghold(cx, cy)
+                    if can_found:
+                        rows.extend([
+                            "- This reclaimed stronghold can be founded as a wilderness town.",
+                            "- Inspect the stronghold and choose Found town here to create its first blueprint.",
+                        ])
+                    else:
+                        rows.append(f"- {reason}")
         rows.extend([
             "",
             "Strongholds are optional wilderness threats.",
@@ -12966,9 +15245,13 @@ class FarmGame(
         while True:
             cache_ready = record.get("last_cache_week") != self.stronghold_cache_week_key()
             rested_today = record.get("last_rest_day") == self.errand_day_key()
+            plan = self.wilderness_settlement_plan(self.state.wilderness_chunk_x, self.state.wilderness_chunk_y)
+            can_found, found_reason = self.can_found_town_at_reclaimed_stronghold()
             items = [
                 MenuItem(label="Rest at camp", value="rest", enabled=not rested_today, hint="30 min, stamina/HP"),
                 MenuItem(label="Search weekly cache", value="cache", enabled=cache_ready, hint="salvage"),
+                MenuItem(label="Town construction", value="town", enabled=bool(plan), hint=str(plan.get("status", "planning")) if plan else "found first"),
+                MenuItem(label="Found town here", value="found_town", enabled=can_found, hint="create blueprint" if can_found else found_reason),
                 MenuItem(label="Stronghold details", value="details", enabled=True),
                 MenuItem(label="Back", value=MENU_BACK, enabled=True),
             ]
@@ -12979,6 +15262,12 @@ class FarmGame(
             if choice.value == "details":
                 self.vertical_panel_view(str(record.get("name", "Stronghold")), self.wilderness_stronghold_status_lines(), LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
                 continue
+            if choice.value == "town":
+                self.show_reclaimed_stronghold_town_construction()
+                return
+            if choice.value == "found_town":
+                self.found_town_at_reclaimed_stronghold()
+                return
             if choice.value == "rest":
                 self.rest_at_reclaimed_stronghold()
                 return
@@ -13306,6 +15595,14 @@ class FarmGame(
             return False
         if x == self.state.player_x and y == self.state.player_y:
             return False
+        for bounty in self.get_bounty_targets_for_chunk(create=False):
+            try:
+                bx = int(bounty.get("x", bounty.get("target_x", -1)) or -1)
+                by = int(bounty.get("y", bounty.get("target_y", -1)) or -1)
+            except Exception:
+                continue
+            if bx == int(x) and by == int(y):
+                return False
         if self.wilderness_stronghold_enemy_at(x, y):
             return False
         tile = self.active_map()[y][x]
@@ -13675,6 +15972,7 @@ class FarmGame(
             "mine_enemies": {},
             "dungeon_enemies": {},
             "stronghold_enemies": {},
+            "bounty_targets": {},
             "wilderness_animals": {},
             "farm_animals": {},
             "followers": dict(
@@ -13726,6 +16024,11 @@ class FarmGame(
             index_records(
                 "stronghold_enemies",
                 self.get_wilderness_stronghold_enemies(),
+                skip_defeated=True,
+            )
+            index_records(
+                "bounty_targets",
+                self.get_bounty_targets_for_chunk(),
                 skip_defeated=True,
             )
             index_records(
@@ -13785,6 +16088,12 @@ class FarmGame(
             if procedural_town_active
             else {}
         )
+        procedural_town_color_lookup = (
+            self.procedural_town_custom_tile_color_lookup()
+            if self.on_procedural_town_interior()
+            and hasattr(self, "procedural_town_custom_tile_color_lookup")
+            else {}
+        )
 
         held_obj = s.held_object if self.can_hold_objects_here() else None
         held_anchor = self.front_tile_pos() if held_obj else None
@@ -13804,6 +16113,7 @@ class FarmGame(
                 mine_enemy = actor_lookups["mine_enemies"].get(position)
                 dungeon_enemy = actor_lookups["dungeon_enemies"].get(position)
                 stronghold_enemy = actor_lookups["stronghold_enemies"].get(position)
+                bounty_target = actor_lookups["bounty_targets"].get(position)
                 wilderness_animal = actor_lookups["wilderness_animals"].get(position)
                 farm_animal = actor_lookups["farm_animals"].get(position)
                 follower_id = actor_lookups["followers"].get(position)
@@ -13825,6 +16135,8 @@ class FarmGame(
                     line.append(self.render_mine_enemy(dungeon_enemy))
                 elif stronghold_enemy:
                     line.append(self.render_mine_enemy(stronghold_enemy))
+                elif bounty_target:
+                    line.append(self.render_mine_enemy(bounty_target))
                 elif wilderness_animal:
                     line.append(self.render_animal(wilderness_animal))
                 elif farm_animal:
@@ -13849,6 +16161,7 @@ class FarmGame(
                                 tile_map,
                                 civic_overlay_lookup,
                                 procedural_town_active,
+                                procedural_town_color_lookup,
                             )
                         )
             lines.append("".join(line))
@@ -14115,8 +16428,9 @@ class FarmGame(
         self.fishing_tick(elapsed_seconds)
         self._world_time_accumulator = getattr(self, "_world_time_accumulator", 0.0) + max(0.0, elapsed_seconds)
 
-        while self._world_time_accumulator >= GAME_MINUTE_REAL_SECONDS:
-            self._world_time_accumulator -= GAME_MINUTE_REAL_SECONDS
+        minute_seconds = self.game_minute_real_seconds()
+        while self._world_time_accumulator >= minute_seconds:
+            self._world_time_accumulator -= minute_seconds
             self.advance_time(1)
 
     def idle_tick(self):
@@ -14223,6 +16537,9 @@ class FarmGame(
             if self.in_active_bounds(nx, ny) and self.wilderness_stronghold_enemy_at(nx, ny):
                 self.start_wilderness_stronghold_combat_encounter(self.wilderness_stronghold_enemy_at(nx, ny), reason="bump")
                 return
+            if self.in_active_bounds(nx, ny) and self.bounty_target_at(nx, ny):
+                self.start_bounty_combat_encounter(self.bounty_target_at(nx, ny), reason="bump")
+                return
             if self.in_active_bounds(nx, ny) and self.animal_at(nx, ny):
                 animal = self.animal_at(nx, ny)
                 self.set_message(f"A {animal.get('species', 'wild animal')} is in the way. Use Z/Enter to observe it.")
@@ -14327,8 +16644,13 @@ class FarmGame(
             if self.on_wilderness():
                 if self.check_wilderness_stronghold_enemy_engagement(reason="approach"):
                     return
+                if self.check_bounty_target_engagement(reason="approach"):
+                    return
                 self.update_wilderness_stronghold_enemies()
+                self.update_bounty_targets()
                 if self.check_wilderness_stronghold_enemy_engagement(reason="enemy"):
+                    return
+                if self.check_bounty_target_engagement(reason="enemy"):
                     return
                 self.update_wilderness_animals()
                 if self.current_procedural_town_plan():
@@ -14410,7 +16732,11 @@ class FarmGame(
         if self.on_wilderness() and self.procedural_town_civic_overlay_at(x, y):
             return True
         if self.on_procedural_town_interior():
-            return self.active_map()[y][x] in {
+            tile = self.active_map()[y][x]
+            building = self.current_procedural_town_building()
+            if tile == "P" and building and str(building.get("type_id", "")) == "sheriff_office":
+                return True
+            return tile in {
                 "D", "<", "U", ">", "&", "_", "|",
             }
 
@@ -14424,7 +16750,14 @@ class FarmGame(
 
         if self.on_wilderness():
             tile = self.active_map()[y][x]
+            if self.bounty_target_at(x, y):
+                return True
             if self.wilderness_stronghold_enemy_at(x, y):
+                return True
+            if self.reclaimed_stronghold_build_board_at(x, y):
+                return True
+            _feature_id, stronghold_feature = self.reclaimed_stronghold_feature_at(x, y)
+            if stronghold_feature:
                 return True
             if self.get_placed_object(x, y) or self.get_crop(x, y) or self.near_shipping_bin(x, y):
                 return True
@@ -14521,6 +16854,9 @@ class FarmGame(
                 return "Walk onto stairs: go down"
             if tile == "&":
                 return "Z/Enter: use settlement service"
+            building = self.current_procedural_town_building()
+            if tile == "P" and building and str(building.get("type_id", "")) == "sheriff_office":
+                return "Z/Enter: open bounty board"
             return "Z/Enter: nothing"
 
         if self.on_town_interior():
@@ -14602,8 +16938,15 @@ class FarmGame(
 
         if self.on_wilderness():
             tile = self.active_map()[y][x]
+            if self.bounty_target_at(x, y):
+                return "Bump/approach: start bounty combat"
             if self.wilderness_stronghold_enemy_at(x, y):
                 return "Bump/approach: start combat"
+            if self.reclaimed_stronghold_build_board_at(x, y):
+                return "Z/Enter: open stronghold build board"
+            _feature_id, stronghold_feature = self.reclaimed_stronghold_feature_at(x, y)
+            if stronghold_feature:
+                return f"Z/Enter: inspect {str(stronghold_feature.get('name', 'town feature')).lower()}"
             civic_overlay = self.procedural_town_civic_overlay_at(x, y)
             if civic_overlay:
                 return f"Z/Enter: inspect {str(civic_overlay.get('name', 'civic work')).lower()}"
@@ -14623,7 +16966,7 @@ class FarmGame(
                 return "Z/Enter: inspect land deed"
             building = self.procedural_town_building_door_at(x, y)
             if building:
-                if str(building.get("type_id", "")) in {"well", "market_stall", "park"}:
+                if str(building.get("type_id", "")) in PROCEDURAL_TOWN_OPEN_BUILDINGS:
                     return f"Z/Enter: visit {str(building.get('name', 'town place')).lower()}"
                 return f"Walk into door: enter {str(building.get('name', 'building')).lower()}"
             building = self.procedural_town_building_at(x, y)
@@ -15544,7 +17887,7 @@ class FarmGame(
                     "- Companions can join once unlocked, with a party limit of four including you.",
                     "- Manage overworld companions and farm helpers from Tab > People > Followers & Helpers.",
                     "- Spouses and older children can accompany you; child travel and combat access depends on age.",
-                    "- Face a follower and press Z/Enter to choose Follow, Wait Here, a farm task, or Return Home.",
+                    "- Face a follower and press Z/Enter to choose Follow, Wait Here, a follower job, or Return Home.",
                     "- A battle-eligible travel follower is prioritized when tactical combat begins.",
                     "- Mine encounters use threat budgets, party size, enemy roles, and recent battle history to vary fights fairly.",
                     "- The opening combat briefing summarizes the encounter type, danger, and role mix.",
@@ -18456,6 +20799,10 @@ class FarmGame(
 
     def use_wilderness_action(self, x: int, y: int):
         if self.in_active_bounds(x, y):
+            bounty = self.bounty_target_at(x, y)
+            if bounty:
+                self.start_bounty_combat_encounter(bounty, reason="interact")
+                return
             enemy = self.wilderness_stronghold_enemy_at(x, y)
             if enemy:
                 self.start_wilderness_stronghold_combat_encounter(enemy, reason="interact")
@@ -18481,6 +20828,13 @@ class FarmGame(
             self.set_message(f"Inspected {civic_overlay.get('name', 'the civic improvement')}.")
             return
         tile = self.active_map()[y][x] if self.in_active_bounds(x, y) else "#"
+        if self.reclaimed_stronghold_build_board_at(x, y):
+            self.show_reclaimed_stronghold_build_board()
+            return
+        _feature_id, stronghold_feature = self.reclaimed_stronghold_feature_at(x, y)
+        if stronghold_feature:
+            self.show_reclaimed_stronghold_feature(stronghold_feature)
+            return
         building = self.procedural_town_building_door_at(x, y)
         if building:
             self.enter_procedural_town_building(building)
@@ -24131,12 +26485,32 @@ class FarmGame(
     def on_off(self, value: bool) -> str:
         return "on" if value else "off"
 
+    def time_speed_key(self) -> str:
+        speed = str(getattr(self.state, "time_speed", DEFAULT_TIME_SPEED) or DEFAULT_TIME_SPEED)
+        return speed if speed in TIME_SPEED_OPTIONS else DEFAULT_TIME_SPEED
+
+    def time_speed_label(self) -> str:
+        speed = self.time_speed_key()
+        seconds = float(TIME_SPEED_REAL_SECONDS.get(speed, GAME_MINUTE_REAL_SECONDS))
+        return f"{speed} ({seconds:g}s/min)"
+
+    def cycle_time_speed_setting(self):
+        current = self.time_speed_key()
+        index = TIME_SPEED_OPTIONS.index(current) if current in TIME_SPEED_OPTIONS else 0
+        self.state.time_speed = TIME_SPEED_OPTIONS[(index + 1) % len(TIME_SPEED_OPTIONS)]
+        self.autosave_with_message(f"Clock speed: {self.time_speed_label()}.")
+
+    def game_minute_real_seconds(self) -> float:
+        speed = self.time_speed_key()
+        return max(0.1, float(TIME_SPEED_REAL_SECONDS.get(speed, GAME_MINUTE_REAL_SECONDS)))
+
     def startup_settings_snapshot(self) -> Dict[str, object]:
         return {
             "color_enabled": bool(self.state.color_enabled),
             "show_target_info": bool(self.state.show_target_info),
             "show_control_hints": bool(self.state.show_control_hints),
             "live_time_enabled": bool(self.state.live_time_enabled),
+            "time_speed": self.time_speed_key(),
             "aging_and_death_enabled": bool(
                 self.state.aging_and_death_enabled
             ),
@@ -24151,6 +26525,8 @@ class FarmGame(
         self.state.show_target_info = bool(settings.get("show_target_info", self.state.show_target_info))
         self.state.show_control_hints = bool(settings.get("show_control_hints", self.state.show_control_hints))
         self.state.live_time_enabled = bool(settings.get("live_time_enabled", self.state.live_time_enabled))
+        speed = str(settings.get("time_speed", getattr(self.state, "time_speed", DEFAULT_TIME_SPEED)))
+        self.state.time_speed = speed if speed in TIME_SPEED_OPTIONS else DEFAULT_TIME_SPEED
         self.state.aging_and_death_enabled = bool(
             settings.get(
                 "aging_and_death_enabled",
@@ -24171,6 +26547,7 @@ class FarmGame(
                 MenuItem(label="Control hint line", value="control_hints", enabled=True, hint=self.on_off(self.state.show_control_hints)),
                 MenuItem(label="Color display", value="color", enabled=True, hint=self.on_off(self.state.color_enabled)),
                 MenuItem(label="Live time/weather", value="live", enabled=True, hint=self.on_off(self.state.live_time_enabled)),
+                MenuItem(label="Clock speed", value="time_speed", enabled=True, hint=self.time_speed_label()),
                 MenuItem(label="Aging & natural death", value="aging", enabled=True, hint=self.on_off(self.state.aging_and_death_enabled)),
                 MenuItem(label="Auto-open shop/bin", value="auto_open", enabled=True, hint=self.on_off(self.state.shop_auto_open_enabled and self.state.bin_auto_open_enabled)),
                 MenuItem(label="Tool targeting", value="target_mode", enabled=True, hint=self.target_mode_label()),
@@ -24193,6 +26570,10 @@ class FarmGame(
                 self.state.color_enabled = get_color_enabled()
             elif choice.value == "live":
                 self.state.live_time_enabled = not self.state.live_time_enabled
+            elif choice.value == "time_speed":
+                current = self.time_speed_key()
+                index = TIME_SPEED_OPTIONS.index(current) if current in TIME_SPEED_OPTIONS else 0
+                self.state.time_speed = TIME_SPEED_OPTIONS[(index + 1) % len(TIME_SPEED_OPTIONS)]
             elif choice.value == "aging":
                 self.state.aging_and_death_enabled = (
                     not self.state.aging_and_death_enabled
@@ -24567,6 +26948,7 @@ class FarmGame(
                 MenuItem(label="Control hint line", value="control_hints", enabled=True, hint=self.on_off(self.state.show_control_hints)),
                 MenuItem(label="Color display", value="color", enabled=True, hint=self.on_off(self.state.color_enabled)),
                 MenuItem(label="Live time/weather", value="live", enabled=True, hint=self.on_off(self.state.live_time_enabled)),
+                MenuItem(label="Clock speed", value="time_speed", enabled=True, hint=self.time_speed_label()),
                 MenuItem(label="Aging & natural death", value="aging", enabled=True, hint=self.on_off(self.state.aging_and_death_enabled)),
                 MenuItem(label="Auto-open shop/bin", value="auto_open", enabled=True, hint=self.on_off(self.state.shop_auto_open_enabled and self.state.bin_auto_open_enabled)),
                 MenuItem(label="Tool targeting", value="target_mode", enabled=True, hint=self.target_mode_label()),
@@ -24592,6 +26974,8 @@ class FarmGame(
                 self.toggle_color_setting()
             elif choice.value == "live":
                 self.toggle_live_time()
+            elif choice.value == "time_speed":
+                self.cycle_time_speed_setting()
             elif choice.value == "aging":
                 self.set_aging_and_death_enabled(
                     not self.state.aging_and_death_enabled
@@ -25422,9 +27806,15 @@ class FarmGame(
             "Allowed travel:",
         ]
         task = str(record.get("task", "") or "")
+        job_profile = self.travel_follower_job_profile(follower_id, task or self.travel_follower_preferred_task(follower_id))
+        lines[13:13] = [
+            f"Follower job: {job_profile['quality']} {job_profile['title']}",
+            f"Job morale: {job_profile['morale']}/100",
+            f"Job benefit: {job_profile['benefit']}",
+        ]
         if task:
             task_xp = int((record.get("task_xp", {}) or {}).get(task, 0))
-            lines[13:13] = [
+            lines[16:16] = [
                 f"Farm task: {self.travel_follower_task_label(task)}",
                 f"Daily work: {int(record.get('work_units', 0))}/{self.travel_follower_work_limit(follower_id)}",
                 f"Task proficiency: {self.travel_follower_task_experience_label(follower_id, task)} ({task_xp} xp)",
@@ -25484,16 +27874,20 @@ class FarmGame(
         options = self.travel_follower_task_options(follower_id)
         items = [
             MenuItem(
-                label=self.travel_follower_task_label(task_id),
+                label=self.travel_follower_job_profile(follower_id, task_id)["title"],
                 value=task_id,
                 enabled=True,
-                hint="current" if task_id == current and str(record.get("mode", "")) == "work" else "",
+                hint=(
+                    "current"
+                    if task_id == current and str(record.get("mode", "")) == "work"
+                    else self.travel_follower_task_label(task_id)
+                ),
             )
             for task_id in options
         ]
         items.append(MenuItem(label="Back", value=MENU_BACK, enabled=True))
         choice = self.vertical_panel_select(
-            f"{data.get('name', 'Follower')} - Farm Task",
+            f"{data.get('name', 'Follower')} - Follower Job",
             items,
             LEFT_PANEL_WIDTH,
             LEFT_PANEL_HEIGHT,
@@ -25681,7 +28075,7 @@ class FarmGame(
                     hint=self.travel_follower_bond_rank(follower_id),
                 ),
                 MenuItem(
-                    label="Assign / change farm task",
+                    label="Assign / change follower job",
                     value="task",
                     enabled=bool(self.travel_follower_task_options(follower_id)),
                     hint=(
@@ -25690,7 +28084,7 @@ class FarmGame(
                         else f"strength: {self.travel_follower_task_label(self.travel_follower_preferred_task(follower_id))}"
                     ),
                 ),
-                MenuItem(label="Work report", value="report", enabled=True, hint=f"{int(record.get('work_units', 0))} today"),
+                MenuItem(label="Job report", value="report", enabled=True, hint=f"{int(record.get('work_units', 0))} today"),
                 MenuItem(
                     label="Expedition role",
                     value="role",
@@ -25737,7 +28131,7 @@ class FarmGame(
                 continue
             if choice.value == "report":
                 self.vertical_panel_view(
-                    f"{data.get('name', 'Follower')} - Work Report",
+                    f"{data.get('name', 'Follower')} - Job Report",
                     self.travel_follower_work_report_lines(follower_id),
                     LEFT_PANEL_WIDTH,
                     LEFT_PANEL_HEIGHT,
@@ -25768,7 +28162,7 @@ class FarmGame(
                         label="Regroup everyone",
                         value="__REGROUP__",
                         enabled=True,
-                        hint="cancel waits and farm tasks",
+                        hint="cancel waits and follower jobs",
                     ),
                     MenuItem(
                         label="Send everyone home",
@@ -25834,11 +28228,11 @@ class FarmGame(
                     "Teens can visit the wilderness but do not enter tactical combat.",
                     "Young adults, spouses, and combat companions can join battles.",
                     "",
-                    "Farm tasks:",
-                    "- Water crops, harvest ripe crops, care for animals, or gather forage.",
+                    "Follower jobs:",
+                    "- Plant seeds, water crops, harvest ripe crops, care for animals, gather forage, or clear debris.",
                     "- One work action is completed each daytime hour.",
                     "- Personality, experience, and trust improve daily capacity.",
-                    "- Work reports preserve recent activity and lifetime totals.",
+                    "- Job reports preserve recent activity and lifetime totals.",
                     "",
                     "Expedition roles:",
                     "- Familiar: Scout or Gatherer.",
@@ -28145,6 +30539,7 @@ class FarmGame(
                 MenuItem(label="Combat status", value="view", enabled=True, hint=f"Lv {profile['level']} HP {profile['current_hp']}/{profile['max_hp']}"),
                 MenuItem(label="Battle party", value="party", enabled=True, hint=self.party_menu_hint()),
                 MenuItem(label="Missions", value="missions", enabled=True, hint="mission board"),
+                MenuItem(label="Bounties", value="bounties", enabled=True, hint=self.bounty_menu_hint()),
                 MenuItem(label="Skills", value="training", enabled=True, hint=f"SP {self.combat_progress_for_key('player').get('skill_points', 0)}"),
                 MenuItem(label="Loadout", value="loadout", enabled=True, hint=self.farm_tactical_wallet_text()),
                 MenuItem(label="Bestiary", value="bestiary", enabled=True, hint=f"{len(getattr(self.state, 'combat_bestiary_seen', []) or [])} seen"),
@@ -28163,6 +30558,9 @@ class FarmGame(
                 continue
             if choice.value == "missions":
                 self.show_combat_mission_menu()
+                continue
+            if choice.value == "bounties":
+                self.show_active_bounties_menu()
                 continue
             if choice.value == "training":
                 self.show_combat_training_menu()
@@ -30621,7 +33019,7 @@ class FarmGame(
         print("Wilderness claims:")
         print(f"  {colorize(WILDERNESS_CLAIM_SYMBOL, C.BIN)} = deed post / owned claim waypost")
         print(f"  {colorize(WILDERNESS_SURVEY_PREVIEW_SYMBOL, C.DIM)} = claimable survey on the overworld map")
-        print(f"  {colorize('!', C.HOSTILE)} / {colorize('!', C.CROP_READY)} = hostile / reclaimed stronghold on the overworld map")
+        print(f"  {colorize('!', C.HOSTILE)} / {colorize('!', C.CROP_READY)} = bounty or hostile / reclaimed stronghold on the overworld map")
         print(f"  {colorize('X', C.STONE)} = dungeon site on the overworld map")
         print(f"  {colorize('V', C.WATER)} = known cave entrance on the overworld map")
         print("  Inspect a deed post to choose a farm type before buying the land.")
@@ -30647,7 +33045,7 @@ class FarmGame(
         print("  Fall: September-November, cooler growing season.")
         print("  Winter: December-February, snow; hardy crops available.")
         print("  Weather visuals: rain, snow, storms, and blizzards appear on the map.")
-        print("  Live time: the world keeps ticking while you stand still. Toggle it from Tab > System > Settings.")
+        print("  Live time: the world keeps ticking while you stand still. Clock speed is adjustable from Tab > System > Settings.")
         print()
         print("Clearing:")
         print("  Weeds tool/action removes weeds by hand.")

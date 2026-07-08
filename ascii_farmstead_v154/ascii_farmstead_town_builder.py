@@ -92,6 +92,20 @@ SETTLEMENT_BUILDING_CATALOG: Dict[str, Dict[str, object]] = {
             {"materials": {"Wood": 10, "Cloth": 3, "Cave Herbs": 2}, "money": 400, "labor": 5},
         ],
     },
+    "sheriff_office": {
+        "name": "Sheriff Office",
+        "zone": "Civic",
+        "width": 7,
+        "height": 5,
+        "symbol": "B",
+        "capacity": 0,
+        "service": 4,
+        "phases": [
+            {"materials": {"Wood": 24, "Stone": 14}, "money": 360, "labor": 6},
+            {"materials": {"Wood": 30, "Iron Bar": 2}, "money": 540, "labor": 8},
+            {"materials": {"Wood": 10, "Cloth": 1, "Coal": 2}, "money": 360, "labor": 5},
+        ],
+    },
     "library": {
         "name": "Library",
         "zone": "Civic",
@@ -185,6 +199,14 @@ def settlement_chunk_key(chunk_x: int, chunk_y: int) -> str:
 
 def settlement_coord_key(x: int, y: int) -> str:
     return f"{int(x)},{int(y)}"
+
+
+def settlement_stable_hash(value: object) -> int:
+    total = 2166136261
+    for char in str(value):
+        total ^= ord(char)
+        total = (total * 16777619) & 0xFFFFFFFF
+    return total
 
 
 def parse_settlement_coord(value: object) -> Optional[Position]:
@@ -626,8 +648,20 @@ class WildernessTownBuilder:
         building_id = str(building_id or f"{type_id}:{len(plan.get('buildings', {})) + 1}")
         if building_id in plan.get("buildings", {}):
             return ""
-        x = int(lot["x"]) + (int(lot["width"]) - building_width) // 2
-        y = int(lot["y"]) + (int(lot["height"]) - building_height) // 2
+        free_x = int(lot["width"]) - building_width
+        free_y = int(lot["height"]) - building_height
+        if str(plan.get("layout_mode", "")) == "varied_starter":
+            offset_rng = random.Random(
+                int(plan.get("seed", 0))
+                + settlement_stable_hash(f"{building_id}:{type_id}:offset")
+            )
+            offset_x = offset_rng.randint(0, max(0, free_x)) if free_x > 0 else 0
+            offset_y = offset_rng.randint(0, max(0, free_y)) if free_y > 0 else 0
+        else:
+            offset_x = max(0, free_x) // 2
+            offset_y = max(0, free_y) // 2
+        x = int(lot["x"]) + offset_x
+        y = int(lot["y"]) + offset_y
         plan_center_y = int(plan["height"]) // 2
         door_x = x + building_width // 2
         if y < plan_center_y:
@@ -674,37 +708,84 @@ class WildernessTownBuilder:
     def generate_starter_layout(self, plan: Dict[str, object]) -> None:
         width, height = int(plan["width"]), int(plan["height"])
         center_x, center_y = width // 2, height // 2
+        rng = random.Random(
+            int(plan.get("seed", 0))
+            + settlement_stable_hash(f"{plan.get('style', 'Crossroads')}:starter-layout")
+        )
+        plan["layout_mode"] = "varied_starter"
         entrance = (center_x, height - 2)
         plan["entrance"] = {"x": entrance[0], "y": entrance[1]}
         self.add_road_line(plan, entrance, (center_x, 3))
         self.add_road_line(plan, (4, center_y), (width - 5, center_y))
         if str(plan.get("style")) == "Main Street":
             self.add_road_line(plan, (4, center_y - 2), (width - 5, center_y - 2))
+            self.add_road_line(plan, (4, center_y + 2), (width - 5, center_y + 2))
         elif str(plan.get("style")) == "Market Ring":
             for y in range(center_y - 2, center_y + 3):
                 self.add_road_line(plan, (center_x - 3, y), (center_x + 3, y))
+            self.add_road_line(plan, (center_x - 10, center_y - 4), (center_x + 10, center_y - 4))
+            self.add_road_line(plan, (center_x - 10, center_y + 4), (center_x + 10, center_y + 4))
 
         lot_width, lot_height = 9, 6
-        columns = [5, 17, 29, width - 38, width - 26, width - 14]
-        top_y, bottom_y = 4, height - 10
-        zones = [
-            "Residential",
-            "Civic",
-            "Civic",
-            "Commercial",
-            "Commercial",
-            "Residential",
-            "Residential",
-            "Residential",
-            "Commercial",
-            "Industrial",
-            "Green",
-            "Residential",
+        if str(plan.get("style")) == "Main Street":
+            base_columns = [4, 16, 28, width - 39, width - 27, width - 15]
+            top_y = max(3, center_y - 11 + rng.choice([-1, 0, 1]))
+            bottom_y = min(height - lot_height - 2, center_y + 5 + rng.choice([-1, 0, 1]))
+        elif str(plan.get("style")) == "Market Ring":
+            base_columns = [7, 19, 31, width - 40, width - 28, width - 16]
+            top_y = max(3, 4 + rng.choice([-1, 0, 1]))
+            bottom_y = min(height - lot_height - 2, height - 10 + rng.choice([-1, 0, 1]))
+        else:
+            base_columns = [5, 17, 29, width - 38, width - 26, width - 14]
+            top_y = max(3, 4 + rng.choice([-1, 0, 1]))
+            bottom_y = min(height - lot_height - 2, height - 10 + rng.choice([-1, 0, 1]))
+        left_shift = rng.choice([-1, 0, 1])
+        right_shift = rng.choice([-1, 0, 1])
+        columns = [
+            max(2, min(width - lot_width - 2, x + (left_shift if index < 3 else right_shift)))
+            for index, x in enumerate(base_columns)
         ]
-        lot_ids: List[str] = []
-        for row_index, y in enumerate([top_y, bottom_y]):
-            for column_index, x in enumerate(columns):
-                lot_id = f"lot_{row_index + 1}_{column_index + 1}"
+
+        slot_ids = [
+            f"lot_{row_index}_{column_index}"
+            for row_index in (1, 2)
+            for column_index in range(1, 7)
+        ]
+        assigned_zone_slots: Set[str] = set()
+
+        def choose_zone_slots(candidates: List[str], count: int) -> List[str]:
+            available = [slot_id for slot_id in candidates if slot_id not in assigned_zone_slots]
+            if len(available) < count:
+                available.extend(
+                    slot_id
+                    for slot_id in slot_ids
+                    if slot_id not in assigned_zone_slots and slot_id not in available
+                )
+            rng.shuffle(available)
+            chosen = available[:count]
+            assigned_zone_slots.update(chosen)
+            return chosen
+
+        civic_slots = choose_zone_slots(["lot_1_2", "lot_1_3", "lot_1_4", "lot_2_1"], 3)
+        commercial_slots = choose_zone_slots(
+            ["lot_1_4", "lot_1_5", "lot_2_2", "lot_2_3", "lot_2_4"],
+            2,
+        )
+        industrial_slots = choose_zone_slots(["lot_2_3", "lot_2_4", "lot_2_5"], 1)
+        green_slots = choose_zone_slots(["lot_2_2", "lot_2_5", "lot_1_1"], 1)
+        zone_by_lot = {slot_id: "Residential" for slot_id in slot_ids}
+        for slot_id in civic_slots:
+            zone_by_lot[slot_id] = "Civic"
+        for slot_id in commercial_slots:
+            zone_by_lot[slot_id] = "Commercial"
+        for slot_id in industrial_slots:
+            zone_by_lot[slot_id] = "Industrial"
+        for slot_id in green_slots:
+            zone_by_lot[slot_id] = "Green"
+
+        for row_index, y in enumerate([top_y, bottom_y], start=1):
+            for column_index, x in enumerate(columns, start=1):
+                lot_id = f"lot_{row_index}_{column_index}"
                 if self.add_lot(
                     plan,
                     lot_id,
@@ -712,26 +793,52 @@ class WildernessTownBuilder:
                     y,
                     lot_width,
                     lot_height,
-                    zones[row_index * 6 + column_index],
+                    zone_by_lot[lot_id],
                 ):
-                    lot_ids.append(lot_id)
+                    plan["lots"][lot_id]["name"] = f"{zone_by_lot[lot_id]} Lot {row_index}-{column_index}"
 
         starter_assignments = [
-            ("lot_1_1", "home", "Northwest Home"),
-            ("lot_1_2", "clinic", "Founders Clinic"),
-            ("lot_1_3", "town_hall", "Founders Hall"),
-            ("lot_1_4", "general_store", "Crossroads General"),
-            ("lot_1_5", "inn", "Wayfarer Inn"),
-            ("lot_1_6", "home", "Northeast Home"),
-            ("lot_2_1", "home", "Southwest Home"),
-            ("lot_2_2", "home", "Garden Home"),
-            ("lot_2_3", "market_stall", "Founders Market"),
-            ("lot_2_4", "carpenter", "Settlement Carpenter"),
-            ("lot_2_5", "well", "Founders Well"),
-            ("lot_2_6", "home", "Southeast Home"),
+            ("home:1", "home", "Hearthside Home"),
+            ("clinic:2", "clinic", "Founders Clinic"),
+            ("town_hall:3", "town_hall", "Founders Hall"),
+            ("general_store:4", "general_store", "Crossroads General"),
+            ("inn:5", "inn", "Wayfarer Inn"),
+            ("home:6", "home", "Roadbend Home"),
+            ("home:7", "home", "Gardener's Home"),
+            ("home:8", "home", "Lantern Home"),
+            ("sheriff_office:9", "sheriff_office", "Trail Sheriff Office"),
+            ("carpenter:10", "carpenter", "Settlement Carpenter"),
+            ("well:11", "well", "Founders Well"),
+            ("home:12", "home", "Outrider Home"),
         ]
-        for lot_id, type_id, name in starter_assignments:
-            self.place_building(plan, lot_id, type_id, name=name)
+        lot_pools: Dict[str, List[str]] = {}
+        for lot_id, lot in plan.get("lots", {}).items():
+            lot_pools.setdefault(str(lot.get("zone", "Residential")), []).append(str(lot_id))
+        for pool in lot_pools.values():
+            pool.sort()
+            rng.shuffle(pool)
+
+        def next_lot_for_type(type_id: str) -> str:
+            catalog = SETTLEMENT_BUILDING_CATALOG.get(type_id, {})
+            preferred_zones = [str(catalog.get("zone", "Residential"))]
+            if type_id == "well":
+                preferred_zones = ["Green", "Civic"]
+            for zone in preferred_zones:
+                pool = lot_pools.get(zone, [])
+                if pool:
+                    return pool.pop(0)
+            return ""
+
+        for building_id, type_id, name in starter_assignments:
+            lot_id = next_lot_for_type(type_id)
+            if lot_id:
+                self.place_building(
+                    plan,
+                    lot_id,
+                    type_id,
+                    building_id=building_id,
+                    name=name,
+                )
         plan["revision"] = max(1, int(plan.get("revision", 1)))
 
     def queue_building(self, plan: Dict[str, object], building_id: str) -> bool:

@@ -13,6 +13,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 from ascii_farmstead_npc_builder import (
     ProceduralNpcBuilder,
     procedural_slug,
+    sanitize_procedural_job_profile,
     sanitize_procedural_request,
     stable_text_seed,
 )
@@ -353,15 +354,33 @@ class ProceduralNpcDialogueBuilder:
         member_names = [str(member.get("given_name") or member.get("name")) for member in members]
         tier = procedural_relationship_tier(resident.get("relationship", 0))
         traits = [str(value) for value in resident.get("personality_traits", [])]
+        job_profile = sanitize_procedural_job_profile(
+            resident.get("job_profile", {}),
+            role,
+        )
 
         if topic == "first_meeting":
             return [
-                f"I'm {name}. I handle the work of a {role.lower()} here in {settlement}.",
+                f"I'm {name}. I work as the {str(job_profile.get('title', role)).lower()} here in {settlement}.",
                 f"We are still learning what kind of place {settlement} will be. You may as well learn it with us.",
                 f"New face? I'm {name}. If you get lost, follow the road until someone starts giving you directions.",
             ]
         if topic == "work":
             lines = list(ROLE_DIALOGUE.get(role, ROLE_DIALOGUE["Settler"]))
+            duties = [str(value) for value in job_profile.get("duties", []) if str(value or "").strip()]
+            if duties:
+                lines.append(f"Today's practical work is {duties[0]}. Tomorrow it will probably be the task I forgot to fear.")
+            output = str(job_profile.get("output", "") or "")
+            benefit = str(job_profile.get("public_benefit", "") or "")
+            if output or benefit:
+                lines.append(
+                    f"If the job goes well, the town gets {output or 'a little more stability'}"
+                    + (f"; mostly it {benefit}." if benefit else ".")
+                )
+            lines.append(
+                f"I'd call my current pace {str(job_profile.get('quality', 'Capable')).lower()}: "
+                f"skill {job_profile.get('skill', 0)}/5, morale {job_profile.get('morale', 0)}/100."
+            )
             lines.append(
                 f"Right now I am {activity}"
                 + (f" near {building_name}." if building_name else ".")

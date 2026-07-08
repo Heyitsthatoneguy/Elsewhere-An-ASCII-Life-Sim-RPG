@@ -270,6 +270,7 @@ LOADED_STATE_DEFAULTS = {
     "facing": "DOWN",
     "tool_target_mode": "FRONT",
     "live_time_enabled": True,
+    "time_speed": "Brisk",
 }
 
 

@@ -121,6 +121,18 @@ ROLE_PREFERENCE_DATA: Dict[str, Dict[str, object]] = {
         "dislikes": ("Bat Guano", "Trash"),
         "goal": "Make recovery feel ordinary, practical, and possible.",
     },
+    "Sheriff": {
+        "traits": ("Protective", "Methodical", "Wry"),
+        "likes": ("Coffee", "Field Snack", "Iron Ore", "Maple"),
+        "dislikes": ("Trash", "Bat Guano"),
+        "goal": "Keep the roads useful without making the town feel afraid of them.",
+    },
+    "Deputy": {
+        "traits": ("Protective", "Restless", "Practical"),
+        "likes": ("Field Snack", "Berries", "Copper Ore", "Wildflower"),
+        "dislikes": ("Trash", "Fish Bones"),
+        "goal": "Learn every trail well enough to know when something is wrong.",
+    },
     "Librarian": {
         "traits": ("Reserved", "Curious", "Methodical"),
         "likes": ("Maple", "Cave Herbs", "Wildflower", "Ancient Preserves"),
@@ -210,6 +222,10 @@ BUILDING_PROFESSION_SLOTS: Dict[str, Tuple[Dict[str, object], ...]] = {
         {"role": "Doctor", "slot": "doctor", "priority": 1},
         {"role": "Nurse", "slot": "nurse", "priority": 5},
     ),
+    "sheriff_office": (
+        {"role": "Sheriff", "slot": "sheriff", "priority": 1},
+        {"role": "Deputy", "slot": "deputy", "priority": 5},
+    ),
     "library": (
         {"role": "Librarian", "slot": "librarian", "priority": 2},
         {"role": "Archivist", "slot": "archivist", "priority": 7},
@@ -229,6 +245,300 @@ BUILDING_PROFESSION_SLOTS: Dict[str, Tuple[Dict[str, object], ...]] = {
         {"role": "Gardener", "slot": "gardener", "priority": 6},
     ),
 }
+
+
+PROCEDURAL_JOB_PROFILES: Dict[str, Dict[str, object]] = {
+    "Mayor": {
+        "title": "Mayor",
+        "category": "Civic",
+        "work_activity": "reviewing petitions, budgets, and settlement priorities",
+        "output": "civic stability",
+        "public_benefit": "keeps construction priorities and public disputes from drifting",
+        "duties": ("hear resident concerns", "approve civic work", "coordinate town priorities"),
+        "tools": ("charter ledger", "petition book"),
+        "service_tags": ("civic", "leadership", "planning"),
+        "wage": 95,
+    },
+    "Clerk": {
+        "title": "Town Clerk",
+        "category": "Civic",
+        "work_activity": "updating permits, schedules, and settlement records",
+        "output": "reliable records",
+        "public_benefit": "helps buildings, households, and services stay organized",
+        "duties": ("file permits", "maintain resident rolls", "track public supplies"),
+        "tools": ("ink ledger", "permit stamps"),
+        "service_tags": ("civic", "records", "planning"),
+        "wage": 62,
+    },
+    "Well Keeper": {
+        "title": "Well Keeper",
+        "category": "Infrastructure",
+        "work_activity": "checking the public well and water stores",
+        "output": "safe water",
+        "public_benefit": "reduces bad-weather strain and keeps travelers supplied",
+        "duties": ("test the water", "repair the bucket line", "ration emergency stores"),
+        "tools": ("rope kit", "water gauge"),
+        "service_tags": ("water", "infrastructure", "health"),
+        "wage": 48,
+    },
+    "Shopkeeper": {
+        "title": "Shopkeeper",
+        "category": "Commerce",
+        "work_activity": "opening the store and arranging daily stock",
+        "output": "available goods",
+        "public_benefit": "keeps common supplies purchasable without a long trip",
+        "duties": ("price essentials", "serve customers", "watch stock gaps"),
+        "tools": ("coin tray", "stock tags"),
+        "service_tags": ("commerce", "supplies", "trade"),
+        "wage": 70,
+    },
+    "Stockkeeper": {
+        "title": "Stockkeeper",
+        "category": "Commerce",
+        "work_activity": "sorting deliveries and counting supplies",
+        "output": "stock reliability",
+        "public_benefit": "makes shops less likely to run short on staple goods",
+        "duties": ("count crates", "rotate perishables", "mark shortages"),
+        "tools": ("crate hook", "inventory slate"),
+        "service_tags": ("commerce", "logistics", "supplies"),
+        "wage": 52,
+    },
+    "Carpenter": {
+        "title": "Carpenter",
+        "category": "Construction",
+        "work_activity": "measuring repairs and preparing building work",
+        "output": "build readiness",
+        "public_benefit": "helps homes, counters, rooms, and town projects come together cleanly",
+        "duties": ("measure lumber", "repair frames", "draft expansions"),
+        "tools": ("square", "saw kit"),
+        "service_tags": ("construction", "housing", "repair"),
+        "wage": 76,
+    },
+    "Carpenter Apprentice": {
+        "title": "Carpenter Apprentice",
+        "category": "Construction",
+        "work_activity": "learning joinery and carrying project materials",
+        "output": "assisted construction",
+        "public_benefit": "speeds small repairs and keeps the workshop stocked",
+        "duties": ("carry boards", "sand joints", "learn measurements"),
+        "tools": ("tool belt", "practice plane"),
+        "service_tags": ("construction", "training", "repair"),
+        "wage": 38,
+    },
+    "Doctor": {
+        "title": "Doctor",
+        "category": "Health",
+        "work_activity": "seeing patients and checking clinic supplies",
+        "output": "medical care",
+        "public_benefit": "keeps illness, injuries, and wilderness mishaps from becoming disasters",
+        "duties": ("treat patients", "check remedies", "prepare emergency notes"),
+        "tools": ("medical satchel", "remedy shelf"),
+        "service_tags": ("health", "medicine", "safety"),
+        "wage": 92,
+    },
+    "Nurse": {
+        "title": "Nurse",
+        "category": "Health",
+        "work_activity": "preparing remedies and monitoring recovery",
+        "output": "patient care",
+        "public_benefit": "makes the clinic dependable during busy or stormy days",
+        "duties": ("dress wounds", "brew remedies", "check recovery beds"),
+        "tools": ("bandage roll", "herb mortar"),
+        "service_tags": ("health", "medicine", "care"),
+        "wage": 58,
+    },
+    "Sheriff": {
+        "title": "Sheriff",
+        "category": "Public Safety",
+        "work_activity": "checking bounty notices, patrol reports, and road safety",
+        "output": "safer roads",
+        "public_benefit": "turns wilderness threats into posted work with clear rewards",
+        "duties": ("post bounties", "question travelers", "coordinate patrols"),
+        "tools": ("bounty ledger", "wanted posters"),
+        "service_tags": ("safety", "bounties", "law"),
+        "wage": 84,
+    },
+    "Deputy": {
+        "title": "Deputy",
+        "category": "Public Safety",
+        "work_activity": "walking patrols and updating wanted posters",
+        "output": "local patrol coverage",
+        "public_benefit": "keeps smaller trouble from growing into a full town threat",
+        "duties": ("walk patrol", "check notices", "escort witnesses"),
+        "tools": ("patrol whistle", "poster roll"),
+        "service_tags": ("safety", "bounties", "patrol"),
+        "wage": 56,
+    },
+    "Librarian": {
+        "title": "Librarian",
+        "category": "Education",
+        "work_activity": "cataloguing books and helping readers",
+        "output": "shared knowledge",
+        "public_benefit": "turns maps, recipes, and local discoveries into common knowledge",
+        "duties": ("catalog books", "help readers", "preserve maps"),
+        "tools": ("catalog cards", "repair paste"),
+        "service_tags": ("education", "records", "culture"),
+        "wage": 64,
+    },
+    "Archivist": {
+        "title": "Archivist",
+        "category": "Education",
+        "work_activity": "recording routes, weather, and settlement history",
+        "output": "settlement memory",
+        "public_benefit": "keeps useful lessons from vanishing after each season",
+        "duties": ("copy records", "index maps", "interview residents"),
+        "tools": ("archive boxes", "date stamps"),
+        "service_tags": ("education", "history", "records"),
+        "wage": 54,
+    },
+    "Innkeeper": {
+        "title": "Innkeeper",
+        "category": "Hospitality",
+        "work_activity": "preparing rooms and listening for useful news",
+        "output": "traveler lodging",
+        "public_benefit": "brings travelers, rumors, and route information into town",
+        "duties": ("assign rooms", "greet travelers", "track vacancies"),
+        "tools": ("room keys", "guest ledger"),
+        "service_tags": ("hospitality", "travel", "commerce"),
+        "wage": 66,
+    },
+    "Cook": {
+        "title": "Cook",
+        "category": "Hospitality",
+        "work_activity": "preparing meals from local ingredients",
+        "output": "prepared meals",
+        "public_benefit": "turns local produce into morale and traveler income",
+        "duties": ("prep meals", "manage pantry", "feed guests"),
+        "tools": ("pantry list", "heavy skillet"),
+        "service_tags": ("food", "hospitality", "morale"),
+        "wage": 56,
+    },
+    "Merchant": {
+        "title": "Merchant",
+        "category": "Commerce",
+        "work_activity": "setting out market goods and talking prices",
+        "output": "market trade",
+        "public_benefit": "connects surplus goods with buyers and traveling routes",
+        "duties": ("set displays", "haggle prices", "compare route news"),
+        "tools": ("scale", "sample cloth"),
+        "service_tags": ("commerce", "trade", "travel"),
+        "wage": 62,
+    },
+    "Mechanic": {
+        "title": "Mechanic",
+        "category": "Craft",
+        "work_activity": "repairing tools and testing mechanisms",
+        "output": "tool repairs",
+        "public_benefit": "keeps tools, pumps, carts, and doors working under strain",
+        "duties": ("repair tools", "test hinges", "salvage parts"),
+        "tools": ("wrench roll", "oil tin"),
+        "service_tags": ("craft", "repair", "infrastructure"),
+        "wage": 70,
+    },
+    "Artisan": {
+        "title": "Artisan",
+        "category": "Craft",
+        "work_activity": "working on practical household crafts",
+        "output": "crafted goods",
+        "public_benefit": "adds useful furnishings, repairs, and identity to ordinary rooms",
+        "duties": ("finish commissions", "mend fixtures", "shape small goods"),
+        "tools": ("fine knife", "pattern roll"),
+        "service_tags": ("craft", "culture", "housing"),
+        "wage": 58,
+    },
+    "Gardener": {
+        "title": "Gardener",
+        "category": "Public Works",
+        "work_activity": "tending paths, shade, and public planting",
+        "output": "public greenery",
+        "public_benefit": "keeps paths readable and gathering spaces pleasant",
+        "duties": ("trim paths", "water plantings", "clear weeds"),
+        "tools": ("pruners", "seed pouch"),
+        "service_tags": ("public works", "food", "morale"),
+        "wage": 44,
+    },
+    "Business Assistant": {
+        "title": "Business Assistant",
+        "category": "Commerce",
+        "work_activity": "helping the player-owned business stay open and stocked",
+        "output": "business productivity",
+        "public_benefit": "turns ownership into a staffed local service instead of an empty building",
+        "duties": ("serve customers", "restock shelves", "report issues"),
+        "tools": ("till key", "stock notes"),
+        "service_tags": ("commerce", "management", "supplies"),
+        "wage": 55,
+    },
+    "Student": {
+        "title": "Student",
+        "category": "Learning",
+        "work_activity": "learning through errands and observation",
+        "output": "future skill",
+        "public_benefit": "grows into the town's next generation of workers",
+        "duties": ("study maps", "run safe errands", "ask too many useful questions"),
+        "tools": ("notebook", "borrowed pencil"),
+        "service_tags": ("education", "training", "family"),
+        "wage": 0,
+    },
+    "Retiree": {
+        "title": "Retiree",
+        "category": "Community",
+        "work_activity": "keeping a patient eye on the settlement",
+        "output": "local wisdom",
+        "public_benefit": "passes on habits that keep preventable mistakes from repeating",
+        "duties": ("advise neighbors", "remember old routes", "watch the weather"),
+        "tools": ("walking stick", "weather notes"),
+        "service_tags": ("community", "history", "morale"),
+        "wage": 0,
+    },
+    "Settler": {
+        "title": "Settler",
+        "category": "General Labor",
+        "work_activity": "helping with the work that keeps the settlement running",
+        "output": "general support",
+        "public_benefit": "fills gaps before a specialized worker exists",
+        "duties": ("haul supplies", "patch small problems", "help neighbors"),
+        "tools": ("work gloves", "carry straps"),
+        "service_tags": ("labor", "community", "construction"),
+        "wage": 34,
+    },
+}
+
+
+def procedural_job_template(role: object) -> Dict[str, object]:
+    return PROCEDURAL_JOB_PROFILES.get(str(role), PROCEDURAL_JOB_PROFILES["Settler"])
+
+
+def sanitize_procedural_job_profile(value: object, role: object = "Settler") -> Dict[str, object]:
+    template = procedural_job_template(role)
+    raw = value if isinstance(value, dict) else {}
+
+    def clean_list(key: str, fallback: object, limit: int) -> List[str]:
+        values = raw.get(key, fallback)
+        if not isinstance(values, (list, tuple)):
+            values = fallback
+        return [
+            str(item)
+            for item in values
+            if str(item or "").strip()
+        ][:limit]
+
+    return {
+        "title": str(raw.get("title", template.get("title", role)) or role),
+        "category": str(raw.get("category", template.get("category", "General Labor")) or "General Labor"),
+        "workplace": str(raw.get("workplace", "") or ""),
+        "workplace_type": str(raw.get("workplace_type", "") or ""),
+        "work_activity": str(raw.get("work_activity", template.get("work_activity", "helping with town work")) or "helping with town work"),
+        "daily_focus": str(raw.get("daily_focus", "") or ""),
+        "output": str(raw.get("output", template.get("output", "support")) or "support"),
+        "public_benefit": str(raw.get("public_benefit", template.get("public_benefit", "")) or ""),
+        "duties": clean_list("duties", template.get("duties", ()), 5),
+        "tools": clean_list("tools", template.get("tools", ()), 4),
+        "service_tags": clean_list("service_tags", template.get("service_tags", ()), 5),
+        "skill": max(0, min(5, int(raw.get("skill", 1) or 1))),
+        "morale": max(0, min(100, int(raw.get("morale", 60) or 60))),
+        "weekly_wage": max(0, int(raw.get("weekly_wage", template.get("wage", 0)) or 0)),
+        "quality": str(raw.get("quality", "Capable") or "Capable"),
+    }
 
 
 def procedural_population_key(chunk_x: int, chunk_y: int) -> str:
@@ -487,6 +797,10 @@ def sanitize_procedural_settlement_populations(value: object) -> Dict[str, Dict[
                 "birthday_day": max(1, min(31, int(raw_resident.get("birthday_day", 1)))),
                 "role": str(raw_resident.get("role", "Settler")),
                 "profession_id": str(raw_resident.get("profession_id", "settler")),
+                "job_profile": sanitize_procedural_job_profile(
+                    raw_resident.get("job_profile", {}),
+                    raw_resident.get("role", "Settler"),
+                ),
                 "household_id": household_id,
                 "household_role": str(raw_resident.get("household_role", "Resident") or "Resident"),
                 "home_building_id": home_id,
@@ -826,6 +1140,73 @@ class ProceduralNpcBuilder:
                 traits.append(trait)
         return traits
 
+    def generated_job_profile(
+        self,
+        plan: Dict[str, object],
+        origin_key: str,
+        role: str,
+        profession_id: str,
+        workplace: Optional[Dict[str, object]],
+        age_group: str,
+        traits: Iterable[str],
+    ) -> Dict[str, object]:
+        template = procedural_job_template(role)
+        rng = self.deterministic_rng(plan, f"job-profile:{origin_key}:{profession_id}")
+        duties = list(template.get("duties", ()))
+        tools = list(template.get("tools", ()))
+        service_tags = list(template.get("service_tags", ()))
+        workplace_name = str(workplace.get("name", "")) if workplace else ""
+        workplace_type = str(workplace.get("type_id", "")) if workplace else ""
+        base_skill = {
+            "Child": 0,
+            "Teen": 1,
+            "Adult": 2,
+            "Elder": 3,
+        }.get(str(age_group), 2)
+        if role in {"Mayor", "Doctor", "Sheriff", "Carpenter", "Mechanic"}:
+            base_skill += 1
+        if role in {"Carpenter Apprentice", "Student"}:
+            base_skill = min(base_skill, 2)
+        if role in {"Retiree"}:
+            base_skill = max(base_skill, 3)
+        skill = max(0, min(5, base_skill + rng.randint(0, 2)))
+        morale = 48 + rng.randint(0, 32)
+        trait_set = {str(trait) for trait in traits}
+        if trait_set & {"Hopeful", "Cheerful", "Patient", "Reliable"}:
+            morale += 6
+        if trait_set & {"Reserved", "Wry"}:
+            morale -= 3
+        morale = max(20, min(98, morale))
+        wage = int(template.get("wage", 0) or 0)
+        if wage:
+            wage += max(0, skill - 1) * 8
+            if role in {"Mayor", "Doctor", "Sheriff"}:
+                wage += 10
+        quality = (
+            "Expert" if skill >= 5 else
+            "Skilled" if skill >= 4 else
+            "Capable" if skill >= 2 else
+            "Learning"
+        )
+        daily_focus = str(duties[rng.randrange(len(duties))]) if duties else str(template.get("output", "daily work"))
+        return sanitize_procedural_job_profile({
+            "title": str(template.get("title", role)),
+            "category": str(template.get("category", "General Labor")),
+            "workplace": workplace_name or "Town commons",
+            "workplace_type": workplace_type or "outdoor",
+            "work_activity": str(template.get("work_activity", "helping with town work")),
+            "daily_focus": daily_focus,
+            "output": str(template.get("output", "support")),
+            "public_benefit": str(template.get("public_benefit", "")),
+            "duties": duties,
+            "tools": tools,
+            "service_tags": service_tags,
+            "skill": skill,
+            "morale": morale,
+            "weekly_wage": wage,
+            "quality": quality,
+        }, role)
+
     def resident_schedule(
         self,
         plan: Dict[str, object],
@@ -839,7 +1220,8 @@ class ProceduralNpcBuilder:
         workplace = buildings.get(workplace_id)
         work_entry = procedural_building_anchor(workplace) if workplace else copy.deepcopy(home_entry)
         role = str(resident.get("role", "Settler"))
-        work_entry["activity"] = {
+        job_profile = sanitize_procedural_job_profile(resident.get("job_profile", {}), role)
+        work_entry["activity"] = str(job_profile.get("work_activity", "") or {
             "Mayor": "reviewing civic work and resident concerns",
             "Clerk": "updating permits, schedules, and settlement records",
             "Well Keeper": "checking the public well and water stores",
@@ -849,6 +1231,8 @@ class ProceduralNpcBuilder:
             "Carpenter Apprentice": "learning joinery and carrying project materials",
             "Doctor": "seeing patients and checking clinic supplies",
             "Nurse": "preparing remedies and monitoring recovery",
+            "Sheriff": "checking bounty notices, patrol reports, and road safety",
+            "Deputy": "walking patrols and updating wanted posters",
             "Librarian": "cataloguing books and helping readers",
             "Archivist": "recording routes, weather, and settlement history",
             "Innkeeper": "preparing rooms and listening for useful news",
@@ -859,7 +1243,10 @@ class ProceduralNpcBuilder:
             "Gardener": "tending paths, shade, and public planting",
             "Student": "studying settlement routines and local skills",
             "Retiree": "keeping a patient eye on the settlement",
-        }.get(role, "helping with the work that keeps the settlement running")
+        }.get(role, "helping with the work that keeps the settlement running"))
+        daily_focus = str(job_profile.get("daily_focus", "") or "")
+        if daily_focus and role not in {"Student", "Retiree"}:
+            work_entry["activity"] = f"{work_entry['activity']} ({daily_focus})"
         anchors = self.settlement_anchors(plan)
         age_group = str(resident.get("age_group", "Adult"))
         if age_group in {"Child", "Teen"}:
@@ -925,6 +1312,15 @@ class ProceduralNpcBuilder:
         resident_id = f"proc:{settlement_chunk_key(int(plan['chunk_x']), int(plan['chunk_y']))}:{procedural_slug(origin_key)}"
         birthday_month = rng.randint(1, 12)
         birthday_day = rng.randint(1, 28)
+        job_profile = self.generated_job_profile(
+            plan,
+            origin_key,
+            role,
+            profession_id,
+            workplace,
+            age_group,
+            traits,
+        )
         resident = {
             "id": resident_id,
             "origin_key": origin_key,
@@ -940,6 +1336,7 @@ class ProceduralNpcBuilder:
             "birthday_day": birthday_day,
             "role": role,
             "profession_id": profession_id,
+            "job_profile": job_profile,
             "household_id": household_id,
             "household_role": "Resident",
             "home_building_id": str(home["id"]),
@@ -1032,6 +1429,8 @@ class ProceduralNpcBuilder:
         return {
             "Mayor": f"People say {settlement_name} will feel real once the first difficult winter is behind it.",
             "Doctor": f"The clinic keeps a list of supplies that {settlement_name} cannot produce reliably yet.",
+            "Sheriff": f"The sheriff office keeps old wanted posters from every road that feeds into {settlement_name}.",
+            "Deputy": f"The deputy at {place} can usually tell which tracks are fresh and which are meant to scare travelers.",
             "Librarian": f"The earliest map of {settlement_name} already disagrees with the roads people actually use.",
             "Innkeeper": f"Travelers at {place} keep asking whether the road continues beyond the settlement.",
             "Merchant": f"Market prices shift whenever a wilderness route becomes safer or more dangerous.",
@@ -1456,12 +1855,28 @@ class ProceduralNpcBuilder:
     def summary(self, population: Dict[str, object]) -> Dict[str, object]:
         residents = list(population.get("residents", {}).values())
         roles: Dict[str, int] = {}
+        job_categories: Dict[str, int] = {}
+        service_tags: Dict[str, int] = {}
         age_groups: Dict[str, int] = {age_group: 0 for age_group in PROCEDURAL_AGE_GROUPS}
+        total_skill = 0
+        total_morale = 0
+        total_wages = 0
+        job_profile_count = 0
         for resident in residents:
             role = str(resident.get("role", "Settler"))
             roles[role] = roles.get(role, 0) + 1
             age_group = str(resident.get("age_group", "Adult"))
             age_groups[age_group] = age_groups.get(age_group, 0) + 1
+            job_profile = sanitize_procedural_job_profile(resident.get("job_profile", {}), role)
+            job_profile_count += 1
+            total_skill += int(job_profile.get("skill", 0) or 0)
+            total_morale += int(job_profile.get("morale", 0) or 0)
+            total_wages += int(job_profile.get("weekly_wage", 0) or 0)
+            category = str(job_profile.get("category", "General Labor"))
+            job_categories[category] = job_categories.get(category, 0) + 1
+            for tag in job_profile.get("service_tags", []) or []:
+                tag = str(tag)
+                service_tags[tag] = service_tags.get(tag, 0) + 1
         return {
             "population": len(residents),
             "households": len(population.get("households", {})),
@@ -1472,6 +1887,11 @@ class ProceduralNpcBuilder:
             "adults": age_groups.get("Adult", 0),
             "elders": age_groups.get("Elder", 0),
             "roles": roles,
+            "job_categories": job_categories,
+            "service_tags": service_tags,
+            "average_job_skill": round(total_skill / job_profile_count, 1) if job_profile_count else 0,
+            "average_job_morale": round(total_morale / job_profile_count, 1) if job_profile_count else 0,
+            "weekly_wages": total_wages,
         }
 
     def routine_for(
@@ -1595,21 +2015,39 @@ class ProceduralNpcBuilderMixin:
             f"Households: {summary['households']}",
             f"Employed: {summary['employed']}",
             f"Job vacancies: {summary['vacancies']}",
+            f"Average job skill: {summary['average_job_skill']}/5",
+            f"Average job morale: {summary['average_job_morale']}/100",
+            f"Weekly wages represented: ${summary['weekly_wages']}",
             (
                 f"Ages: {summary['children']} child, {summary['teens']} teen, "
                 f"{summary['adults']} adult, {summary['elders']} elder"
             ),
             "",
-            "Residents:",
+            "Service coverage:",
         ]
+        service_tags = summary.get("service_tags", {}) if isinstance(summary.get("service_tags", {}), dict) else {}
+        if service_tags:
+            for tag, count in sorted(service_tags.items(), key=lambda row: (-int(row[1]), str(row[0])))[:8]:
+                lines.append(f"- {tag}: {count}")
+        else:
+            lines.append("- No job services yet.")
+        lines.extend([
+            "",
+            "Residents:",
+        ])
         for resident in sorted(
             population.get("residents", {}).values(),
             key=lambda row: (str(row.get("household_id", "")), str(row.get("name", ""))),
         ):
             workplace = str(resident.get("workplace_building_id", "") or "none")
+            job_profile = sanitize_procedural_job_profile(
+                resident.get("job_profile", {}),
+                resident.get("role", "Settler"),
+            )
             lines.append(
-                f"- {resident.get('name')} — {resident.get('role')} "
-                f"({resident.get('age_group')}; home {resident.get('home_building_id')}; work {workplace})"
+                f"- {resident.get('name')} - {job_profile.get('quality')} {job_profile.get('title')} "
+                f"({resident.get('age_group')}; skill {job_profile.get('skill')}/5; "
+                f"morale {job_profile.get('morale')}/100; home {resident.get('home_building_id')}; work {workplace})"
             )
         if not population.get("residents"):
             lines.append("- No completed housing is available.")
@@ -1641,6 +2079,7 @@ class ProceduralNpcBuilderMixin:
 
 __all__ = [
     "BUILDING_PROFESSION_SLOTS",
+    "PROCEDURAL_JOB_PROFILES",
     "PROCEDURAL_AGE_GROUPS",
     "PROCEDURAL_PERSONALITY_TRAITS",
     "PROCEDURAL_POPULATION_VERSION",
@@ -1651,7 +2090,9 @@ __all__ = [
     "procedural_building_capacity",
     "procedural_completed_buildings",
     "procedural_custom_building_template",
+    "procedural_job_template",
     "procedural_population_key",
+    "sanitize_procedural_job_profile",
     "sanitize_procedural_request",
     "sanitize_procedural_settlement_populations",
 ]

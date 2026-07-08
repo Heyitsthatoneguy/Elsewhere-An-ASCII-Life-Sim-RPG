@@ -12,7 +12,8 @@ from collections import deque
 import random
 from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
 
-from ascii_farmstead_state import quality_item_name
+from ascii_farmstead_data import CROP_DATA
+from ascii_farmstead_state import Crop, quality_item_name
 from ascii_farmstead_support import C, colorize
 
 
@@ -126,10 +127,62 @@ class ActorNavigationMixin:
         "WildernessDungeon",
     }
     TRAVEL_FOLLOWER_TASKS = {
+        "plant_seeds": "Plant seeds",
         "water_crops": "Water crops",
         "harvest_crops": "Harvest ripe crops",
         "animal_care": "Care for animals",
         "gather_forage": "Gather forage",
+        "clear_debris": "Clear farm debris",
+    }
+    TRAVEL_FOLLOWER_JOB_PROFILES = {
+        "plant_seeds": {
+            "title": "Field Sower",
+            "category": "Crop Work",
+            "duties": ("choose open tilled soil", "plant usable seed packets", "mark fresh beds"),
+            "output": "new plantings",
+            "benefit": "turns prepared soil and stored seeds into growing crops",
+            "training": "Farming",
+        },
+        "water_crops": {
+            "title": "Irrigation Helper",
+            "category": "Crop Work",
+            "duties": ("water dry crop beds", "check thirsty plants", "keep rows from wilting"),
+            "output": "watered crops",
+            "benefit": "protects crop growth and quality on busy days",
+            "training": "Farming",
+        },
+        "harvest_crops": {
+            "title": "Harvest Hand",
+            "category": "Crop Work",
+            "duties": ("pick ripe crops", "sort harvest quality", "carry produce to storage"),
+            "output": "harvested produce",
+            "benefit": "moves ripe crops into inventory before the day gets away",
+            "training": "Farming",
+        },
+        "animal_care": {
+            "title": "Barn Tender",
+            "category": "Animal Care",
+            "duties": ("feed animals when feed is available", "pet anxious animals", "watch health"),
+            "output": "animal happiness",
+            "benefit": "keeps livestock fed, calmer, and better bonded",
+            "training": "Care",
+        },
+        "gather_forage": {
+            "title": "Forage Runner",
+            "category": "Foraging",
+            "duties": ("check nearby paths", "collect safe wild goods", "bring back small finds"),
+            "output": "foraged supplies",
+            "benefit": "adds a trickle of useful wilderness goods without a full outing",
+            "training": "Foraging",
+        },
+        "clear_debris": {
+            "title": "Groundskeeper",
+            "category": "Farm Maintenance",
+            "duties": ("pull weeds", "clear small stones", "stack fallen branches"),
+            "output": "cleared farm space",
+            "benefit": "opens farm tiles while returning basic materials",
+            "training": "Practical",
+        },
     }
     TRAVEL_FOLLOWER_EXPEDITION_ROLES = {
         "Balanced": "No strong emphasis; stays adaptable.",
@@ -845,6 +898,71 @@ class ActorNavigationMixin:
     def travel_follower_task_label(self, task_id: str) -> str:
         return str(self.TRAVEL_FOLLOWER_TASKS.get(str(task_id), "No task"))
 
+    def travel_follower_task_profile(self, task_id: str) -> Dict[str, object]:
+        task_id = str(task_id)
+        profile = self.TRAVEL_FOLLOWER_JOB_PROFILES.get(task_id, {})
+        if not isinstance(profile, dict):
+            profile = {}
+        return {
+            "id": task_id,
+            "label": self.travel_follower_task_label(task_id),
+            "title": str(profile.get("title", self.travel_follower_task_label(task_id))),
+            "category": str(profile.get("category", "Helper Work")),
+            "duties": [
+                str(value)
+                for value in (
+                    profile.get("duties", [])
+                    if isinstance(profile.get("duties", []), (list, tuple))
+                    else []
+                )
+                if str(value or "").strip()
+            ],
+            "output": str(profile.get("output", "helpful work")),
+            "benefit": str(profile.get("benefit", "helps the household keep up")),
+            "training": str(profile.get("training", "Practical")),
+        }
+
+    def travel_follower_job_quality(self, follower_id: str, task_id: str) -> str:
+        experience = self.travel_follower_task_experience_label(follower_id, task_id)
+        if experience == "Expert":
+            return "Expert"
+        if experience == "Skilled":
+            return "Skilled"
+        if experience == "Steady":
+            return "Reliable"
+        return "Learning"
+
+    def travel_follower_job_morale(self, follower_id: str, task_id: str) -> int:
+        record = self.travel_follower_record(follower_id)
+        xp = int((record.get("task_xp", {}) or {}).get(str(task_id), 0))
+        morale = 45 + min(25, xp)
+        morale += min(20, self.travel_follower_bond_points(follower_id) // 4)
+        if str(task_id) == self.travel_follower_preferred_task(follower_id):
+            morale += 10
+        if str(record.get("mode", "")) == "work" and str(record.get("task", "")) == str(task_id):
+            morale += 5
+        return max(0, min(100, morale))
+
+    def travel_follower_job_profile(
+        self,
+        follower_id: str,
+        task_id: Optional[str] = None,
+    ) -> Dict[str, object]:
+        record = self.travel_follower_record(follower_id)
+        task = str(task_id or record.get("task", "") or self.travel_follower_preferred_task(follower_id))
+        profile = self.travel_follower_task_profile(task)
+        totals = record.get("work_totals", {}) if isinstance(record.get("work_totals", {}), dict) else {}
+        xp = int((record.get("task_xp", {}) or {}).get(task, 0))
+        return {
+            **profile,
+            "quality": self.travel_follower_job_quality(follower_id, task),
+            "morale": self.travel_follower_job_morale(follower_id, task),
+            "xp": xp,
+            "completed": int(totals.get(task, 0) or 0),
+            "preferred": task == self.travel_follower_preferred_task(follower_id),
+            "daily_limit": self.travel_follower_work_limit_for_task(follower_id, task),
+        }
+
     def travel_follower_bond_points(self, follower_id: str) -> int:
         record = self.travel_follower_record(follower_id)
         try:
@@ -1001,9 +1119,9 @@ class ActorNavigationMixin:
             return {
                 "Gentle": "animal_care",
                 "Outdoorsy": "gather_forage",
-                "Practical": "harvest_crops",
+                "Practical": "clear_debris",
                 "Bold": "harvest_crops",
-                "Tinkering": "harvest_crops",
+                "Tinkering": "clear_debris",
                 "Curious": "water_crops",
                 "Studious": "water_crops",
                 "Musical": "water_crops",
@@ -1017,11 +1135,15 @@ class ActorNavigationMixin:
                 "Balanced": "water_crops",
             }.get(self.spouse_support_mode(), "water_crops")
         role = str(self.travel_follower_data(follower_id).get("role", "")).lower()
+        if any(word in role for word in ("seed", "farmer", "grower", "gardener")):
+            return "plant_seeds"
         if any(word in role for word in ("handler", "medic", "healer", "caretaker")):
             return "animal_care"
         if any(word in role for word in ("botanist", "forager", "pathfinder", "scout")):
             return "gather_forage"
-        if any(word in role for word in ("breaker", "vanguard", "builder")):
+        if any(word in role for word in ("breaker", "vanguard", "builder", "carpenter")):
+            return "clear_debris"
+        if any(word in role for word in ("harvest", "cook")):
             return "harvest_crops"
         return "water_crops"
 
@@ -1367,25 +1489,33 @@ class ActorNavigationMixin:
         record = self.travel_follower_record(follower_id)
         task = str(record.get("task", "") or "")
         preferred = self.travel_follower_preferred_task(follower_id)
+        current_job = self.travel_follower_job_profile(follower_id, task or preferred)
         totals = record.get("work_totals", {}) or {}
         log = list(record.get("work_log", []) or [])
         lines = [
-            "HELPER REPORT",
+            "FOLLOWER JOB REPORT",
             "",
             f"{data.get('name', follower_id)}",
-            f"Current assignment: {self.travel_follower_task_label(task)}",
+            f"Current job: {current_job['quality']} {current_job['title']}",
+            f"Assignment: {self.travel_follower_task_label(task)}",
             f"Today: {int(record.get('work_units', 0))}/{self.travel_follower_work_limit(follower_id)} actions",
             f"Natural strength: {self.travel_follower_task_label(preferred)}",
+            f"Job morale: {current_job['morale']}/100",
+            f"Output: {current_job['output']}",
+            f"Benefit: {current_job['benefit']}",
+            f"Training: {current_job['training']}",
+            "Duties: " + (", ".join(current_job["duties"]) if current_job["duties"] else "general help"),
             "",
-            "Experience:",
+            "Job experience:",
         ]
         for task_id, label in self.TRAVEL_FOLLOWER_TASKS.items():
+            job = self.travel_follower_job_profile(follower_id, task_id)
             xp = int((record.get("task_xp", {}) or {}).get(task_id, 0))
             total = int(totals.get(task_id, 0))
             marker = "*" if task_id == preferred else "-"
             lines.append(
-                f"{marker} {label}: {self.travel_follower_task_experience_label(follower_id, task_id)} "
-                f"({xp} xp; {total} completed)"
+                f"{marker} {job['title']}: {self.travel_follower_task_experience_label(follower_id, task_id)} "
+                f"({xp} xp; {total} completed; limit {job['daily_limit']})"
             )
         lines.extend(["", "Recent work:"])
         if log:
@@ -1405,7 +1535,7 @@ class ActorNavigationMixin:
         if stage == "Young Child":
             return ["animal_care"]
         if stage == "Child":
-            return ["water_crops", "animal_care"]
+            return ["plant_seeds", "water_crops", "animal_care"]
         if stage in {"Teen", "Young Adult"}:
             return list(self.TRAVEL_FOLLOWER_TASKS)
         return []
@@ -1414,6 +1544,11 @@ class ActorNavigationMixin:
         return f"{self.state.year}-{self.state.month}-{self.state.day}"
 
     def travel_follower_work_limit(self, follower_id: str) -> int:
+        record = self.travel_follower_record(follower_id)
+        task = str(record.get("task", "") or "")
+        return self.travel_follower_work_limit_for_task(follower_id, task)
+
+    def travel_follower_work_limit_for_task(self, follower_id: str, task: str) -> int:
         kind, _source_id = self.travel_follower_identity_kind(follower_id)
         base = 6
         if kind == "child":
@@ -1426,7 +1561,7 @@ class ActorNavigationMixin:
                 "Young Adult": 6,
             }.get(stage, 0)
         record = self.travel_follower_record(follower_id)
-        task = str(record.get("task", "") or "")
+        task = str(task or "")
         xp = int((record.get("task_xp", {}) or {}).get(task, 0))
         proficiency_bonus = min(2, xp // 12)
         bond = self.travel_follower_bond_points(follower_id)
@@ -1454,7 +1589,7 @@ class ActorNavigationMixin:
             self.set_message("That follower must be accompanying you before receiving a task.")
             return False
         if task_id not in self.travel_follower_task_options(follower_id):
-            self.set_message("That farm task is not appropriate for this follower.")
+            self.set_message("That follower job is not appropriate for this follower.")
             return False
         record = self.travel_follower_record(follower_id)
         record.update({
@@ -1467,8 +1602,9 @@ class ActorNavigationMixin:
         })
         self.reset_travel_follower_work_day()
         data = self.travel_follower_data(follower_id)
+        job = self.travel_follower_job_profile(follower_id, task_id)
         self.autosave_with_message(
-            f"{data.get('name', follower_id)} will {self.travel_follower_task_label(task_id).lower()} during the day."
+            f"{data.get('name', follower_id)} will work as a {str(job['title']).lower()} during the day."
         )
         return True
 
@@ -1533,6 +1669,56 @@ class ActorNavigationMixin:
         self.travel_follower_record(follower_id)["activity"] = "finished harvesting for today"
         return False
 
+    def travel_follower_seed_choice(self) -> Tuple[str, str]:
+        candidates: List[str] = []
+        selected = str(getattr(self.state, "selected_seed", "") or "")
+        if selected:
+            candidates.append(selected)
+        for crop_name in CROP_DATA:
+            if crop_name not in candidates:
+                candidates.append(crop_name)
+        for crop_name in candidates:
+            if crop_name not in CROP_DATA:
+                continue
+            seed_item = self.seed_item_for_crop(crop_name) if hasattr(self, "seed_item_for_crop") else f"{crop_name} Seeds"
+            if int(self.state.inventory.get(seed_item, 0) or 0) <= 0:
+                continue
+            can_grow = (
+                self.crop_can_grow_now(crop_name)
+                if hasattr(self, "crop_can_grow_now")
+                else CROP_DATA[crop_name].get("season") in {"Any", str(getattr(self.state, "season", "Spring"))}
+            )
+            if can_grow:
+                return crop_name, seed_item
+        return "", ""
+
+    def travel_follower_plant_one_seed(self, follower_id: str) -> bool:
+        crop_name, seed_item = self.travel_follower_seed_choice()
+        record = self.travel_follower_record(follower_id)
+        if not crop_name or not seed_item:
+            record["activity"] = "waiting for in-season seeds"
+            return False
+        land_map = self.base_map
+        for y, row in enumerate(land_map):
+            for x, tile in enumerate(row):
+                if tile not in {",", "w"}:
+                    continue
+                if self.crop_for_scope("Farm", x, y):
+                    continue
+                if self.scoped_object_at("Farm", x, y):
+                    continue
+                if int(self.state.inventory.get(seed_item, 0) or 0) <= 0:
+                    record["activity"] = f"ran out of {seed_item}"
+                    return False
+                self.state.inventory[seed_item] = int(self.state.inventory.get(seed_item, 0) or 0) - 1
+                crop = Crop(name=crop_name, watered=(tile == "w"))
+                self.set_crop_for_scope("Farm", x, y, crop)
+                self.set_travel_follower_work_position(follower_id, x, y)
+                record["activity"] = f"planted {crop_name} at {x},{y}"
+                return True
+        record["activity"] = "waiting for empty tilled soil"
+        return False
+
     def travel_follower_care_for_one_animal(self, follower_id: str) -> bool:
         self.normalize_farm_animals()
         feed_available = self.state.inventory.get("Mixed Seeds", 0) > 0
@@ -1585,9 +1771,35 @@ class ActorNavigationMixin:
         record["activity"] = f"gathered 1 {item} from nearby paths"
         return True
 
+    def travel_follower_clear_one_debris(self, follower_id: str) -> bool:
+        land_map = self.base_map
+        drops_by_tile = {
+            "^": {"Fiber": 1},
+            "o": {"Stone": 2},
+            "*": {"Wood": 2},
+        }
+        for y, row in enumerate(land_map):
+            for x, tile in enumerate(row):
+                drops = drops_by_tile.get(tile)
+                if not drops:
+                    continue
+                if self.crop_for_scope("Farm", x, y) or self.scoped_object_at("Farm", x, y):
+                    continue
+                for item, qty in drops.items():
+                    self.state.inventory[item] = int(self.state.inventory.get(item, 0) or 0) + int(qty)
+                land_map[y][x] = "."
+                self.set_travel_follower_work_position(follower_id, x, y)
+                gained = ", ".join(f"{qty} {item}" for item, qty in drops.items())
+                self.travel_follower_record(follower_id)["activity"] = f"cleared debris at {x},{y} and saved {gained}"
+                return True
+        self.travel_follower_record(follower_id)["activity"] = "found no light debris to clear"
+        return False
+
     def perform_travel_follower_work(self, follower_id: str) -> bool:
         record = self.travel_follower_record(follower_id)
         task = str(record.get("task", "") or "")
+        if task == "plant_seeds":
+            return self.travel_follower_plant_one_seed(follower_id)
         if task == "water_crops":
             return self.travel_follower_water_one_crop(follower_id)
         if task == "harvest_crops":
@@ -1596,6 +1808,8 @@ class ActorNavigationMixin:
             return self.travel_follower_care_for_one_animal(follower_id)
         if task == "gather_forage":
             return self.travel_follower_gather_one_forage(follower_id)
+        if task == "clear_debris":
+            return self.travel_follower_clear_one_debris(follower_id)
         return False
 
     def process_travel_follower_work_hour(self) -> None:
@@ -1634,13 +1848,22 @@ class ActorNavigationMixin:
             record["work_log"] = [str(entry) for entry in work_log if str(entry or "").strip()][-12:]
             if int(work_totals[task]) % 5 == 0:
                 self.adjust_travel_follower_bond(follower_id, 1)
+            if int(work_totals[task]) in {10, 25, 50, 100}:
+                job = self.travel_follower_job_profile(follower_id, task)
+                self.record_travel_follower_memory(
+                    follower_id,
+                    f"Job milestone - {job['title']}: completed {int(work_totals[task])} {job['output']} task(s).",
+                    flag=f"job:{task}:{int(work_totals[task])}",
+                )
             kind, _source_id = self.travel_follower_identity_kind(follower_id)
             if kind == "child" and int(work_totals[task]) % 4 == 0:
                 child = self.travel_follower_child(follower_id)
                 if child:
                     topic = {
+                        "plant_seeds": "Farming",
                         "animal_care": "Care",
                         "gather_forage": "Foraging",
+                        "clear_debris": "Practical",
                     }.get(task, "Farming")
                     learning = self.child_learning_map(child)
                     learning[topic] = int(learning.get(topic, 0)) + 1

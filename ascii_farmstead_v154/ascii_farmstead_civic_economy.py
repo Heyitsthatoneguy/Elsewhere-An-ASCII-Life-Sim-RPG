@@ -624,17 +624,31 @@ class CivicEconomyMixin:
             record: Dict[str, object],
             offsets: Tuple[Tuple[int, int], ...],
         ) -> None:
-            for dx, dy in offsets:
-                x, y = anchor_x + dx, anchor_y + dy
+            def try_reserve(x: int, y: int) -> bool:
                 if not (1 <= x < width - 1 and 1 <= y < height - 1):
-                    continue
+                    return False
                 if (x, y) in used or self.procedural_town_building_at(x, y, plan):
-                    continue
+                    return False
                 if grid[y][x] not in {".", ",", ";", ":", "="}:
-                    continue
+                    return False
                 lookup[(x, y)] = record
                 used.add((x, y))
-                return
+                return True
+
+            for dx, dy in offsets:
+                if try_reserve(anchor_x + dx, anchor_y + dy):
+                    return
+            for radius in range(2, 8):
+                fallback_offsets = [
+                    (dx, dy)
+                    for dy in range(-radius, radius + 1)
+                    for dx in range(-radius, radius + 1)
+                    if abs(dx) + abs(dy) == radius
+                ]
+                fallback_offsets.sort(key=lambda pos: (abs(pos[1]), abs(pos[0]), pos[1], pos[0]))
+                for dx, dy in fallback_offsets:
+                    if try_reserve(anchor_x + dx, anchor_y + dy):
+                        return
 
         building_lookup = plan.get("buildings", {})
         building_offsets = ((-1, 0), (1, 0), (-2, 0), (2, 0), (0, 1), (0, -1))
@@ -1129,6 +1143,20 @@ class CivicEconomyMixin:
                     resident["role"] = "Business Assistant"
                     resident["profession_id"] = "business_assistant"
                 try:
+                    workplace = (
+                        plan.get("buildings", {})
+                        if isinstance(plan.get("buildings", {}), dict)
+                        else {}
+                    ).get(str(resident.get("workplace_building_id", "")))
+                    resident["job_profile"] = self.procedural_npc_builder().generated_job_profile(
+                        plan,
+                        f"{resident.get('origin_key', resident_id)}:business-staff",
+                        str(resident.get("role", "Settler")),
+                        str(resident.get("profession_id", "settler")),
+                        workplace,
+                        str(resident.get("age_group", "Adult")),
+                        resident.get("personality_traits", []),
+                    )
                     resident["schedule"] = self.procedural_npc_builder().resident_schedule(
                         plan,
                         resident,
@@ -1510,6 +1538,20 @@ class CivicEconomyMixin:
         plan = self.civic_plan_for_key(str(business.get("town_key", "")))
         if plan:
             try:
+                workplace = (
+                    plan.get("buildings", {})
+                    if isinstance(plan.get("buildings", {}), dict)
+                    else {}
+                ).get(str(resident.get("workplace_building_id", "")))
+                resident["job_profile"] = self.procedural_npc_builder().generated_job_profile(
+                    plan,
+                    f"{resident.get('origin_key', resident_id)}:business-hire",
+                    str(resident.get("role", "Settler")),
+                    str(resident.get("profession_id", "settler")),
+                    workplace,
+                    str(resident.get("age_group", "Adult")),
+                    resident.get("personality_traits", []),
+                )
                 resident["schedule"] = self.procedural_npc_builder().resident_schedule(
                     plan,
                     resident,

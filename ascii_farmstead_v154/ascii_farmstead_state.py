@@ -35,6 +35,8 @@ from ascii_farmstead_data import (
     RESOURCE_ITEMS,
     RESTORED_TOWN_BUILDINGS,
     SEASONS,
+    DEFAULT_TIME_SPEED,
+    TIME_SPEED_OPTIONS,
     TOOLS,
     TOWN_BUILDING_DATA,
     TOWN_BUILDING_ID_BY_LOCATION,
@@ -510,6 +512,7 @@ class GameState:
     facing: str = "DOWN"
     tool_target_mode: str = "FRONT"
     live_time_enabled: bool = True
+    time_speed: str = "Brisk"
     aging_and_death_enabled: bool = True
     player_frozen_age: int = 0
     selected_tool_index: int = 0
@@ -628,6 +631,9 @@ class GameState:
     completed_errand_ids: List[str] = None
     completed_resident_request_ids: List[str] = None
     completed_companion_quest_ids: List[str] = None
+    bounty_board_offers: Dict[str, Dict[str, object]] = None
+    active_bounties: Dict[str, Dict[str, object]] = None
+    completed_bounty_log: List[Dict[str, object]] = None
     learned_recipe_ids: List[str] = None
     library_research_ids: List[str] = None
     museum_donated_record_ids: List[str] = None
@@ -745,6 +751,9 @@ class GameState:
             self.minute = max(0, min(59, int(self.minute)))
         except (TypeError, ValueError):
             self.minute = 0
+        self.time_speed = str(self.time_speed)
+        if self.time_speed not in TIME_SPEED_OPTIONS:
+            self.time_speed = DEFAULT_TIME_SPEED
         try:
             self.stamina = max(0, int(self.stamina))
         except (TypeError, ValueError):
@@ -982,7 +991,14 @@ class GameState:
                 continue
             mode = str(raw_record.get("mode", "home") or "home").lower()
             task = str(raw_record.get("task", "") or "")
-            valid_tasks = {"water_crops", "harvest_crops", "animal_care", "gather_forage"}
+            valid_tasks = {
+                "plant_seeds",
+                "water_crops",
+                "harvest_crops",
+                "animal_care",
+                "gather_forage",
+                "clear_debris",
+            }
             if task not in valid_tasks:
                 task = ""
             if mode not in {"follow", "wait", "work", "home"}:
@@ -1387,6 +1403,116 @@ class GameState:
         self.completed_errand_ids = clean_string_list(self.completed_errand_ids)
         self.completed_resident_request_ids = clean_string_list(self.completed_resident_request_ids)
         self.completed_companion_quest_ids = clean_string_list(self.completed_companion_quest_ids)
+
+        def clean_bounty_items(value: object) -> Dict[str, int]:
+            if not isinstance(value, dict):
+                return {}
+            cleaned: Dict[str, int] = {}
+            for item_name, qty in value.items():
+                key = str(item_name or "").strip()
+                if not key:
+                    continue
+                try:
+                    amount = max(0, min(999, int(qty)))
+                except Exception:
+                    continue
+                if amount:
+                    cleaned[key] = amount
+            return cleaned
+
+        def clean_bounty_record(value: object, fallback_id: str = "") -> Optional[Dict[str, object]]:
+            if not isinstance(value, dict):
+                return None
+            bounty_id = str(value.get("id", fallback_id) or fallback_id).strip()
+            if not bounty_id:
+                return None
+            try:
+                chunk_x = int(value.get("chunk_x", 0))
+                chunk_y = int(value.get("chunk_y", 0))
+            except Exception:
+                chunk_x, chunk_y = 0, 0
+            try:
+                reward_money = max(0, min(999999, int(value.get("reward_money", 0))))
+            except Exception:
+                reward_money = 0
+            try:
+                target_x = int(value.get("target_x", -1))
+                target_y = int(value.get("target_y", -1))
+            except Exception:
+                target_x, target_y = -1, -1
+            status = str(value.get("status", "available") or "available")
+            if status not in {"available", "accepted", "defeated", "claimed"}:
+                status = "available"
+            return {
+                "id": bounty_id,
+                "title": str(value.get("title", "Wanted Target") or "Wanted Target")[:80],
+                "kind": str(value.get("kind", "monster") or "monster")[:32],
+                "target_name": str(value.get("target_name", "Wanted Target") or "Wanted Target")[:80],
+                "species": str(value.get("species", "Bandit") or "Bandit")[:40],
+                "description": str(value.get("description", "") or "")[:240],
+                "difficulty": str(value.get("difficulty", "Standard") or "Standard")[:32],
+                "chunk_x": chunk_x,
+                "chunk_y": chunk_y,
+                "target_x": target_x,
+                "target_y": target_y,
+                "reward_money": reward_money,
+                "reward_items": clean_bounty_items(value.get("reward_items", {})),
+                "posted_town_key": str(value.get("posted_town_key", "") or "")[:40],
+                "posted_town_name": str(value.get("posted_town_name", "") or "")[:80],
+                "week_key": str(value.get("week_key", "") or "")[:32],
+                "accepted_day": str(value.get("accepted_day", "") or "")[:32],
+                "defeated_day": str(value.get("defeated_day", "") or "")[:32],
+                "claimed_day": str(value.get("claimed_day", "") or "")[:32],
+                "status": status,
+                "target_spawned": bool(value.get("target_spawned", False)),
+                "target_defeated": bool(value.get("target_defeated", status in {"defeated", "claimed"})),
+            }
+
+        if not isinstance(self.bounty_board_offers, dict):
+            self.bounty_board_offers = {}
+        cleaned_boards: Dict[str, Dict[str, object]] = {}
+        for board_key, board_data in self.bounty_board_offers.items():
+            if not isinstance(board_data, dict):
+                continue
+            clean_key = str(board_key or "").strip()
+            if not clean_key:
+                continue
+            offers = []
+            for index, offer in enumerate(board_data.get("offers", []) or []):
+                clean_offer = clean_bounty_record(offer, f"{clean_key}:offer:{index}")
+                if clean_offer:
+                    clean_offer["status"] = "available"
+                    clean_offer["target_defeated"] = False
+                    offers.append(clean_offer)
+            cleaned_boards[clean_key] = {
+                "week_key": str(board_data.get("week_key", "") or "")[:32],
+                "town_key": str(board_data.get("town_key", clean_key) or clean_key)[:40],
+                "town_name": str(board_data.get("town_name", "Wilderness Town") or "Wilderness Town")[:80],
+                "offers": offers[:8],
+            }
+        self.bounty_board_offers = cleaned_boards
+
+        if not isinstance(self.active_bounties, dict):
+            self.active_bounties = {}
+        cleaned_active: Dict[str, Dict[str, object]] = {}
+        for bounty_key, bounty_data in self.active_bounties.items():
+            clean_bounty = clean_bounty_record(bounty_data, str(bounty_key or ""))
+            if not clean_bounty or clean_bounty.get("status") == "claimed":
+                continue
+            cleaned_active[str(clean_bounty["id"])] = clean_bounty
+        self.active_bounties = cleaned_active
+
+        if not isinstance(self.completed_bounty_log, list):
+            self.completed_bounty_log = []
+        cleaned_bounty_log: List[Dict[str, object]] = []
+        for entry in self.completed_bounty_log:
+            clean_entry = clean_bounty_record(entry)
+            if clean_entry:
+                clean_entry["status"] = "claimed"
+                clean_entry["target_defeated"] = True
+                cleaned_bounty_log.append(clean_entry)
+        self.completed_bounty_log = cleaned_bounty_log[-30:]
+
         self.learned_recipe_ids = clean_string_list(self.learned_recipe_ids)
         self.library_research_ids = clean_string_list(self.library_research_ids)
         self.museum_donated_record_ids = sorted({value for value in clean_string_list(self.museum_donated_record_ids) if value.strip()})

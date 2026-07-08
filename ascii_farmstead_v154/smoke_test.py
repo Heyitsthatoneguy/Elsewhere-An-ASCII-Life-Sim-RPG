@@ -11,6 +11,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from collections import deque
+import contextlib
+import io
 import json
 import os
 import re
@@ -536,6 +538,16 @@ def main() -> int:
     assert loaded_state.combat_exp == 0
     assert loaded_state.combat_exp_to_next == 20
     assert loaded_state.combat_current_hp == loaded_state.combat_max_hp
+    assert loaded_state.time_speed == data.DEFAULT_TIME_SPEED == "Brisk"
+    time_speed_game = FarmGame()
+    time_speed_game.state.live_time_enabled = True
+    time_speed_game.state.time_speed = "Brisk"
+    time_speed_game.state.hour = 6
+    time_speed_game.state.minute = 0
+    time_speed_game.world_tick(data.TIME_SPEED_REAL_SECONDS["Brisk"])
+    assert (time_speed_game.state.hour, time_speed_game.state.minute) == (6, 1)
+    time_speed_game.state.time_speed = "invalid"
+    assert time_speed_game.time_speed_key() == data.DEFAULT_TIME_SPEED
     malformed_state = state.GameState(
         **state.prepare_loaded_state_data({
             "day": None,
@@ -882,16 +894,71 @@ def main() -> int:
     assert loaded_state.procedural_settlement_populations == {}
     assert loaded_state.current_procedural_settlement_key == ""
     assert loaded_state.current_procedural_building_id == ""
+    assert loaded_state.bounty_board_offers == {}
+    assert loaded_state.active_bounties == {}
+    assert loaded_state.completed_bounty_log == []
+    loaded_bounty_state = state.GameState(**state.prepare_loaded_state_data({
+        "bounty_board_offers": {
+            "4,-2": {
+                "week_key": "1-1-W0",
+                "town_key": "4,-2",
+                "town_name": "Testwatch",
+                "offers": [{
+                    "id": "posted",
+                    "title": "Wanted: Test Target",
+                    "target_name": "Test Target",
+                    "species": "Bandit",
+                    "chunk_x": "7",
+                    "chunk_y": "-3",
+                    "reward_money": "120",
+                    "reward_items": {"Old Coin": "2", "Bad": "not-number"},
+                    "status": "defeated",
+                    "target_defeated": True,
+                }],
+            },
+        },
+        "active_bounties": {
+            "active": {
+                "id": "active",
+                "title": "Wanted: Active Target",
+                "target_name": "Active Target",
+                "species": "Wolf",
+                "chunk_x": 8,
+                "chunk_y": -4,
+                "reward_money": 150,
+                "reward_items": {"Small Pelt": 1},
+                "status": "accepted",
+            },
+            "claimed": {
+                "id": "claimed",
+                "status": "claimed",
+            },
+        },
+        "completed_bounty_log": [{
+            "id": "done",
+            "title": "Wanted: Old Target",
+            "target_name": "Old Target",
+            "chunk_x": 1,
+            "chunk_y": 2,
+            "status": "defeated",
+        }],
+    }))
+    assert loaded_bounty_state.bounty_board_offers["4,-2"]["offers"][0]["status"] == "available"
+    assert loaded_bounty_state.bounty_board_offers["4,-2"]["offers"][0]["target_defeated"] is False
+    assert loaded_bounty_state.bounty_board_offers["4,-2"]["offers"][0]["reward_items"] == {"Old Coin": 2}
+    assert list(loaded_bounty_state.active_bounties) == ["active"]
+    assert loaded_bounty_state.completed_bounty_log[0]["status"] == "claimed"
+    assert loaded_bounty_state.completed_bounty_log[0]["target_defeated"] is True
     loaded_work_state = state.GameState(**state.prepare_loaded_state_data({
         "travel_follower_ids": ["spouse:mira_seed"],
         "travel_follower_states": {
             "spouse:mira_seed": {
                 "mode": "work",
-                "task": "water_crops",
+                "task": "plant_seeds",
                 "work_day": "1-3-1",
                 "work_units": 2,
-                "task_xp": {"water_crops": 5},
-                "work_totals": {"water_crops": 9, "gather_forage": 2, "invalid": 4},
+                "task_xp": {"water_crops": 5, "plant_seeds": 3},
+                "work_totals": {"water_crops": 9, "gather_forage": 2, "clear_debris": 1, "invalid": 4},
                 "work_log": ["1-3-1, 07:00 - watered Turnip"],
                 "bond_points": "18",
                 "checkin_day": "1-3-1",
@@ -908,11 +975,15 @@ def main() -> int:
         },
     }))
     assert loaded_work_state.travel_follower_states["spouse:mira_seed"]["mode"] == "work"
-    assert loaded_work_state.travel_follower_states["spouse:mira_seed"]["task"] == "water_crops"
-    assert loaded_work_state.travel_follower_states["spouse:mira_seed"]["task_xp"] == {"water_crops": 5}
+    assert loaded_work_state.travel_follower_states["spouse:mira_seed"]["task"] == "plant_seeds"
+    assert loaded_work_state.travel_follower_states["spouse:mira_seed"]["task_xp"] == {
+        "water_crops": 5,
+        "plant_seeds": 3,
+    }
     assert loaded_work_state.travel_follower_states["spouse:mira_seed"]["work_totals"] == {
         "water_crops": 9,
         "gather_forage": 2,
+        "clear_debris": 1,
     }
     assert loaded_work_state.travel_follower_states["spouse:mira_seed"]["bond_points"] == 18
     assert loaded_work_state.travel_follower_states["spouse:mira_seed"]["outing_locations"] == ["Farm", "Town"]
@@ -1124,6 +1195,8 @@ def main() -> int:
     follower_game.set_crop_for_scope("Farm", work_crop_x, work_crop_y, work_crop)
     follower_game.state.hour = 6
     follower_game.state.minute = 50
+    assert "plant_seeds" in follower_game.travel_follower_task_options(spouse_follower_id)
+    assert "clear_debris" in follower_game.travel_follower_task_options(spouse_follower_id)
     assert follower_game.assign_travel_follower_task(spouse_follower_id, "water_crops")
     follower_game.advance_time(20)
     assert work_crop.watered
@@ -1135,6 +1208,25 @@ def main() -> int:
     assert follower_game.travel_follower_preferred_task(spouse_follower_id) == "water_crops"
     assert follower_game.travel_follower_work_limit(spouse_follower_id) == 7
     assert follower_game.travel_follower_position(spouse_follower_id) == (work_crop_x, work_crop_y)
+    water_job = follower_game.travel_follower_job_profile(spouse_follower_id, "water_crops")
+    assert water_job["title"] == "Irrigation Helper"
+    assert water_job["preferred"] is True
+    assert water_job["daily_limit"] == 7
+
+    plant_x, plant_y = 13, 10
+    follower_game.base_map[plant_y][plant_x] = ","
+    follower_game.state.selected_seed = "Turnip"
+    follower_game.state.inventory["Turnip Seeds"] = 1
+    assert follower_game.assign_travel_follower_task(spouse_follower_id, "plant_seeds")
+    follower_game.advance_time(60)
+    planted_crop = follower_game.crop_for_scope("Farm", plant_x, plant_y)
+    assert planted_crop is not None and planted_crop.name == "Turnip"
+    assert follower_game.state.inventory["Turnip Seeds"] == 0
+    assert spouse_work_record["task_xp"]["plant_seeds"] == 1
+    plant_report = follower_game.travel_follower_work_report_lines(spouse_follower_id)
+    assert "FOLLOWER JOB REPORT" in plant_report
+    assert any("Field Sower" in line for line in plant_report)
+    assert any("Job morale:" in line for line in plant_report)
 
     harvest_x, harvest_y = 11, 10
     follower_game.base_map[harvest_y][harvest_x] = ","
@@ -1178,6 +1270,20 @@ def main() -> int:
     assert cared_animal["fed"]
     assert cared_animal["petted_today"]
     assert follower_game.state.inventory["Mixed Seeds"] == 0
+    debris_before = sum(row.count("^") + row.count("o") + row.count("*") for row in follower_game.base_map)
+    if debris_before == 0:
+        follower_game.base_map[2][2] = "^"
+        debris_before = 1
+    material_before = sum(int(follower_game.state.inventory.get(item, 0)) for item in ["Wood", "Stone", "Fiber"])
+    assert follower_game.assign_travel_follower_task(spouse_follower_id, "clear_debris")
+    follower_game.advance_time(60)
+    debris_after = sum(row.count("^") + row.count("o") + row.count("*") for row in follower_game.base_map)
+    material_after = sum(int(follower_game.state.inventory.get(item, 0)) for item in ["Wood", "Stone", "Fiber"])
+    assert debris_after == debris_before - 1
+    assert material_after > material_before
+    clear_job = follower_game.travel_follower_job_profile(spouse_follower_id, "clear_debris")
+    assert clear_job["title"] == "Groundskeeper"
+    assert clear_job["output"] == "cleared farm space"
     assert follower_game.set_travel_follower_mode(spouse_follower_id, "follow")
     player_start = (follower_game.state.player_x, follower_game.state.player_y)
     follower_game.move(1, 0)
@@ -1513,6 +1619,33 @@ def main() -> int:
     assert len(settlement_plan["lots"]) == 12
     assert len(settlement_plan["buildings"]) == 12
     assert settlement_builder.validate(settlement_plan) == {"errors": [], "warnings": []}
+    varied_settlement_plan = settlement_builder.create_plan(
+        5,
+        -2,
+        seed=918274,
+        name="Smoke Crossing Variant",
+        style="Crossroads",
+    )
+    assert settlement_builder.validate(varied_settlement_plan) == {"errors": [], "warnings": []}
+    settlement_signature = sorted(
+        (
+            building["type_id"],
+            building["lot_id"],
+            building["x"],
+            building["y"],
+        )
+        for building in settlement_plan["buildings"].values()
+    )
+    varied_settlement_signature = sorted(
+        (
+            building["type_id"],
+            building["lot_id"],
+            building["x"],
+            building["y"],
+        )
+        for building in varied_settlement_plan["buildings"].values()
+    )
+    assert settlement_signature != varied_settlement_signature
     settlement_summary = settlement_builder.summary(settlement_plan)
     assert settlement_summary["tier"] == "Survey Camp"
     assert settlement_summary["buildings_planned"] == 12
@@ -1650,6 +1783,10 @@ def main() -> int:
     assert population_summary["elders"] >= 1
     assert population_summary["roles"]["Mayor"] == 1
     assert population_summary["roles"]["Doctor"] == 1
+    assert population_summary["average_job_skill"] > 0
+    assert population_summary["average_job_morale"] > 0
+    assert population_summary["weekly_wages"] > 0
+    assert population_summary["service_tags"]
     assert procedural_builder.validate(
         generated_population,
         population_plan,
@@ -1664,10 +1801,19 @@ def main() -> int:
         )
         assert generated_resident["home_building_id"] in population_plan["buildings"]
         assert population_plan["buildings"][generated_resident["home_building_id"]]["phase_index"] == 3
+        job_profile = generated_resident["job_profile"]
+        assert job_profile["title"]
+        assert job_profile["duties"]
+        assert job_profile["service_tags"]
+        assert 0 <= job_profile["skill"] <= 5
+        assert 0 <= job_profile["morale"] <= 100
+        assert job_profile["quality"] in {"Learning", "Capable", "Skilled", "Expert"}
         workplace_id = generated_resident["workplace_building_id"]
         if workplace_id:
             assert workplace_id in population_plan["buildings"]
             assert population_plan["buildings"][workplace_id]["phase_index"] == 3
+            assert job_profile["workplace"]
+            assert job_profile["weekly_wage"] > 0
         if generated_resident["age_group"] in {"Child", "Teen"}:
             assert generated_resident["guardian_ids"]
             assert all(
@@ -1681,6 +1827,24 @@ def main() -> int:
         "work_morning",
         bad_weather=True,
     ) == routine_resident["schedule"]["bad_weather"]
+    work_dialogue = npc_dialogue.ProceduralNpcDialogueBuilder().lines_for_topic(
+        routine_resident,
+        generated_population,
+        {
+            "phase": "work_morning",
+            "bad_weather": False,
+            "weather": "sunny",
+            "season": "spring",
+        },
+        "work",
+    )
+    assert any("skill" in line and "morale" in line for line in work_dialogue)
+    sanitized_population = npc_builder.sanitize_procedural_settlement_populations({
+        "11,-7": generated_population
+    })["11,-7"]
+    sanitized_resident = next(iter(sanitized_population["residents"].values()))
+    assert sanitized_resident["job_profile"]["title"]
+    assert sanitized_resident["job_profile"]["service_tags"]
 
     workplace_only_plan = settlement_builder.create_plan(
         12,
@@ -1966,13 +2130,94 @@ def main() -> int:
     assert procedural_town_plan["map_applied"] is True
     assert procedural_town_plan["discovered"] is False
     assert procedural_town_plan["specialty"] in {"library", "workshop", "park"}
+    sheriff_exterior = next(
+        building
+        for building in procedural_town_plan["buildings"].values()
+        if building["type_id"] == "sheriff_office"
+    )
+    procedural_town_game.state.location = "Wilderness"
+    procedural_town_game.state.wilderness_chunk_x = procedural_town_x
+    procedural_town_game.state.wilderness_chunk_y = procedural_town_y
+    sheriff_interior = procedural_town_game.procedural_town_interior_map(
+        sheriff_exterior
+    )
+    assert any("P" in row for row in sheriff_interior)
     assert all(
         building["phase_index"] == 3
         for building in procedural_town_plan["buildings"].values()
     )
-    assert sum(row.count(procedural_towns.PROCEDURAL_TOWN_DOOR_SYMBOL) for row in procedural_town_map) == len(
-        procedural_town_plan["buildings"]
+    procedural_enterable_exteriors = [
+        building
+        for building in procedural_town_plan["buildings"].values()
+        if building["type_id"] not in procedural_towns.PROCEDURAL_TOWN_OPEN_BUILDINGS
+    ]
+    procedural_open_exteriors = [
+        building
+        for building in procedural_town_plan["buildings"].values()
+        if building["type_id"] in procedural_towns.PROCEDURAL_TOWN_OPEN_BUILDINGS
+    ]
+    assert sum(
+        row.count(procedural_towns.PROCEDURAL_TOWN_DOOR_SYMBOL)
+        for row in procedural_town_map
+    ) == len(procedural_enterable_exteriors)
+    assert all(
+        procedural_town_map[int(building["door_y"])][int(building["door_x"])]
+        == procedural_towns.PROCEDURAL_TOWN_DOOR_SYMBOL
+        for building in procedural_enterable_exteriors
     )
+    assert all(
+        procedural_town_map[int(building["door_y"])][int(building["door_x"])]
+        != procedural_towns.PROCEDURAL_TOWN_DOOR_SYMBOL
+        for building in procedural_open_exteriors
+    )
+    general_store_exterior = next(
+        building
+        for building in procedural_town_plan["buildings"].values()
+        if building["type_id"] == "general_store"
+    )
+    gs_x = int(general_store_exterior["x"])
+    gs_y = int(general_store_exterior["y"])
+    gs_w = int(general_store_exterior["width"])
+    gs_h = int(general_store_exterior["height"])
+    assert procedural_town_map[gs_y][gs_x] == "#"
+    assert procedural_town_map[gs_y][gs_x + gs_w - 1] == "#"
+    assert procedural_town_map[gs_y + gs_h - 1][gs_x] == "#"
+    assert procedural_town_map[gs_y + gs_h - 1][gs_x + gs_w - 1] == "#"
+    assert procedural_town_map[gs_y + gs_h // 2][gs_x + gs_w // 2] == "G"
+    stale_refresh_game = FarmGame()
+    stale_refresh_game.state.wilderness_seed = procedural_town_game.state.wilderness_seed
+    stale_refresh_game.state.location = "Wilderness"
+    stale_grid = stale_refresh_game.get_wilderness_chunk_map(
+        procedural_town_x,
+        procedural_town_y,
+    )
+    stale_plan = stale_refresh_game.procedural_town_plan(
+        procedural_town_x,
+        procedural_town_y,
+    )
+    assert stale_plan is not None
+    stale_plan["runtime_version"] = procedural_towns.PROCEDURAL_TOWN_RUNTIME_VERSION - 1
+    stale_plan["map_applied"] = True
+    stale_grid[2][2] = procedural_towns.PROCEDURAL_TOWN_DOOR_SYMBOL
+    refreshed_grid = stale_refresh_game.ensure_procedural_town_applied(
+        stale_grid,
+        procedural_town_x,
+        procedural_town_y,
+    )
+    refreshed_plan = stale_refresh_game.procedural_town_plan(
+        procedural_town_x,
+        procedural_town_y,
+    )
+    assert refreshed_plan["runtime_version"] == procedural_towns.PROCEDURAL_TOWN_RUNTIME_VERSION
+    assert refreshed_grid[2][2] != procedural_towns.PROCEDURAL_TOWN_DOOR_SYMBOL
+    assert sum(
+        row.count(procedural_towns.PROCEDURAL_TOWN_DOOR_SYMBOL)
+        for row in refreshed_grid
+    ) == len([
+        building
+        for building in refreshed_plan["buildings"].values()
+        if building["type_id"] not in procedural_towns.PROCEDURAL_TOWN_OPEN_BUILDINGS
+    ])
     assert procedural_town_game.town_map == authored_town_before_runtime
     procedural_runtime_population = procedural_town_game.procedural_settlement_population(
         procedural_town_x,
@@ -1988,6 +2233,128 @@ def main() -> int:
         procedural_town_x,
         procedural_town_y,
     )
+    bounty_context = procedural_town_game.bounty_board_context()
+    assert bounty_context is not None
+    assert bounty_context["town_key"] == procedural_town_game.wilderness_chunk_key(
+        procedural_town_x,
+        procedural_town_y,
+    )
+    bounty_board = procedural_town_game.ensure_bounty_board_offers(bounty_context)
+    assert bounty_board is not None
+    assert bounty_board["week_key"] == procedural_town_game.bounty_week_key()
+    assert len(bounty_board["offers"]) == 5
+    primary_bounty = bounty_board["offers"][0]
+    assert procedural_town_game.accept_bounty(primary_bounty)
+    assert not procedural_town_game.accept_bounty(primary_bounty)
+    for extra_bounty in bounty_board["offers"][1:3]:
+        assert procedural_town_game.accept_bounty(extra_bounty)
+    assert procedural_town_game.active_bounty_count() == 3
+    assert not procedural_town_game.accept_bounty(bounty_board["offers"][3])
+    bounty_overview = "\n".join(procedural_town_game.active_bounty_overview_lines())
+    assert "Active: 3/3" in bounty_overview
+    assert (
+        f"Chunk ({primary_bounty['chunk_x']},{primary_bounty['chunk_y']})"
+        in bounty_overview
+    )
+    captured_adventure_items = []
+    original_vertical_panel_select = procedural_town_game.vertical_panel_select
+
+    def capture_adventure_menu(title, items, *args, **kwargs):
+        if title == "Adventure":
+            captured_adventure_items.extend(items)
+        return MenuItem(label="Back", value=farmstead_main.MENU_BACK, enabled=True)
+
+    procedural_town_game.vertical_panel_select = capture_adventure_menu
+    try:
+        assert procedural_town_game.show_combat_status_menu() == farmstead_main.MENU_BACK
+    finally:
+        procedural_town_game.vertical_panel_select = original_vertical_panel_select
+    assert any(
+        item.label == "Bounties" and "3/3" in str(item.hint)
+        for item in captured_adventure_items
+    )
+    bounty_chunk_x = int(primary_bounty["chunk_x"])
+    bounty_chunk_y = int(primary_bounty["chunk_y"])
+    assert procedural_town_game.overworld_chunk_preview_symbol(
+        bounty_chunk_x,
+        bounty_chunk_y,
+    ) == "!"
+    assert any(
+        "Bounty target" in line
+        for line in procedural_town_game.overworld_chunk_detail_lines(
+            bounty_chunk_x,
+            bounty_chunk_y,
+        )
+    )
+    procedural_town_game.set_wilderness_chunk(bounty_chunk_x, bounty_chunk_y)
+    bounty_targets = procedural_town_game.get_bounty_targets_for_chunk(
+        bounty_chunk_x,
+        bounty_chunk_y,
+    )
+    primary_target = next(
+        target
+        for target in bounty_targets
+        if target["id"] == primary_bounty["id"]
+    )
+    assert primary_target["target_x"] >= 0
+    assert primary_target["target_y"] >= 0
+    assert procedural_town_game.bounty_target_at(
+        primary_target["x"],
+        primary_target["y"],
+    )["id"] == primary_bounty["id"]
+    assert not procedural_town_game.passable(
+        primary_target["x"],
+        primary_target["y"],
+    )
+    assert "bounty combat" in procedural_town_game.interaction_hint(
+        primary_target["x"],
+        primary_target["y"],
+    ).lower()
+    procedural_town_game.mark_bounty_target_defeated(primary_target)
+    assert procedural_town_game.state.active_bounties[
+        primary_bounty["id"]
+    ]["status"] == "defeated"
+    assert "Ready to turn in" in "\n".join(
+        procedural_town_game.active_bounty_overview_lines()
+    )
+    reward_money = int(primary_bounty["reward_money"])
+    reward_items = dict(primary_bounty["reward_items"])
+    money_before_bounty_turn_in = procedural_town_game.state.money
+    inventory_before_bounty_turn_in = {
+        item: int(procedural_town_game.state.inventory.get(item, 0))
+        for item in reward_items
+    }
+    procedural_town_game.set_wilderness_chunk(
+        procedural_town_x,
+        procedural_town_y,
+    )
+    assert procedural_town_game.claim_bounty_reward(primary_bounty["id"])
+    assert procedural_town_game.state.money == money_before_bounty_turn_in + reward_money
+    for item, quantity in reward_items.items():
+        assert procedural_town_game.state.inventory.get(item, 0) == (
+            inventory_before_bounty_turn_in[item] + quantity
+        )
+    assert primary_bounty["id"] not in procedural_town_game.state.active_bounties
+    assert procedural_town_game.state.completed_bounty_log[-1]["id"] == primary_bounty["id"]
+    look_clear_calls = 0
+    original_clear_screen = farmstead_main.clear_screen
+
+    def tracked_clear_screen():
+        nonlocal look_clear_calls
+        look_clear_calls += 1
+
+    farmstead_main.clear_screen = tracked_clear_screen
+    try:
+        procedural_town_game._terminal_prepared = True
+        procedural_town_game._force_full_redraw = True
+        with contextlib.redirect_stdout(io.StringIO()):
+            procedural_town_game.draw_with_look_cursor(
+                procedural_town_game.state.player_x,
+                procedural_town_game.state.player_y,
+            )
+    finally:
+        farmstead_main.clear_screen = original_clear_screen
+    assert look_clear_calls == 0
     procedural_runtime_population = (
         procedural_town_game.procedural_settlement_population(
             procedural_town_x,
@@ -2292,6 +2659,30 @@ def main() -> int:
         "p" in row or "," in row
         for row in procedural_town_game.active_map()
     )
+    color_lookup_calls = 0
+    color_key_calls = 0
+    original_color_lookup = procedural_town_game.procedural_town_custom_tile_color_lookup
+    original_color_key = procedural_town_game.procedural_town_custom_tile_color_key
+
+    def tracked_color_lookup(floor=None):
+        nonlocal color_lookup_calls
+        color_lookup_calls += 1
+        return original_color_lookup(floor)
+
+    def tracked_color_key(x, y, floor=None):
+        nonlocal color_key_calls
+        color_key_calls += 1
+        return original_color_key(x, y, floor)
+
+    procedural_town_game.procedural_town_custom_tile_color_lookup = tracked_color_lookup
+    procedural_town_game.procedural_town_custom_tile_color_key = tracked_color_key
+    try:
+        assert procedural_town_game.map_lines()
+    finally:
+        procedural_town_game.procedural_town_custom_tile_color_lookup = original_color_lookup
+        procedural_town_game.procedural_town_custom_tile_color_key = original_color_key
+    assert color_lookup_calls == 1
+    assert color_key_calls == 0
     local_service_buildings = [
         building
         for building in procedural_town_plan["buildings"].values()
@@ -2311,6 +2702,7 @@ def main() -> int:
     assert not procedural_town_game.procedural_town_interior_tile_passable(" ")
     expected_tiles_by_type = {
         "general_store": {"&", "$", "s"},
+        "market_stall": {"&", "$", "s"},
         "inn": {"&", "$", "b", "f"},
         "home": {"&", "b", "f"},
         "clinic": {"&", "+", "b"},
@@ -2384,6 +2776,18 @@ def main() -> int:
                         continue
                     seen.add((nx, ny))
                     queue.append((nx, ny))
+            if str(proc_building["type_id"]) in {"general_store", "market_stall"}:
+                unreachable_floor = [
+                    (x, y)
+                    for y, row in enumerate(grid)
+                    for x, ch in enumerate(row)
+                    if ch in {".", ","}
+                    and (x, y) not in seen
+                ]
+                assert not unreachable_floor, (
+                    f"{proc_building['type_id']} has unreachable room floor near "
+                    f"{unreachable_floor[:3]}"
+                )
             expected_tiles = expected_tiles_by_type.get(str(proc_building["type_id"]), {"&"})
             service_positions = []
             for tile in expected_tiles:
@@ -4769,8 +5173,8 @@ def main() -> int:
     )
     assert follower_ui_game.travel_follower_menu(spouse_follower_id) == farmstead_main.MENU_BACK
     assert "Connect" in follower_ui_labels
-    assert "Work report" in follower_ui_labels
-    assert "Assign / change farm task" in follower_ui_labels
+    assert "Job report" in follower_ui_labels
+    assert "Assign / change follower job" in follower_ui_labels
     assert "Expedition role" in follower_ui_labels
     assert "Formation position" in follower_ui_labels
     connection_ui_labels = []
@@ -5557,7 +5961,10 @@ def main() -> int:
     stronghold_coords = None
     for cy in range(-80, 81):
         for cx in range(-80, 81):
-            if stronghold_game.wilderness_chunk_has_stronghold(cx, cy):
+            if (
+                stronghold_game.wilderness_chunk_has_stronghold(cx, cy)
+                and not stronghold_game.wilderness_chunk_has_procedural_settlement(cx, cy)
+            ):
                 stronghold_coords = (cx, cy)
                 break
         if stronghold_coords:
@@ -5612,6 +6019,137 @@ def main() -> int:
     assert stronghold_game.wilderness_chunk_has_safe_waypoint(scx, scy)
     assert stronghold_game.overworld_chunk_preview_symbol(scx, scy) == "!"
     assert any("Reclaimed benefits" in line for line in stronghold_game.wilderness_stronghold_status_lines(scx, scy))
+    can_found, found_reason = stronghold_game.can_found_town_at_reclaimed_stronghold(scx, scy)
+    assert can_found, found_reason
+    founded_plan = stronghold_game.found_town_at_reclaimed_stronghold("Avery's Watch", scx, scy, autosave=False)
+    assert founded_plan is not None
+    assert founded_plan is stronghold_game.wilderness_settlement_plan(scx, scy)
+    assert founded_plan["name"] == "Avery's Watch"
+    assert founded_plan["source"] == "reclaimed_stronghold"
+    assert founded_plan["discovered"] is True
+    assert founded_plan["status"] == "construction"
+    assert founded_plan["construction_queue"]
+    assert stronghold_record.get("founded_settlement_name") == "Avery's Watch"
+    assert stronghold_record.get("founded_settlement_key") == stronghold_game.wilderness_stronghold_key(scx, scy)
+    assert any("Town foundation" in line for line in stronghold_game.wilderness_stronghold_status_lines(scx, scy))
+    assert any("Avery's Watch" in line for line in stronghold_game.wilderness_stronghold_status_lines(scx, scy))
+    can_found_again, _reason = stronghold_game.can_found_town_at_reclaimed_stronghold(scx, scy)
+    assert not can_found_again
+    assert not stronghold_game.wilderness_settlement_validation(scx, scy, check_terrain=False)["errors"]
+    assert any("Build flow" in line for line in stronghold_game.reclaimed_stronghold_town_overview_lines(scx, scy))
+    board_pos = stronghold_game.ensure_reclaimed_stronghold_build_board(scx, scy)
+    assert board_pos is not None
+    board_x, board_y = board_pos
+    assert stronghold_game.active_map()[board_y][board_x] == "n"
+    assert stronghold_game.reclaimed_stronghold_build_board_at(board_x, board_y)
+    assert "build board" in stronghold_game.describe_tile(board_x, board_y).lower()
+    assert "build board" in stronghold_game.interaction_hint(board_x, board_y).lower()
+    assert "Road" in [item["name"] for item in stronghold_game.reclaimed_stronghold_build_catalog().values()]
+    stronghold_game.state.money = max(stronghold_game.state.money, 10000)
+
+    def first_valid_stronghold_build_position(item_id):
+        grid = stronghold_game.active_map()
+        for yy in range(2, len(grid) - 2):
+            for xx in range(2, len(grid[0]) - 2):
+                ok, _reason = stronghold_game.can_place_reclaimed_stronghold_build_item(item_id, xx, yy, scx, scy)
+                if ok:
+                    return xx, yy
+        return None
+
+    road_pos = first_valid_stronghold_build_position("road")
+    assert road_pos is not None
+    money_before_road = stronghold_game.state.money
+    assert stronghold_game.place_reclaimed_stronghold_build_item("road", road_pos[0], road_pos[1], scx, scy, autosave=False)
+    assert stronghold_game.state.money == money_before_road - 10
+    assert stronghold_game.active_map()[road_pos[1]][road_pos[0]] == ":"
+    assert stronghold_game.passable(*road_pos)
+    road_feature_id, road_feature = stronghold_game.reclaimed_stronghold_feature_at(road_pos[0], road_pos[1], scx, scy)
+    assert road_feature_id.startswith("road:")
+    assert road_feature and road_feature["kind"] == "road"
+    assert "Road" in stronghold_game.describe_tile(*road_pos)
+
+    home_pos = first_valid_stronghold_build_position("building:home")
+    assert home_pos is not None
+    money_before_home = stronghold_game.state.money
+    assert stronghold_game.place_reclaimed_stronghold_build_item("building:home", home_pos[0], home_pos[1], scx, scy, autosave=False)
+    assert stronghold_game.state.money == money_before_home - 850
+    home_feature_id, home_feature = stronghold_game.reclaimed_stronghold_feature_at(home_pos[0], home_pos[1], scx, scy)
+    assert home_feature_id.startswith("feature:")
+    assert home_feature and home_feature["kind"] == "building"
+    assert home_feature["name"] == "Settler Home"
+    assert not stronghold_game.passable(home_pos[0], home_pos[1])
+    assert "Settler Home" in stronghold_game.describe_tile(home_pos[0], home_pos[1])
+    stronghold_game.state.money = max(stronghold_game.state.money, 10000)
+    store_pos = first_valid_stronghold_build_position("building:general_store")
+    assert store_pos is not None
+    assert stronghold_game.place_reclaimed_stronghold_build_item("building:general_store", store_pos[0], store_pos[1], scx, scy, autosave=False)
+    population_plan = stronghold_game.reclaimed_stronghold_population_plan(scx, scy)
+    assert population_plan is not None
+    assert population_plan["source"] == "reclaimed_stronghold"
+    assert any(str(building.get("type_id")) == "home" for building in population_plan["buildings"].values())
+    assert any(str(building.get("type_id")) == "general_store" for building in population_plan["buildings"].values())
+    population = stronghold_game.reconcile_reclaimed_stronghold_population(scx, scy)
+    assert population is not None
+    population_summary = stronghold_game.procedural_npc_builder().summary(population)
+    assert population_summary["population"] >= 1
+    assert population_summary["households"] >= 1
+    assert population_summary["service_tags"]
+    assert population_summary["average_job_skill"] > 0
+    assert any(
+        str(resident.get("home_building_id", "")).startswith("reclaimed_")
+        for resident in population["residents"].values()
+    )
+    assert all(
+        resident.get("job_profile", {}).get("title")
+        for resident in population["residents"].values()
+    )
+    current_population_plan = stronghold_game.current_procedural_town_plan()
+    assert current_population_plan is not None
+    assert current_population_plan["source"] == "reclaimed_stronghold"
+    stronghold_game.state.hour = 12
+    stronghold_game.state.minute = 0
+    stronghold_game.update_procedural_town_residents(force_reanchor=True)
+    resident_lookup = stronghold_game.procedural_town_resident_position_lookup()
+    assert resident_lookup
+    resident_pos, visible_resident = next(iter(resident_lookup.items()))
+    assert stronghold_game.procedural_town_resident_at(*resident_pos)["id"] == visible_resident["id"]
+    assert "talk" in stronghold_game.interaction_hint(*resident_pos).lower()
+    conversation = stronghold_game.procedural_settlement_conversation(
+        scx,
+        scy,
+        str(visible_resident.get("id", "")),
+        topic="chat",
+        remember=True,
+    )
+    assert conversation and conversation.get("text")
+    resident_report = stronghold_game.reclaimed_stronghold_population_report_lines(scx, scy)
+    assert any("Population:" in line for line in resident_report)
+    assert any("Residents:" in line for line in resident_report)
+    assert any("Service coverage:" in line for line in resident_report)
+    overlap_ok, overlap_reason = stronghold_game.can_place_reclaimed_stronghold_build_item("bench", home_pos[0], home_pos[1], scx, scy)
+    assert not overlap_ok and "overlap" in overlap_reason
+    marker_ok, marker_reason = stronghold_game.can_place_reclaimed_stronghold_build_item("building:home", stronghold_marker[0], stronghold_marker[1], scx, scy)
+    assert not marker_ok and ("blocked" in marker_reason or "open" in marker_reason)
+    assert any("Placed at stronghold" in line for line in stronghold_game.reclaimed_stronghold_town_overview_lines(scx, scy))
+    first_project = str(founded_plan["construction_queue"][0])
+    stronghold_game.state.inventory.update({
+        "Wood": 999,
+        "Stone": 999,
+        "Iron Bar": 999,
+        "Cloth": 999,
+        "Cave Herbs": 999,
+        "Wildflower": 999,
+        "Copper Bar": 999,
+    })
+    stronghold_game.state.money = max(stronghold_game.state.money, 5000)
+    accepted = stronghold_game.contribute_to_wilderness_settlement(scx, scy, first_project, use_available=True)
+    assert accepted["materials"] or accepted["money"]
+    first_building = founded_plan["buildings"][first_project]
+    assert stronghold_game.wilderness_town_builder().phase_funded(first_building)
+    phase_before = int(first_building.get("phase_index", 0))
+    stronghold_game.state.stamina = 100
+    assert stronghold_game.work_on_reclaimed_stronghold_town(scx, scy, labor=999, minutes=5, stamina_cost=1)
+    assert int(first_building.get("phase_index", 0)) > phase_before
     stronghold_game.state.stamina = 20
     stronghold_game.state.combat_current_hp = 5
     assert stronghold_game.rest_at_reclaimed_stronghold()

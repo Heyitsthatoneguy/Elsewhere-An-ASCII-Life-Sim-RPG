@@ -16,6 +16,7 @@ from ascii_farmstead_data import (
 from ascii_farmstead_npc_builder import (
     procedural_custom_building_template,
     procedural_population_key,
+    sanitize_procedural_job_profile,
     stable_text_seed,
 )
 from ascii_farmstead_npc_dialogue import BAD_WEATHER
@@ -35,14 +36,14 @@ from ascii_farmstead_ui import MenuItem
 
 
 Position = Tuple[int, int]
-PROCEDURAL_TOWN_RUNTIME_VERSION = 9
+PROCEDURAL_TOWN_RUNTIME_VERSION = 12
 PROCEDURAL_TOWN_GRID_SIZE = 13
 PROCEDURAL_TOWN_MIN_DISTANCE = 8
 PROCEDURAL_TOWN_OVERWORLD_SYMBOL = "t"
 PROCEDURAL_TOWN_SIGN_SYMBOL = "?"
 PROCEDURAL_TOWN_DOOR_SYMBOL = "d"
 PROCEDURAL_TOWN_INTERIOR_LOCATION = "ProceduralSettlementInterior"
-PROCEDURAL_TOWN_OPEN_BUILDINGS = {"well", "market_stall", "park"}
+PROCEDURAL_TOWN_OPEN_BUILDINGS = {"well", "park"}
 PROCEDURAL_TOWN_BUILDING_SYMBOLS = {
     str(record["symbol"])
     for record in SETTLEMENT_BUILDING_CATALOG.values()
@@ -998,14 +999,37 @@ class ProceduralTownRuntimeMixin:
     def add_procedural_town_specialty(
         self,
         plan: Dict[str, object],
+        specialty: str = "",
     ) -> None:
-        roll = int(self.wilderness_hash01(
-            int(plan["chunk_x"]),
-            int(plan["chunk_y"]),
-            33013,
-        ) * 3)
-        replacement = ("library", "workshop", "park")[min(2, roll)]
-        lot_id = "lot_1_1"
+        if str(plan.get("specialty", "")) in {"library", "workshop", "park"}:
+            return
+        if specialty not in {"library", "workshop", "park"}:
+            roll = int(self.wilderness_hash01(
+                int(plan["chunk_x"]),
+                int(plan["chunk_y"]),
+                33013,
+            ) * 3)
+            specialty = ("library", "workshop", "park")[min(2, roll)]
+        target_building = plan.get("buildings", {}).get("home:1")
+        if not isinstance(target_building, dict):
+            homes = [
+                building
+                for building in plan.get("buildings", {}).values()
+                if isinstance(building, dict)
+                and str(building.get("type_id", "")) == "home"
+            ]
+            if not homes:
+                return
+            homes.sort(key=lambda row: (int(row.get("priority", 0)), str(row.get("id", ""))))
+            target_building = homes[
+                int(self.wilderness_hash01(
+                    int(plan["chunk_x"]),
+                    int(plan["chunk_y"]),
+                    33014,
+                ) * len(homes))
+                % len(homes)
+            ]
+        lot_id = str(target_building.get("lot_id", ""))
         lot = plan.get("lots", {}).get(lot_id)
         if not isinstance(lot, dict):
             return
@@ -1013,7 +1037,7 @@ class ProceduralTownRuntimeMixin:
         if old_building_id:
             plan.get("buildings", {}).pop(old_building_id, None)
         lot["building_id"] = ""
-        lot["zone"] = str(SETTLEMENT_BUILDING_CATALOG[replacement]["zone"])
+        lot["zone"] = str(SETTLEMENT_BUILDING_CATALOG[specialty]["zone"])
         names = {
             "library": "Settlement Library",
             "workshop": "Common Works",
@@ -1022,11 +1046,59 @@ class ProceduralTownRuntimeMixin:
         WildernessTownBuilder().place_building(
             plan,
             lot_id,
-            replacement,
-            building_id=f"specialty:{replacement}",
-            name=names[replacement],
+            specialty,
+            building_id=f"specialty:{specialty}",
+            name=names[specialty],
         )
-        plan["specialty"] = replacement
+        plan["specialty"] = specialty
+
+    def refreshed_procedural_town_layout(
+        self,
+        plan: Dict[str, object],
+    ) -> Dict[str, object]:
+        cx, cy = int(plan["chunk_x"]), int(plan["chunk_y"])
+        refreshed = WildernessTownBuilder().create_plan(
+            cx,
+            cy,
+            seed=int(plan.get("seed", self.wilderness_chunk_seed(cx, cy) + 33000)),
+            name=str(plan.get("name", self.procedural_town_name(cx, cy))),
+            style=str(plan.get("style", self.procedural_town_style(cx, cy))),
+        )
+        self.add_procedural_town_specialty(
+            refreshed,
+            specialty=str(plan.get("specialty", "")),
+        )
+        procedural_town_completed_plan(refreshed)
+        for field in (
+            "id",
+            "source",
+            "auto_generated",
+            "discovered",
+            "discovered_day",
+            "service_state",
+            "treasury",
+            "labor_pool",
+        ):
+            if field in plan:
+                refreshed[field] = copy.deepcopy(plan[field])
+        refreshed["map_applied"] = False
+        refreshed["_requires_clean_map_apply"] = True
+        refreshed["revision"] = max(
+            int(refreshed.get("revision", 1)),
+            int(plan.get("revision", 1)) + 1,
+        )
+        notes = [
+            str(note)
+            for note in (
+                plan.get("notes", [])
+                if isinstance(plan.get("notes", []), list)
+                else []
+            )
+            if str(note or "").strip()
+        ]
+        notes.append("Town layout refreshed with varied seeded streets, lots, and building placement.")
+        refreshed["notes"] = notes[-20:]
+        return refreshed
 
     def ensure_procedural_town_plan(
         self,
@@ -1042,6 +1114,10 @@ class ProceduralTownRuntimeMixin:
         if isinstance(existing, dict):
             if str(existing.get("source", "")) != "procedural_wilderness":
                 return None
+            if int(existing.get("runtime_version", 0)) < PROCEDURAL_TOWN_RUNTIME_VERSION:
+                existing = self.refreshed_procedural_town_layout(existing)
+                settlements[key] = existing
+                self.generate_procedural_settlement_population(cx, cy, force=False)
             self.ensure_procedural_town_community(existing)
             return existing
 
@@ -1095,6 +1171,22 @@ class ProceduralTownRuntimeMixin:
         height = len(grid)
         width = len(grid[0]) if height else 0
         ground = self.procedural_town_dominant_ground(grid)
+        building_tiles: Set[Position] = set()
+        for building in plan.get("buildings", {}).values():
+            if not isinstance(building, dict):
+                continue
+            building_tiles.update(
+                settlement_rect_tiles(
+                    int(building["x"]),
+                    int(building["y"]),
+                    int(building["width"]),
+                    int(building["height"]),
+                )
+            )
+
+        def draw_path_tile(x: int, y: int) -> None:
+            if 0 <= x < width and 0 <= y < height and (x, y) not in building_tiles:
+                grid[y][x] = ":"
 
         for lot in plan.get("lots", {}).values():
             if not isinstance(lot, dict):
@@ -1114,25 +1206,71 @@ class ProceduralTownRuntimeMixin:
             if not position:
                 continue
             x, y = position
-            if 0 <= x < width and 0 <= y < height:
-                grid[y][x] = ":"
+            draw_path_tile(x, y)
 
         for building in plan.get("buildings", {}).values():
             if not isinstance(building, dict):
                 continue
-            catalog = SETTLEMENT_BUILDING_CATALOG[str(building["type_id"])]
+            type_id = str(building["type_id"])
+            catalog = SETTLEMENT_BUILDING_CATALOG[type_id]
             symbol = str(catalog["symbol"])
-            for x, y in settlement_rect_tiles(
-                int(building["x"]),
-                int(building["y"]),
-                int(building["width"]),
-                int(building["height"]),
-            ):
-                if 1 <= x < width - 1 and 1 <= y < height - 1:
-                    grid[y][x] = symbol
+            building_x = int(building["x"])
+            building_y = int(building["y"])
+            building_width = int(building["width"])
+            building_height = int(building["height"])
+            if type_id == "park":
+                for x, y in settlement_rect_tiles(
+                    building_x,
+                    building_y,
+                    building_width,
+                    building_height,
+                ):
+                    if 1 <= x < width - 1 and 1 <= y < height - 1:
+                        grid[y][x] = ";"
+                park_marks = [
+                    (building_x + 1, building_y + 1, "&"),
+                    (building_x + building_width - 2, building_y + 1, "&"),
+                    (building_x + 1, building_y + building_height - 2, "b"),
+                    (building_x + building_width - 2, building_y + building_height - 2, "b"),
+                ]
+                for mark_x, mark_y, mark in park_marks:
+                    if 1 <= mark_x < width - 1 and 1 <= mark_y < height - 1:
+                        grid[mark_y][mark_x] = mark
+            elif type_id == "well":
+                for x, y in settlement_rect_tiles(
+                    building_x,
+                    building_y,
+                    building_width,
+                    building_height,
+                ):
+                    if 1 <= x < width - 1 and 1 <= y < height - 1:
+                        grid[y][x] = ","
+                well_x = building_x + building_width // 2
+                well_y = building_y + building_height // 2
+                if 1 <= well_x < width - 1 and 1 <= well_y < height - 1:
+                    grid[well_y][well_x] = symbol
+            else:
+                for x, y in settlement_rect_tiles(
+                    building_x,
+                    building_y,
+                    building_width,
+                    building_height,
+                ):
+                    if 1 <= x < width - 1 and 1 <= y < height - 1:
+                        edge = (
+                            x == building_x
+                            or x == building_x + building_width - 1
+                            or y == building_y
+                            or y == building_y + building_height - 1
+                        )
+                        grid[y][x] = "#" if edge else symbol
             door_x, door_y = int(building["door_x"]), int(building["door_y"])
             if 0 <= door_x < width and 0 <= door_y < height:
-                grid[door_y][door_x] = PROCEDURAL_TOWN_DOOR_SYMBOL
+                grid[door_y][door_x] = (
+                    symbol
+                    if type_id in PROCEDURAL_TOWN_OPEN_BUILDINGS
+                    else PROCEDURAL_TOWN_DOOR_SYMBOL
+                )
             access_x, access_y = int(building["access_x"]), int(building["access_y"])
             if 0 <= access_x < width and 0 <= access_y < height:
                 grid[access_y][access_x] = ":"
@@ -1140,16 +1278,16 @@ class ProceduralTownRuntimeMixin:
         center_x, center_y = width // 2, height // 2
         for x in range(0, center_x + 1):
             if 0 < x < width - 1:
-                grid[center_y][x] = ":"
+                draw_path_tile(x, center_y)
         for x in range(center_x, width):
             if 0 < x < width - 1:
-                grid[center_y][x] = ":"
+                draw_path_tile(x, center_y)
         for y in range(0, center_y + 1):
             if 0 < y < height - 1:
-                grid[y][center_x] = ":"
+                draw_path_tile(center_x, y)
         for y in range(center_y, height):
             if 0 < y < height - 1:
-                grid[y][center_x] = ":"
+                draw_path_tile(center_x, y)
 
         entrance = plan.get("entrance", {})
         sign_x = max(2, min(width - 3, int(entrance.get("x", center_x)) + 2))
@@ -1192,6 +1330,8 @@ class ProceduralTownRuntimeMixin:
         plan = self.ensure_procedural_town_plan(chunk_x, chunk_y)
         if not plan:
             return grid
+        if bool(plan.pop("_requires_clean_map_apply", False)):
+            grid = self.make_wilderness_chunk(int(chunk_x), int(chunk_y))
         if (
             bool(plan.get("map_applied"))
             and int(plan.get("runtime_version", 0)) >= PROCEDURAL_TOWN_RUNTIME_VERSION
@@ -1426,7 +1566,7 @@ class ProceduralTownRuntimeMixin:
                 add_hall(room_mid, 14, room_mid, 17)
             add_hall(10, 13, 31, 14)
             add_hall(33, 13, 54, 14)
-        elif type_id in {"library", "town_hall"}:
+        elif type_id in {"library", "town_hall", "sheriff_office"}:
             add_room(6, 6, 19, 12)
             add_room(45, 6, 58, 12)
             add_room(6, 16, 19, 22)
@@ -1518,6 +1658,13 @@ class ProceduralTownRuntimeMixin:
             place(52, 8, "P")
             place(12, 19, "s")
             place(52, 19, "d")
+            hline(26, 38, 6, "P")
+            place(31, 21, "t")
+            place(35, 21, "c")
+        elif type_id == "sheriff_office":
+            place(12, 8, "d")
+            place(52, 8, "P")
+            place(12, 19, "s")
             hline(26, 38, 6, "P")
             place(31, 21, "t")
             place(35, 21, "c")
@@ -1632,6 +1779,7 @@ class ProceduralTownRuntimeMixin:
         grid = [[" " for _ in range(width)] for _ in range(height)]
         floor_cells: Set[Position] = set()
         hall_cells: Set[Position] = set()
+        doorway_cells: Set[Position] = set()
 
         def in_bounds(x: int, y: int) -> bool:
             return 0 <= x < width and 0 <= y < height
@@ -1651,6 +1799,11 @@ class ProceduralTownRuntimeMixin:
             openings: Optional[Iterable[Position]] = None,
         ) -> None:
             openings_set = set(openings or [])
+            doorway_cells.update(
+                (int(x), int(y))
+                for x, y in openings_set
+                if 1 <= int(x) < width - 1 and 1 <= int(y) < height - 1
+            )
             left, right = sorted((max(1, x1), min(width - 2, x2)))
             top, bottom = sorted((max(1, y1), min(height - 2, y2)))
             for y in range(top, bottom + 1):
@@ -1698,7 +1851,13 @@ class ProceduralTownRuntimeMixin:
                 for y in range(18, door_y)
                 for x in range(door_x - 1, door_x + 2)
             }
-            return hall_cells | front_lane | {(door_x, door_y - 1)}
+            doorway_buffer = set(doorway_cells)
+            for x, y in list(doorway_cells):
+                for dx, dy in ((0, -1), (1, 0), (0, 1), (-1, 0)):
+                    neighbor = (x + dx, y + dy)
+                    if neighbor in floor_cells:
+                        doorway_buffer.add(neighbor)
+            return hall_cells | front_lane | doorway_buffer | {(door_x, door_y - 1)}
 
         def place(x: int, y: int, ch: str, *, allow_hall: bool = False) -> None:
             if (
@@ -1787,6 +1946,14 @@ class ProceduralTownRuntimeMixin:
             add_hall([(32, 26), (32, 17), (32, 14)])
             add_hall([(22, 20), (18, 20)])
             add_hall([(42, 18), (47, 18)])
+        elif type_id == "market_stall":
+            add_room(22, 17, 42, 25, [(32, 25), (22, 20), (42, 20), (32, 17)])
+            add_room(23, 9, 41, 14, [(32, 14)])
+            add_room(8, 14, 20, 22, [(20, 19)])
+            add_room(45, 14, 57, 22, [(45, 19)])
+            add_hall([(32, 26), (32, 18), (32, 14)])
+            add_hall([(22, 20), (18, 20), (18, 19), (20, 19)])
+            add_hall([(42, 20), (47, 20), (47, 19), (45, 19)])
         elif type_id == "clinic":
             add_room(22, 17, 42, 25, [(32, 25), (22, 21), (42, 21), (32, 17)])
             add_room(23, 10, 41, 15, [(32, 15)])
@@ -1795,6 +1962,14 @@ class ProceduralTownRuntimeMixin:
             add_hall([(32, 26), (32, 18), (32, 15)])
             add_hall([(22, 21), (17, 21), (17, 17), (20, 17)])
             add_hall([(42, 21), (50, 21), (50, 17), (45, 17)])
+        elif type_id == "sheriff_office":
+            add_room(21, 16, 43, 25, [(32, 25), (21, 20), (43, 20), (32, 16)])
+            add_room(22, 8, 42, 14, [(32, 14)])
+            add_room(7, 12, 19, 21, [(19, 17)])
+            add_room(47, 12, 58, 21, [(47, 17)])
+            add_hall([(32, 26), (32, 18), (32, 14)])
+            add_hall([(21, 20), (15, 20), (15, 17), (19, 17)])
+            add_hall([(43, 20), (52, 20), (52, 17), (47, 17)])
         elif type_id == "library":
             add_room(19, 16, 45, 25, [(32, 25), (19, 20), (45, 20), (32, 16)])
             add_room(8, 8, 20, 22, [(20, 18)])
@@ -1837,7 +2012,7 @@ class ProceduralTownRuntimeMixin:
 
         # Fixture phase. Keep it sparse and meaningful.
         if type_id == "inn":
-            counter(31, 12)
+            counter(27, 12)
             place(48, 10, "f")
             place(52, 10, "s")
             rug(25, 20, 39, 24)
@@ -1862,18 +2037,32 @@ class ProceduralTownRuntimeMixin:
             if floor_count > 1:
                 place(38, 18, "<")
         elif type_id == "general_store":
-            counter(32, 13)
+            counter(27, 12)
             hline(10, 16, 16, "s")
             hline(49, 55, 16, "$")
             place(50, 18, "P")
+        elif type_id == "market_stall":
+            counter(27, 12)
+            hline(10, 16, 17, "$")
+            hline(49, 55, 17, "s")
+            table(32, 22)
+            place(50, 18, "P")
         elif type_id == "clinic":
-            counter(32, 14, stock=False)
+            counter(27, 13, stock=False)
             rug(24, 20, 40, 24)
             bed(10, 12)
             place(12, 15, "+")
             place(48, 14, "+")
             place(53, 14, "s")
             place(26, 12, "P")
+        elif type_id == "sheriff_office":
+            counter(27, 13, stock=False)
+            rug(24, 20, 40, 24)
+            place(12, 15, "d")
+            place(15, 15, "s")
+            place(51, 14, "P")
+            place(53, 17, "s")
+            table(32, 22)
         elif type_id == "library":
             place(30, 18, "&")
             hline(10, 10, 10, "l")
@@ -1885,28 +2074,28 @@ class ProceduralTownRuntimeMixin:
             place(50, 10, "P")
             table(32, 22)
         elif type_id == "carpenter":
-            counter(32, 13, stock=False)
+            counter(27, 13, stock=False)
             hline(9, 17, 14, "w")
             place(49, 12, "a")
             place(53, 12, "x")
             table(31, 22)
             place(36, 10, "P")
         elif type_id == "workshop":
-            counter(32, 11, stock=False)
+            counter(27, 11, stock=False)
             place(10, 12, "w")
             place(14, 12, "a")
             place(18, 12, "x")
             place(49, 18, "s")
             place(36, 9, "P")
         elif type_id == "town_hall":
-            counter(32, 13, stock=False)
+            counter(27, 13, stock=False)
             place(12, 11, "d")
             place(52, 11, "P")
             table(32, 22)
             if community.get("story_completed"):
                 place(38, 11, "f")
         else:
-            counter(32, 13, stock=False)
+            counter(27, 13, stock=False)
             table(32, 23)
 
         if business_record and type_id in {"general_store", "inn"}:
@@ -2131,6 +2320,14 @@ class ProceduralTownRuntimeMixin:
             add_north_room(23, 5, 41, 12)
             add_room(45, 6, 58, 13)
             add_hall(33, 9, 45, 11)
+        elif type_id == "sheriff_office":
+            add_west_room(6, 17, 20, 25)
+            add_east_room(44, 17, 58, 25)
+            add_north_room(22, 5, 42, 13)
+            add_room(6, 7, 19, 13)
+            add_room(45, 7, 58, 13)
+            add_hall(19, 10, 31, 11)
+            add_hall(33, 10, 45, 11)
         elif type_id == "library":
             add_west_room(5, 16, 20, 25)
             add_east_room(44, 16, 59, 25)
@@ -2312,6 +2509,13 @@ class ProceduralTownRuntimeMixin:
             compact_bedroom(34, 7, 40, 10, lamp=False)
             place(51, 10, "d")
             place(54, 10, "s")
+        elif type_id == "sheriff_office":
+            service_counter(29, 18)
+            rug_rect(27, 22, 37, 24)
+            hline(24, 40, 8, "P")
+            place(12, 10, "d")
+            place(52, 10, "s")
+            table_setting(32, 24)
         elif type_id == "library":
             service_counter(29, 18)
             rug_rect(27, 22, 37, 25)
@@ -2690,6 +2894,8 @@ class ProceduralTownRuntimeMixin:
             "Carpenter Apprentice": ["workshop", "storage"],
             "Doctor": ["clinic_ward", "office", "storage"],
             "Nurse": ["clinic_ward", "storage"],
+            "Sheriff": ["office", "public_hall", "storage"],
+            "Deputy": ["public_hall", "office", "storage"],
             "Librarian": ["library_stacks", "office", "public_hall"],
             "Archivist": ["library_stacks", "office", "storage"],
             "Innkeeper": ["shopping_counter", "dining", "office"],
@@ -2705,6 +2911,7 @@ class ProceduralTownRuntimeMixin:
             "inn": ["shopping_counter", "kitchen", "dining", "bedroom"],
             "general_store": ["shopping_counter", "stockroom", "storage"],
             "clinic": ["clinic_ward", "office", "storage"],
+            "sheriff_office": ["shopping_counter", "office", "storage"],
             "library": ["library_stacks", "office", "public_hall"],
             "carpenter": ["workshop", "office", "storage"],
             "workshop": ["workshop", "storage", "office"],
@@ -2826,10 +3033,16 @@ class ProceduralTownRuntimeMixin:
         y: int,
         floor: Optional[int] = None,
     ) -> str:
+        return self.procedural_town_custom_tile_color_lookup(floor).get((int(x), int(y)), "")
+
+    def procedural_town_custom_tile_color_lookup(
+        self,
+        floor: Optional[int] = None,
+    ) -> Dict[Position, str]:
         plan = self.current_procedural_town_plan()
         building = self.current_procedural_town_building()
         if not plan or not building:
-            return ""
+            return {}
         type_id = str(building.get("type_id", ""))
         property_record = (
             self.player_property_for_building(plan, building)
@@ -2838,22 +3051,23 @@ class ProceduralTownRuntimeMixin:
         )
         template = self.procedural_town_custom_building_template(plan, building, property_record)
         if not template:
-            return ""
+            return {}
         floor_index = (
             self.current_procedural_building_floor(plan, building)
             if floor is None
             else int(floor)
         )
+        lookup: Dict[Position, str] = {}
         for color in template.get("colors", []) or []:
             if not isinstance(color, dict):
                 continue
-            if (
-                int(color.get("floor", 0) or 0) == int(floor_index)
-                and int(color.get("x", 0) or 0) == int(x)
-                and int(color.get("y", 0) or 0) == int(y)
-            ):
-                return str(color.get("color", ""))
-        return ""
+            if int(color.get("floor", 0) or 0) != int(floor_index):
+                continue
+            lookup[(
+                int(color.get("x", 0) or 0),
+                int(color.get("y", 0) or 0),
+            )] = str(color.get("color", ""))
+        return lookup
 
     def procedural_town_resident_preferred_interior_floor(
         self,
@@ -3531,6 +3745,13 @@ class ProceduralTownRuntimeMixin:
             else "",
             population,
         )
+        job_profile = sanitize_procedural_job_profile(
+            resident.get("job_profile", {}),
+            resident.get("role", "Settler"),
+        )
+        workplace_name = str(job_profile.get("workplace", "") or "")
+        duties = [str(value) for value in job_profile.get("duties", []) if str(value or "").strip()]
+        service_tags = [str(value) for value in job_profile.get("service_tags", []) if str(value or "").strip()]
         lines = [
             str(resident.get("name", "Resident")).upper(),
             "",
@@ -3553,6 +3774,19 @@ class ProceduralTownRuntimeMixin:
             f"Community outlook: {resident.get('social_opinion', 'practical about community problems')}",
             f"Current activity: {resident.get('runtime_activity', 'following today’s routine')}",
             f"Goal: {resident.get('goal', '')}",
+            "",
+            "Job:",
+            f"Title: {job_profile.get('quality', 'Capable')} {job_profile.get('title', resident.get('role', 'Settler'))}",
+            f"Workplace: {workplace_name or 'Town commons'}",
+            f"Category: {job_profile.get('category', 'General Labor')}",
+            f"Skill: {job_profile.get('skill', 0)}/5",
+            f"Morale: {job_profile.get('morale', 0)}/100",
+            f"Weekly wage: ${job_profile.get('weekly_wage', 0)}",
+            f"Output: {job_profile.get('output', 'support')}",
+            f"Town benefit: {job_profile.get('public_benefit', 'helps the settlement function')}",
+            f"Duties: {', '.join(duties) if duties else 'General help'}",
+            f"Services: {', '.join(service_tags) if service_tags else 'community'}",
+            "",
             f"Family here: {', '.join(family) if family else 'None listed'}",
             f"Close friend: {friend if friend != 'someone' else 'Not yet established'}",
             "",
@@ -4505,6 +4739,9 @@ class ProceduralTownRuntimeMixin:
         if type_id == "town_hall":
             self.procedural_town_hall_menu()
             return True
+        if type_id == "sheriff_office" and hasattr(self, "show_bounty_board_menu"):
+            self.show_bounty_board_menu()
+            return True
         if type_id == "well":
             return self.use_procedural_town_well(building)
         if type_id == "park":
@@ -4958,6 +5195,7 @@ class ProceduralTownRuntimeMixin:
             "general_store": "general_store",
             "carpenter": "carpenter",
             "clinic": "clinic",
+            "sheriff_office": "bounty board",
             "library": "library",
             "inn": "inn",
             "market_stall": "market",
@@ -5725,6 +5963,12 @@ class ProceduralTownRuntimeMixin:
             return
         if tile == "&" and building:
             self.procedural_town_building_service(building)
+            return
+        if tile == "P" and building and str(building.get("type_id", "")) == "sheriff_office":
+            if hasattr(self, "show_bounty_board_menu"):
+                self.show_bounty_board_menu()
+            else:
+                self.set_message("The wanted board is not available right now.")
             return
         if property_record:
             if tile == "b":
