@@ -36,6 +36,12 @@ def terminal_width() -> int:
     except Exception:
         return 100
 
+def terminal_height() -> int:
+    try:
+        return shutil.get_terminal_size((100, 30)).lines
+    except Exception:
+        return 30
+
 def left_margin(content_width: int) -> str:
     cols = terminal_width()
     return " " * max(0, (cols - content_width) // 2)
@@ -50,6 +56,68 @@ def strip_ansi(text: str) -> str:
 
 def visible_text_len(text: str) -> int:
     return len(strip_ansi(str(text)))
+
+
+def meter_text(
+    value: int,
+    maximum: int,
+    width: int = 8,
+    detailed: bool = True,
+) -> str:
+    """Return a fixed-width, color-agnostic meter suitable for HUD chips."""
+    width = max(3, int(width))
+    maximum = max(1, int(maximum))
+    value = max(0, min(maximum, int(value)))
+    filled = int(round(width * value / maximum))
+    full, empty = ("█", "░") if detailed else ("#", "-")
+    return full * filled + empty * (width - filled)
+
+
+def status_chip(text: object, style: str = "") -> str:
+    """Render one compact status value with boundaries visible without color."""
+    chip = f"[{str(text).strip()}]"
+    return colorize(chip, style) if style else chip
+
+
+def wrap_status_chips(chips: List[str], width: int) -> List[str]:
+    """Wrap complete ANSI-aware chips without splitting their contents."""
+    width = max(16, int(width))
+    lines: List[str] = []
+    current: List[str] = []
+    current_width = 0
+    for chip in [str(chip) for chip in chips if str(chip).strip()]:
+        chip_width = visible_text_len(chip)
+        if chip_width > width:
+            chip = fit_text(chip, width)
+            chip_width = visible_text_len(chip)
+        added = chip_width + (1 if current else 0)
+        if current and current_width + added > width:
+            lines.append(" ".join(current))
+            current = []
+            current_width = 0
+            added = chip_width
+        current.append(chip)
+        current_width += added
+    if current:
+        lines.append(" ".join(current))
+    return lines or [""]
+
+
+def style_labeled_row(row: object) -> str:
+    """Color a HUD row label while keeping its explanatory text neutral."""
+    text = str(row)
+    styles = {
+        "MESSAGE |": C.UI_TITLE,
+        "STATUS |": C.UI_SELECTED,
+        "TARGET |": C.LANDMARK_ACTIVE,
+        "TOOL |": C.INFRA,
+        "ACTION |": C.SERVICE,
+        "CONTROLS |": C.UI_MUTED,
+    }
+    for prefix, style in styles.items():
+        if text.startswith(prefix):
+            return colorize(prefix, style) + text[len(prefix):]
+    return text
 
 def fit_text(text: str, width: int) -> str:
     """Trim text by visible length when it cannot fit."""
@@ -144,26 +212,94 @@ def menu_context_lines(
         lines.extend(wrap_panel_row(str(footer).strip(), context_width))
     return lines
 
-def draw_menu(title: str, items: List[MenuItem], selected: int, footer: str = "", extra_lines: Optional[List[str]] = None):
-    clear_screen()
-    print(title)
-    print("=" * max(40, len(title)))
-    if extra_lines:
-        for line in extra_lines:
-            print(line)
-        print("-" * max(40, len(title)))
 
-    for i, item in enumerate(items):
-        cursor = ">" if i == selected else " "
-        status = "" if item.enabled else " [unavailable]"
-        label = item.label if item.enabled else colorize(item.label, C.DIM)
-        print(f"{cursor} {label}{status}")
+def framed_row(content: object, width: int, style: str = "") -> str:
+    """Return one padded box row, preserving ANSI-aware visible width."""
+    width = max(24, int(width))
+    inner = width - 4
+    fitted = fit_text(str(content), inner)
+    padded = fitted + " " * max(0, inner - visible_text_len(fitted))
+    body = colorize(padded, style) if style else padded
+    return colorize("│ ", C.UI_BORDER) + body + colorize(" │", C.UI_BORDER)
+
+
+def menu_render_lines(
+    title: str,
+    items: List[MenuItem],
+    selected: int,
+    footer: str = "",
+    extra_lines: Optional[List[str]] = None,
+    width: Optional[int] = None,
+    item_offset: int = 0,
+    max_visible_items: Optional[int] = None,
+) -> List[str]:
+    """Compose a complete width-safe menu frame for printing or testing."""
+    available = max(24, terminal_width() - 2)
+    frame_width = max(24, min(int(width or 60), available))
+    title_text = fit_text(f" {title} ", frame_width - 4)
+    top_fill = max(0, frame_width - visible_text_len(title_text) - 2)
+    lines = [colorize("┌" + title_text + "─" * top_fill + "┐", C.UI_BORDER + C.BOLD)]
+
+    if extra_lines:
+        for raw in extra_lines:
+            for row in wrap_panel_row(raw, frame_width - 4):
+                lines.append(framed_row(row, frame_width, C.UI_MUTED))
+        lines.append(colorize("├" + "─" * (frame_width - 2) + "┤", C.UI_BORDER))
+
+    item_offset = max(0, min(int(item_offset), max(0, len(items) - 1)))
+    if max_visible_items is None:
+        visible_items = list(enumerate(items))
+    else:
+        visible_count = max(1, int(max_visible_items))
+        visible_items = list(enumerate(items[item_offset:item_offset + visible_count], start=item_offset))
+        if item_offset > 0:
+            lines.append(framed_row(f"  ↑ {item_offset} more", frame_width, C.UI_MUTED))
+
+    for index, item in visible_items:
+        is_selected = index == selected
+        cursor = ">" if is_selected else " "
+        status = " [unavailable]" if not item.enabled else ""
+        content = f"{cursor} {item.label}{status}"
+        style = (
+            C.UI_SELECTED
+            if is_selected and item.enabled
+            else C.DIM
+            if not item.enabled
+            else ""
+        )
+        lines.append(framed_row(content, frame_width, style))
+    if max_visible_items is not None:
+        remaining = max(0, len(items) - (item_offset + len(visible_items)))
+        if remaining:
+            lines.append(framed_row(f"  ↓ {remaining} more", frame_width, C.UI_MUTED))
 
     selected_hint = items[selected].hint if 0 <= selected < len(items) else ""
     if footer or selected_hint:
-        print("-" * max(40, len(title)))
-        for line in menu_context_lines(selected_hint, footer):
-            print(line)
+        lines.append(colorize("├" + "─" * (frame_width - 2) + "┤", C.UI_BORDER))
+        for row in menu_context_lines(selected_hint, footer, frame_width - 4):
+            lines.append(framed_row(row, frame_width, C.UI_MUTED))
+    lines.append(colorize("└" + "─" * (frame_width - 2) + "┘", C.UI_BORDER))
+    return lines
+
+def draw_menu(
+    title: str,
+    items: List[MenuItem],
+    selected: int,
+    footer: str = "",
+    extra_lines: Optional[List[str]] = None,
+    item_offset: int = 0,
+    max_visible_items: Optional[int] = None,
+):
+    clear_screen()
+    print("\n".join(menu_render_lines(
+        title,
+        items,
+        selected,
+        footer,
+        extra_lines,
+        item_offset=item_offset,
+        max_visible_items=max_visible_items,
+    )))
 
 def menu_select(title: str, items: List[MenuItem], footer: str = "", extra_lines: Optional[List[str]] = None) -> Optional[MenuItem]:
     """Arrow-key controlled menu. Returns selected MenuItem or None if cancelled."""
@@ -178,17 +314,43 @@ def menu_select(title: str, items: List[MenuItem], footer: str = "", extra_lines
             selected = i
             break
 
+    extra_height = len(wrap_panel_rows(list(extra_lines or []), 56)) if extra_lines else 0
+    max_visible = max(4, min(14, terminal_height() - extra_height - 10))
+    item_offset = max(0, min(selected, max(0, len(items) - max_visible)))
+
     while True:
-        draw_menu(title, items, selected, footer, extra_lines)
+        if selected < item_offset:
+            item_offset = selected
+        elif selected >= item_offset + max_visible:
+            item_offset = selected - max_visible + 1
+        controls = "W/S or ↑/↓ move | A/D or ←/→ page | Z/Enter select | B/X/Esc/Q cancel"
+        context_footer = f"{footer} | {controls}" if footer else controls
+        draw_menu(
+            title,
+            items,
+            selected,
+            context_footer,
+            extra_lines,
+            item_offset=item_offset,
+            max_visible_items=max_visible,
+        )
         key = normalize_key(read_key())
 
-        if key in ["\t", "\x1b", "q", "x"]:
+        if key in ["\t", "\x1b", "q", "x", "b"]:
             return None
 
-        if key in ["w", "UP", "a", "LEFT"]:
+        if key in ["w", "UP"]:
             selected = (selected - 1) % len(items)
-        elif key in ["s", "DOWN", "d", "RIGHT"]:
+        elif key in ["s", "DOWN"]:
             selected = (selected + 1) % len(items)
+        elif key in ["a", "LEFT", "PGUP"]:
+            selected = max(0, selected - max_visible)
+        elif key in ["d", "RIGHT", "PGDN"]:
+            selected = min(len(items) - 1, selected + max_visible)
+        elif key == "HOME":
+            selected = 0
+        elif key == "END":
+            selected = len(items) - 1
         elif key in MENU_CONFIRM_KEYS:
             if items[selected].enabled:
                 return items[selected]
@@ -278,32 +440,42 @@ def compact_menu_select(game, title: str, items: List[MenuItem], footer: str = "
         if item.enabled:
             selected = i
             break
+    max_visible = max(4, min(8, terminal_height() - 22))
+    item_offset = max(0, min(selected, max(0, len(items) - max_visible)))
 
     while True:
+        if selected < item_offset:
+            item_offset = selected
+        elif selected >= item_offset + max_visible:
+            item_offset = selected - max_visible + 1
         game.draw()
         print()
-        print(f"+- {title} " + "-" * max(1, 54 - len(title)))
-        for i, item in enumerate(items):
-            cursor = ">" if i == selected else " "
-            status = "" if item.enabled else " [unavailable]"
-            label = item.label if item.enabled else colorize(item.label, C.DIM)
-            print(f"| {cursor} {label}{status}")
-        print("+" + "-" * 60)
-        selected_hint = items[selected].hint if 0 <= selected < len(items) else ""
         context_footer = (
-            footer
-            or "Arrow keys/WASD move | Z/Enter select | X/Esc/Q cancel"
+            f"{footer} | Arrow keys/WASD move | Z/Enter select | B/X/Esc/Q cancel"
+            if footer
+            else "Arrow keys/WASD move | Z/Enter select | B/X/Esc/Q cancel"
         )
-        for line in menu_context_lines(selected_hint, context_footer, 60):
-            print(line)
+        print("\n".join(menu_render_lines(
+            title,
+            items,
+            selected,
+            context_footer,
+            width=min(60, max(24, terminal_width() - 2)),
+            item_offset=item_offset,
+            max_visible_items=max_visible,
+        )))
 
         key = normalize_key(read_key())
-        if key in ["\t", "\x1b", "q", "x"]:
+        if key in ["\t", "\x1b", "q", "x", "b"]:
             return None
-        if key in ["w", "UP", "a", "LEFT"]:
+        if key in ["w", "UP"]:
             selected = (selected - 1) % len(items)
-        elif key in ["s", "DOWN", "d", "RIGHT"]:
+        elif key in ["s", "DOWN"]:
             selected = (selected + 1) % len(items)
+        elif key in ["a", "LEFT", "PGUP"]:
+            selected = max(0, selected - max_visible)
+        elif key in ["d", "RIGHT", "PGDN"]:
+            selected = min(len(items) - 1, selected + max_visible)
         elif key in MENU_CONFIRM_KEYS:
             if items[selected].enabled:
                 return items[selected]
@@ -350,12 +522,18 @@ __all__ = [
     'pad_to',
     'strip_ansi',
     'visible_text_len',
+    'meter_text',
+    'status_chip',
+    'wrap_status_chips',
+    'style_labeled_row',
     'fit_text',
     'wrap_panel_row',
     'wrap_panel_rows',
     'dynamic_panel_width_for_text',
     'MenuItem',
     'draw_menu',
+    'framed_row',
+    'menu_render_lines',
     'menu_context_lines',
     'menu_select',
     'text_entry_menu',

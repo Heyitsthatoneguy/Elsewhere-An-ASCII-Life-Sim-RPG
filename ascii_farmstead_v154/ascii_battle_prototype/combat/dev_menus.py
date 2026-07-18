@@ -13,7 +13,7 @@ def render_main_menu(game: object) -> None:
         game.render_home_menu(width)
         return
 
-    print(c("ASCII Tactical Combat Prototype v113", Style.BOLD, Style.BRIGHT_WHITE))
+    print(c("Elsewhere: Tactical Combat", Style.BOLD, Style.BRIGHT_WHITE))
     print(c("SETUP / " + game.main_menu_mode.upper(), Style.BOLD, Style.BRIGHT_YELLOW))
     print("-" * width)
     print("X/Esc: Back | Home: Home | H: Help | Q: Quit")

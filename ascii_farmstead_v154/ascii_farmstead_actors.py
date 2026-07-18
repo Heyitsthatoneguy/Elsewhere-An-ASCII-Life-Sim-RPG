@@ -15,6 +15,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
 from ascii_farmstead_data import CROP_DATA
 from ascii_farmstead_state import Crop, quality_item_name
 from ascii_farmstead_support import C, colorize
+from ascii_farmstead_visuals import actor_style
 
 
 Position = Tuple[int, int]
@@ -119,6 +120,9 @@ class ActorNavigationMixin:
         "TownHallInterior",
         "MarketRowInterior",
         "MuseumInterior",
+        "ProceduralSettlementInterior",
+        "WildernessOutpost",
+        "WildernessStructure",
     }
     TRAVEL_FOLLOWER_ADVENTURE_LOCATIONS = {
         "Mine",
@@ -133,6 +137,10 @@ class ActorNavigationMixin:
         "animal_care": "Care for animals",
         "gather_forage": "Gather forage",
         "clear_debris": "Clear farm debris",
+        "route_guard": "Guard a trade route",
+        "caravan_driver": "Drive a caravan",
+        "regional_courier": "Carry regional dispatches",
+        "trade_representative": "Represent a trade route",
     }
     TRAVEL_FOLLOWER_JOB_PROFILES = {
         "plant_seeds": {
@@ -174,6 +182,38 @@ class ActorNavigationMixin:
             "output": "foraged supplies",
             "benefit": "adds a trickle of useful wilderness goods without a full outing",
             "training": "Foraging",
+        },
+        "route_guard": {
+            "title": "Route Guard",
+            "category": "Regional Trade",
+            "duties": ("patrol caravan camps", "scout unsafe road", "protect cargo and travelers"),
+            "output": "safer caravan journeys",
+            "benefit": "reduces disruptions and helps stranded caravans recover sooner",
+            "training": "Adventure",
+        },
+        "caravan_driver": {
+            "title": "Caravan Driver",
+            "category": "Regional Trade",
+            "duties": ("maintain wagons", "set a safe pace", "choose stable crossings"),
+            "output": "reliable caravan movement",
+            "benefit": "raises route reliability and operating income",
+            "training": "Practical",
+        },
+        "regional_courier": {
+            "title": "Regional Courier",
+            "category": "Regional Trade",
+            "duties": ("carry manifests", "deliver route news", "coordinate terminal schedules"),
+            "output": "faster regional communication",
+            "benefit": "improves route development and commercial coordination",
+            "training": "Social",
+        },
+        "trade_representative": {
+            "title": "Trade Representative",
+            "category": "Regional Trade",
+            "duties": ("negotiate orders", "track shortages", "maintain terminal relationships"),
+            "output": "stronger market agreements",
+            "benefit": "raises route income and supports destination growth",
+            "training": "Social",
         },
         "clear_debris": {
             "title": "Groundskeeper",
@@ -218,6 +258,13 @@ class ActorNavigationMixin:
         color = self.FARM_ANIMAL_COLORS.get(species, C.CROP_READY)
         if animal.get("sick") or int(animal.get("health", 100) or 100) < 35:
             color = C.DIM
+        symbol, color = actor_style(
+            "farm_animal",
+            symbol,
+            role=species,
+            base_color=color,
+            high_contrast=bool(getattr(self.state, "high_contrast_enabled", False)),
+        )
         return colorize(symbol, color)
 
     def farm_animal_actor_description(self, animal: Dict[str, object]) -> str:
@@ -226,7 +273,9 @@ class ActorNavigationMixin:
         activity = str(animal.get("activity", "resting"))
         trait = str(animal.get("trait", "Gentle"))
         mood = self.animal_mood(animal)
-        return f"{name} the {species} [{trait}] is {activity}. Mood: {mood}."
+        stage = self.farm_animal_growth_stage(animal)
+        hearts = self.farm_animal_affection_hearts(animal)
+        return f"{name} the {stage.lower()} {species} [{trait}] is {activity}. Mood: {mood}; bond {hearts}/10 hearts."
 
     def farm_animal_home_anchor(self, animal: Dict[str, object]) -> Optional[Tuple[str, int, int]]:
         building_key = str(animal.get("building_key", "") or "")
@@ -297,16 +346,23 @@ class ActorNavigationMixin:
     def farm_animal_should_be_outside(self, animal: Dict[str, object]) -> bool:
         if animal.get("sick") or int(animal.get("health", 100) or 100) < 25:
             return False
+        if str(animal.get("pasture_mode", "Auto")) == "Inside":
+            return False
         return 7 <= int(self.state.hour) < 18 and self.farm_animal_weather_allows_outside(animal)
 
     def farm_animal_roam_radius(self, animal: Dict[str, object]) -> int:
-        return {
+        radius = {
             "Chicken": 7,
             "Duck": 9,
             "Rabbit": 7,
             "Sheep": 10,
             "Cow": 11,
         }.get(str(animal.get("species", "Chicken")), 8)
+        if self.farm_animal_growth_stage(animal) == "Baby":
+            return max(3, radius // 2)
+        if self.farm_animal_growth_stage(animal) == "Young":
+            return max(4, radius - 2)
+        return radius
 
     def set_farm_animal_inside(self, animal: Dict[str, object], activity: str = "resting indoors"):
         animal["outside"] = False
@@ -385,6 +441,9 @@ class ActorNavigationMixin:
         position = self.farm_animal_actor_position(animal)
         if not position:
             return False
+        if int(animal.get("affection", 0)) >= 70 and str(animal.get("trait", "Gentle")) != "Skittish":
+            animal["activity"] = "greeting you affectionately"
+            return False
         player = (int(self.state.player_x), int(self.state.player_y))
         preferred = (position[0] - player[0], position[1] - player[1])
         serial = int(getattr(self, "_farm_animal_step_serial", 0)) + 1
@@ -453,7 +512,11 @@ class ActorNavigationMixin:
             return
 
         preferred: Optional[Position] = None
-        if trait == "Curious" and self.on_farm():
+        following_player = False
+        if int(animal.get("affection", 0)) >= 70 and self.on_farm() and manhattan_distance(position, player) <= 6:
+            preferred = (player[0] - position[0], player[1] - position[1])
+            following_player = True
+        elif trait == "Curious" and self.on_farm():
             preferred = (player[0] - position[0], player[1] - position[1])
         elif trait == "Skittish" and self.on_farm():
             preferred = (position[0] - player[0], position[1] - player[1])
@@ -471,7 +534,11 @@ class ActorNavigationMixin:
         )
         if step:
             animal["x"], animal["y"] = step
-            animal["activity"] = "wandering" if trait != "Playful" else "trotting around"
+            animal["activity"] = (
+                "following you"
+                if following_player
+                else ("wandering" if trait != "Playful" else "trotting around")
+            )
             self.farm_animal_apply_grazing(animal, rng=rng)
         else:
             animal["activity"] = "resting in the pasture"
@@ -650,6 +717,12 @@ class ActorNavigationMixin:
     def normalize_travel_followers(self) -> List[str]:
         limit = 3
         self.state.max_travel_followers = limit
+        movement_style = str(
+            getattr(self.state, "travel_follower_movement_style", "Adaptive") or "Adaptive"
+        ).title()
+        if movement_style not in {"Adaptive", "Formation", "Single File"}:
+            movement_style = "Adaptive"
+        self.state.travel_follower_movement_style = movement_style
         if not isinstance(getattr(self.state, "travel_follower_states", None), dict):
             self.state.travel_follower_states = {}
         if not isinstance(getattr(self.state, "travel_follower_ids", None), list):
@@ -882,7 +955,15 @@ class ActorNavigationMixin:
 
     def render_travel_follower(self, follower_id: str) -> str:
         data = self.travel_follower_data(follower_id)
-        return colorize(str(data.get("symbol", "@"))[:1], str(data.get("color", C.WATER)))
+        symbol, color = actor_style(
+            "follower",
+            str(data.get("symbol", "@"))[:1],
+            role=str(data.get("kind", "companion")),
+            base_color=str(data.get("color", C.WATER)),
+            detailed=bool(getattr(self.state, "detailed_glyphs_enabled", True)),
+            high_contrast=bool(getattr(self.state, "high_contrast_enabled", False)),
+        )
+        return colorize(symbol, color)
 
     def travel_follower_description(self, follower_id: str) -> str:
         data = self.travel_follower_data(follower_id)
@@ -1721,19 +1802,24 @@ class ActorNavigationMixin:
 
     def travel_follower_care_for_one_animal(self, follower_id: str) -> bool:
         self.normalize_farm_animals()
-        feed_available = self.state.inventory.get("Mixed Seeds", 0) > 0
+        feed_available = self.animal_feed_available() > 0
         for animal in self.state.farm_animals:
             needs_pet = not bool(animal.get("petted_today"))
             needs_feed = not bool(animal.get("fed"))
-            if not needs_pet and not (needs_feed and feed_available):
+            needs_brush = (
+                not bool(animal.get("brushed_today"))
+                and int(self.state.inventory.get("Grooming Brush", 0)) > 0
+            )
+            needs_clean = not bool(animal.get("shelter_cleaned_today"))
+            if not needs_pet and not needs_brush and not needs_clean and not (needs_feed and feed_available):
                 continue
             actions: List[str] = []
             if needs_feed and feed_available:
-                self.state.inventory["Mixed Seeds"] -= 1
+                self.consume_animal_feed(1)
                 animal["fed"] = True
                 animal["happiness"] = min(100, int(animal.get("happiness", 50)) + 8)
                 animal["health"] = min(100, int(animal.get("health", 100)) + 2)
-                feed_available = self.state.inventory.get("Mixed Seeds", 0) > 0
+                feed_available = self.animal_feed_available() > 0
                 actions.append("fed")
             if needs_pet:
                 trait = str(animal.get("trait", "Gentle"))
@@ -1747,6 +1833,15 @@ class ActorNavigationMixin:
                     int(animal.get("affection", 0)) + (5 if trait in {"Gentle", "Curious", "Playful"} else 3),
                 )
                 actions.append("petted")
+            if needs_brush:
+                animal["brushed_today"] = True
+                animal["happiness"] = min(100, int(animal.get("happiness", 50)) + 5)
+                animal["affection"] = min(100, int(animal.get("affection", 0)) + 2)
+                actions.append("brushed")
+            if needs_clean:
+                animal["shelter_cleaned_today"] = True
+                animal["health"] = min(100, int(animal.get("health", 100)) + 1)
+                actions.append("cleaned around")
             x = int(animal.get("x", 8))
             y = int(animal.get("y", 8))
             self.set_travel_follower_work_position(follower_id, x, y)
@@ -1756,7 +1851,7 @@ class ActorNavigationMixin:
             return True
         record = self.travel_follower_record(follower_id)
         if any(not bool(animal.get("fed")) for animal in self.state.farm_animals) and not feed_available:
-            record["activity"] = "waiting for Mixed Seeds to feed the animals"
+            record["activity"] = "waiting for Animal Feed or Mixed Seeds"
         else:
             record["activity"] = "finished caring for the animals today"
         return False
@@ -1810,6 +1905,9 @@ class ActorNavigationMixin:
             return self.travel_follower_gather_one_forage(follower_id)
         if task == "clear_debris":
             return self.travel_follower_clear_one_debris(follower_id)
+        if task in {"route_guard", "caravan_driver", "regional_courier", "trade_representative"}:
+            handler = getattr(self, "perform_trade_route_follower_work", None)
+            return bool(handler and handler(follower_id, task))
         return False
 
     def process_travel_follower_work_hour(self) -> None:
@@ -1875,17 +1973,39 @@ class ActorNavigationMixin:
         x: int,
         y: int,
         allow_player: bool = False,
+        occupied_positions: Optional[Set[Position]] = None,
     ) -> bool:
         if not self.in_active_bounds(x, y):
             return False
         if not allow_player and (x, y) == (int(self.state.player_x), int(self.state.player_y)):
             return False
-        occupying_follower = self.travel_follower_at(x, y)
-        if occupying_follower and occupying_follower != follower_id:
+        position = (int(x), int(y))
+        if occupied_positions is None:
+            occupying_follower = self.travel_follower_at(x, y)
+            if occupying_follower and occupying_follower != follower_id:
+                return False
+        elif position in occupied_positions:
             return False
         if self.town_npc_at(x, y):
             return False
-        return bool(self.passable(x, y, ignore_travel_follower_id=follower_id))
+        return bool(
+            self.passable(
+                x,
+                y,
+                ignore_travel_follower_id=follower_id,
+                ignore_all_travel_followers=occupied_positions is not None,
+            )
+        )
+
+    def travel_follower_occupied_positions(self, exclude_follower_id: str = "") -> Set[Position]:
+        occupied: Set[Position] = set()
+        for other_id in self.active_travel_follower_ids():
+            if str(other_id) == str(exclude_follower_id):
+                continue
+            position = self.travel_follower_position(other_id)
+            if position is not None:
+                occupied.add(position)
+        return occupied
 
     def travel_follower_formation_index(self, follower_id: str) -> int:
         try:
@@ -1900,6 +2020,81 @@ class ActorNavigationMixin:
             1: "Left flank",
             2: "Right flank",
         }.get(index, "Unassigned")
+
+    def travel_follower_movement_style(self) -> str:
+        style = str(
+            getattr(self.state, "travel_follower_movement_style", "Adaptive") or "Adaptive"
+        ).title()
+        return style if style in {"Adaptive", "Formation", "Single File"} else "Adaptive"
+
+    def travel_follower_effective_movement_style(self) -> str:
+        style = self.travel_follower_movement_style()
+        if style != "Adaptive":
+            return style
+        if self.on_farm() or self.on_town() or self.on_wilderness():
+            return "Formation"
+        return "Single File"
+
+    def travel_follower_single_file_offset(
+        self,
+        follower_id: str,
+        facing: Optional[str] = None,
+    ) -> Position:
+        distance = max(1, self.travel_follower_formation_index(follower_id) + 1)
+        facing = str(facing or getattr(self.state, "facing", "DOWN"))
+        behind = {
+            "UP": (0, 1),
+            "DOWN": (0, -1),
+            "LEFT": (1, 0),
+            "RIGHT": (-1, 0),
+        }.get(facing, (0, -1))
+        return behind[0] * distance, behind[1] * distance
+
+    def travel_follower_trail_positions(self) -> List[Position]:
+        location = str(self.state.location)
+        trail = getattr(self, "_travel_follower_player_trail", [])
+        if not isinstance(trail, list):
+            return []
+        positions: List[Position] = []
+        for entry in trail:
+            if not isinstance(entry, tuple) or len(entry) != 3 or str(entry[0]) != location:
+                continue
+            positions.append((int(entry[1]), int(entry[2])))
+        return positions
+
+    def record_travel_follower_player_step(self, previous_position: Position) -> None:
+        entry = (
+            str(self.state.location),
+            int(previous_position[0]),
+            int(previous_position[1]),
+        )
+        trail = getattr(self, "_travel_follower_player_trail", [])
+        if not isinstance(trail, list):
+            trail = []
+        if not trail or trail[0] != entry:
+            trail.insert(0, entry)
+        self._travel_follower_player_trail = trail[:16]
+
+    def clear_travel_follower_player_trail(self) -> None:
+        self._travel_follower_player_trail = []
+
+    def set_travel_follower_movement_style(self, style: str) -> bool:
+        style = str(style or "").title()
+        if style not in {"Adaptive", "Formation", "Single File"}:
+            self.set_message("Unknown companion movement style.")
+            return False
+        if style == self.travel_follower_movement_style():
+            self.set_message(f"Your group is already using {style.lower()} movement.")
+            return False
+        self.state.travel_follower_movement_style = style
+        self.reform_travel_follower_formation()
+        descriptions = {
+            "Adaptive": "spreads out in open areas and forms a line in confined spaces",
+            "Formation": "holds its rear and flank positions wherever space allows",
+            "Single File": "follows your exact path in a compact line",
+        }
+        self.autosave_with_message(f"Your group {descriptions[style]}.")
+        return True
 
     def travel_follower_formation_offset(
         self,
@@ -1919,10 +2114,18 @@ class ActorNavigationMixin:
 
     def travel_follower_formation_target(self, follower_id: str) -> Position:
         player = (int(self.state.player_x), int(self.state.player_y))
-        dx, dy = self.travel_follower_formation_offset(follower_id)
+        if self.travel_follower_effective_movement_style() == "Single File":
+            index = max(0, self.travel_follower_formation_index(follower_id))
+            trail = self.travel_follower_trail_positions()
+            if index < len(trail):
+                return trail[index]
+            dx, dy = self.travel_follower_single_file_offset(follower_id)
+        else:
+            dx, dy = self.travel_follower_formation_offset(follower_id)
         return player[0] + dx, player[1] + dy
 
     def reform_travel_follower_formation(self) -> None:
+        self.clear_travel_follower_player_trail()
         following = []
         for follower_id in self.active_travel_follower_ids():
             record = self.travel_follower_record(follower_id)
@@ -1961,7 +2164,10 @@ class ActorNavigationMixin:
     def nearest_travel_follower_position(self, follower_id: str) -> Optional[Position]:
         player = (int(self.state.player_x), int(self.state.player_y))
         preferred = self.travel_follower_formation_target(follower_id)
-        if self.travel_follower_tile_available(follower_id, *preferred):
+        occupied = self.travel_follower_occupied_positions(follower_id)
+        if self.travel_follower_tile_available(
+            follower_id, *preferred, occupied_positions=occupied
+        ):
             return preferred
         for radius in range(1, 7):
             candidates: List[Position] = []
@@ -1970,7 +2176,9 @@ class ActorNavigationMixin:
                     if abs(dx) + abs(dy) != radius:
                         continue
                     position = (player[0] + dx, player[1] + dy)
-                    if self.travel_follower_tile_available(follower_id, *position):
+                    if self.travel_follower_tile_available(
+                        follower_id, *position, occupied_positions=occupied
+                    ):
                         candidates.append(position)
             if candidates:
                 candidates.sort(key=lambda pos: (manhattan_distance(pos, preferred), pos[1], pos[0]))
@@ -2027,7 +2235,12 @@ class ActorNavigationMixin:
             ):
                 self.record_travel_follower_outing(follower_id)
 
-    def update_travel_followers_after_player_move(self) -> None:
+    def update_travel_followers_after_player_move(
+        self,
+        previous_player_position: Optional[Position] = None,
+    ) -> None:
+        if previous_player_position is not None:
+            self.record_travel_follower_player_step(previous_player_position)
         self.sync_travel_followers()
         player = (int(self.state.player_x), int(self.state.player_y))
         for follower_id in self.active_travel_follower_ids():
@@ -2042,30 +2255,71 @@ class ActorNavigationMixin:
             if position == preferred:
                 record["activity"] = f"holding the {self.travel_follower_formation_label(follower_id).lower()}"
                 continue
-            if self.travel_follower_tile_available(follower_id, *preferred):
+            occupied = self.travel_follower_occupied_positions(follower_id)
+            available = lambda x, y: self.travel_follower_tile_available(
+                follower_id,
+                x,
+                y,
+                occupied_positions=occupied,
+            )
+            if available(*preferred):
                 goals = [preferred]
             else:
                 goals = []
                 for dx, dy in CARDINAL_STEPS:
                     goal = (player[0] + dx, player[1] + dy)
-                    if self.travel_follower_tile_available(follower_id, *goal):
+                    if available(*goal):
                         goals.append(goal)
             if distance <= 1 and not goals:
                 record["activity"] = "keeping pace beside you"
                 continue
-            step = shortest_path_step(
-                position,
-                goals,
-                lambda x, y: self.travel_follower_tile_available(follower_id, x, y),
-                max_nodes=max(512, self.active_map_width() * self.active_map_height()),
-            )
-            if step:
+            moved = 0
+            movement_budget = 2 if distance >= 5 else 1
+            current = position
+            while moved < movement_budget and current not in goals:
+                step = shortest_path_step(
+                    current,
+                    goals,
+                    available,
+                    max_nodes=max(512, self.active_map_width() * self.active_map_height()),
+                )
+                if not step:
+                    break
+                current = step
                 record["x"], record["y"] = int(step[0]), int(step[1])
-                record["activity"] = "following you"
+                moved += 1
+            if moved:
+                if movement_budget > 1:
+                    record["activity"] = "catching up with you"
+                elif self.travel_follower_effective_movement_style() == "Single File":
+                    record["activity"] = "following your path"
+                else:
+                    record["activity"] = "following you"
             elif distance > 6:
                 self.recover_travel_follower(follower_id)
             else:
                 record["activity"] = "finding a path to you"
+
+    def yield_travel_follower_to_player(self, follower_id: str) -> bool:
+        follower_id = str(follower_id)
+        record = self.travel_follower_record(follower_id)
+        if (
+            str(record.get("mode", "home")) != "follow"
+            or str(record.get("location", "")) != str(self.state.location)
+        ):
+            return False
+        destination = (int(self.state.player_x), int(self.state.player_y))
+        occupied = self.travel_follower_occupied_positions(follower_id)
+        if not self.travel_follower_tile_available(
+            follower_id,
+            *destination,
+            allow_player=True,
+            occupied_positions=occupied,
+        ):
+            return False
+        record["x"], record["y"] = destination
+        record["activity"] = "stepping aside for you"
+        return True
 
     def regroup_travel_followers(self) -> bool:
         active = self.active_travel_follower_ids()
@@ -2191,7 +2445,75 @@ class ActorNavigationMixin:
         animal["happiness"] = min(100, int(animal.get("happiness", 50)) + (8 if trait in ["Gentle", "Playful"] else 5))
         animal["affection"] = min(100, int(animal.get("affection", 0)) + (6 if trait in ["Gentle", "Curious", "Playful"] else 3))
         animal["activity"] = "enjoying your attention"
-        self.autosave_with_message(f"Pet {animal.get('name')} the {animal.get('species')}.")
+        response = {
+            "Gentle": "leans into your hand",
+            "Skittish": "hesitates, then relaxes",
+            "Playful": "bounces around you",
+            "Greedy": "checks your pockets afterward",
+            "Calm": "closes their eyes contentedly",
+            "Stubborn": "pretends not to care",
+            "Curious": "sniffs your sleeve",
+            "Sleepy": "gives a pleased little yawn",
+        }.get(trait, "seems pleased")
+        self.autosave_with_message(
+            f"You pet {animal.get('name')} the {animal.get('species')}; {animal.get('name')} {response}."
+        )
+        return True
+
+    def hand_feed_single_farm_animal(self, animal: Dict[str, object]) -> bool:
+        if animal.get("hand_fed_today"):
+            self.set_message(f"{animal.get('name', 'The animal')} has already been hand-fed today.")
+            return False
+        if not self.consume_animal_feed(1):
+            self.set_message("You need Animal Feed or Mixed Seeds.")
+            return False
+        trait = str(animal.get("trait", "Gentle"))
+        animal["fed"] = True
+        animal["hand_fed_today"] = True
+        animal["happiness"] = min(100, int(animal.get("happiness", 50)) + (12 if trait == "Greedy" else 9))
+        animal["affection"] = min(100, int(animal.get("affection", 0)) + (5 if trait in {"Gentle", "Greedy"} else 3))
+        animal["health"] = min(100, int(animal.get("health", 100)) + 2)
+        animal["activity"] = "eating from your hand"
+        self.autosave_with_message(f"You hand-feed {animal.get('name')}. The individual attention strengthens your bond.")
+        return True
+
+    def brush_single_farm_animal(self, animal: Dict[str, object]) -> bool:
+        if int(self.state.inventory.get("Grooming Brush", 0)) <= 0:
+            self.set_message("Buy a Grooming Brush from the Animal Store first.")
+            return False
+        if animal.get("brushed_today"):
+            self.set_message(f"{animal.get('name', 'The animal')} is already clean and brushed today.")
+            return False
+        species = str(animal.get("species", "Chicken"))
+        trait = str(animal.get("trait", "Gentle"))
+        animal["brushed_today"] = True
+        animal["happiness"] = min(100, int(animal.get("happiness", 50)) + (9 if species in {"Cow", "Sheep"} else 6))
+        animal["affection"] = min(100, int(animal.get("affection", 0)) + (5 if trait != "Skittish" else 3))
+        animal["health"] = min(100, int(animal.get("health", 100)) + 2)
+        animal["activity"] = "freshly groomed"
+        self.autosave_with_message(f"You brush {animal.get('name')} until their coat is clean and comfortable.")
+        return True
+
+    def set_single_farm_animal_pasture_mode(self, animal: Dict[str, object], outside: bool) -> bool:
+        name = str(animal.get("name", "The animal"))
+        if outside:
+            if not (7 <= int(self.state.hour) < 18):
+                self.set_message(f"It is not a safe pasture hour for {name}.")
+                return False
+            if not self.farm_animal_weather_allows_outside(animal):
+                self.set_message(f"The weather is unsafe for {name} to go outside.")
+                return False
+            if animal.get("sick") or int(animal.get("health", 100)) < 25:
+                self.set_message(f"{name} needs indoor rest and treatment first.")
+                return False
+            animal["pasture_mode"] = "Auto"
+            if not self.farm_animal_actor_position(animal):
+                self.spawn_farm_animal_outside(animal)
+            self.autosave_with_message(f"You let {name} out to graze during safe daylight.")
+            return True
+        animal["pasture_mode"] = "Inside"
+        self.set_farm_animal_inside(animal, "resting safely indoors")
+        self.autosave_with_message(f"You call {name} back into shelter.")
         return True
 
     def interact_with_farm_animal(self, animal: Dict[str, object]):

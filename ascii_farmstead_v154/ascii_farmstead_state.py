@@ -44,6 +44,7 @@ from ascii_farmstead_data import (
     TOWN_DEVELOPMENT_STAGE_LABELS,
     TOWN_DOORS,
     TOWN_RESTORATION_PROJECT_DATA,
+    AUTHORED_TOWN_RESIDENCE_DATA,
     VALID_PLAYER_SEXES,
 )
 from ascii_farmstead_helpers import (
@@ -483,9 +484,13 @@ class GameState:
     month: int = 3
     day: int = 1
     year: int = 1
-    hour: int = 6
+    hour: int = 7
     minute: int = 0
+    wake_hour: int = 7
     stamina: int = 100
+    natural_stamina_recovery_minutes: int = 0
+    natural_health_recovery_minutes: int = 0
+    natural_health_recovery_delay_minutes: int = 0
     money: int = 0
     player_name: str = "Farmer"
     player_sex: str = "Female"
@@ -509,6 +514,7 @@ class GameState:
     player_x: int = 8
     player_y: int = 9
     location: str = "Farm"
+    current_authored_residence_id: str = ""
     facing: str = "DOWN"
     tool_target_mode: str = "FRONT"
     live_time_enabled: bool = True
@@ -519,6 +525,9 @@ class GameState:
     selected_seed: str = "Turnip"
     inventory: Dict[str, int] = None
     storage_inventory: Dict[str, int] = None
+    backpack_upgrades: int = 0
+    world_containers: Dict[str, Dict[str, object]] = None
+    container_storage_migrated: bool = False
     placed_objects: Dict[str, str] = None
     fertilized_tiles: Dict[str, bool] = None
     owned_tools: List[str] = None
@@ -531,6 +540,17 @@ class GameState:
     wilderness_chunk_x: int = 0
     wilderness_chunk_y: int = 0
     wilderness_chunks_visited: int = 1
+    current_wilderness_outpost_key: str = ""
+    wilderness_outpost_return_x: int = 0
+    wilderness_outpost_return_y: int = 0
+    wilderness_outpost_door_side: str = "south"
+    current_wilderness_structure_key: str = ""
+    wilderness_structure_return_x: int = 0
+    wilderness_structure_return_y: int = 0
+    wilderness_structure_door_side: str = "south"
+    wilderness_boat_owned: bool = False
+    wilderness_boating: bool = False
+    wilderness_boat_rental_day: str = ""
     wilderness_animals_seen: int = 0
     owned_wilderness_claims: Dict[str, Dict[str, object]] = None
     wilderness_settlements: Dict[str, Dict[str, object]] = None
@@ -562,6 +582,7 @@ class GameState:
     town_npc_relationship_milestones: Dict[str, List[str]] = None
     town_npc_recent_dialogue_ids: Dict[str, List[str]] = None
     town_npc_last_proposal_day: Dict[str, str] = None
+    regional_town_life: Dict[str, object] = None
     dating_npc_ids: List[str] = None
     engaged_npc_id: str = ""
     engagement_month: int = 0
@@ -603,6 +624,7 @@ class GameState:
     manual_party_member_ids: List[str] = None
     travel_follower_ids: List[str] = None
     max_travel_followers: int = 3
+    travel_follower_movement_style: str = "Adaptive"
     travel_follower_states: Dict[str, Dict[str, object]] = None
     combat_party_progress: Dict[str, Dict[str, object]] = None
     combat_campaign_inventory: Dict[str, int] = None
@@ -672,10 +694,14 @@ class GameState:
     current_dungeon_floor: int = 1
     wilderness_dungeons_discovered: int = 0
     wilderness_dungeon_state: Dict[str, Dict[str, object]] = None
+    wilderness_field_combat: Dict[str, object] = None
+    wilderness_field_loot: Dict[str, List[Dict[str, object]]] = None
+    wilderness_combat_encounters: Dict[str, Dict[str, object]] = None
     wilderness_strongholds_cleared: int = 0
     wilderness_stronghold_state: Dict[str, Dict[str, object]] = None
     wilderness_poi_state: Dict[str, Dict[str, object]] = None
     mine_floor: int = 1
+    mine_return_location: str = "Farm"
     deepest_mine_floor: int = 1
     unlocked_mine_elevators: List[int] = None
     cleared_mine_floors: List[int] = None
@@ -717,6 +743,9 @@ class GameState:
     weather: str = "Sunny"
     message: str = "Welcome to Elsewhere. Press H for help or K for calendar."
     color_enabled: bool = True
+    ambient_visuals_enabled: bool = True
+    high_contrast_enabled: bool = False
+    detailed_glyphs_enabled: bool = True
     shop_auto_open_enabled: bool = True
     shop_menu_suppressed_until_exit: bool = False
     bin_auto_open_enabled: bool = True
@@ -746,11 +775,15 @@ class GameState:
         try:
             self.hour = max(0, min(23, int(self.hour)))
         except (TypeError, ValueError):
-            self.hour = 6
+            self.hour = 7
         try:
             self.minute = max(0, min(59, int(self.minute)))
         except (TypeError, ValueError):
             self.minute = 0
+        try:
+            self.wake_hour = max(4, min(12, int(self.wake_hour)))
+        except (TypeError, ValueError):
+            self.wake_hour = 7
         self.time_speed = str(self.time_speed)
         if self.time_speed not in TIME_SPEED_OPTIONS:
             self.time_speed = DEFAULT_TIME_SPEED
@@ -758,6 +791,16 @@ class GameState:
             self.stamina = max(0, int(self.stamina))
         except (TypeError, ValueError):
             self.stamina = 100
+        for attr, maximum in (
+            ("natural_stamina_recovery_minutes", 4),
+            ("natural_health_recovery_minutes", 19),
+            ("natural_health_recovery_delay_minutes", 30),
+        ):
+            try:
+                value = max(0, min(maximum, int(getattr(self, attr, 0))))
+            except (TypeError, ValueError):
+                value = 0
+            setattr(self, attr, value)
         try:
             self.money = max(0, int(self.money))
         except (TypeError, ValueError):
@@ -773,6 +816,14 @@ class GameState:
         self.location = str(self.location or "Farm")
         if self.location not in VALID_GAME_LOCATIONS:
             self.location = "Farm"
+        self.current_authored_residence_id = str(
+            self.current_authored_residence_id or ""
+        )
+        if self.current_authored_residence_id not in AUTHORED_TOWN_RESIDENCE_DATA:
+            self.current_authored_residence_id = ""
+            if self.location == "TownResidenceInterior":
+                self.location = "Town"
+                self.player_x, self.player_y = 57, 22
         self.facing = str(self.facing or "DOWN").upper()
         if self.facing not in {"UP", "DOWN", "LEFT", "RIGHT"}:
             self.facing = "DOWN"
@@ -789,6 +840,13 @@ class GameState:
         )
         if self.storage_inventory is None:
             self.storage_inventory = {}
+        try:
+            self.backpack_upgrades = max(0, int(self.backpack_upgrades or 0))
+        except (TypeError, ValueError):
+            self.backpack_upgrades = 0
+        if not isinstance(self.world_containers, dict):
+            self.world_containers = {}
+        self.container_storage_migrated = bool(self.container_storage_migrated)
         if self.placed_objects is None:
             self.placed_objects = {}
         if self.fertilized_tiles is None:
@@ -841,6 +899,156 @@ class GameState:
             self.town_npc_last_proposal_day = {}
         if not isinstance(self.town_npc_last_proposal_day, dict):
             self.town_npc_last_proposal_day = {}
+        if not isinstance(self.regional_town_life, dict):
+            self.regional_town_life = {}
+        raw_life = self.regional_town_life
+        visitors = []
+        for record in raw_life.get("visitors", []) if isinstance(raw_life.get("visitors", []), list) else []:
+            if not isinstance(record, dict):
+                continue
+            try:
+                x, y = int(record.get("x", 58)), int(record.get("y", 1))
+                interior_x = int(record.get("interior_x", 27))
+                interior_y = int(record.get("interior_y", 18))
+                route_slot = max(0, min(7, int(record.get("route_slot", len(visitors))) or 0))
+                origin_chunk_x = int(record.get("origin_chunk_x", 0))
+                origin_chunk_y = int(record.get("origin_chunk_y", 0))
+                origin_world_x = int(record.get("origin_world_x", 0))
+                origin_world_y = int(record.get("origin_world_y", 0))
+                distance_chunks = max(0, min(999, int(record.get("distance_chunks", 0))))
+                arrival_hour = max(6, min(20, int(record.get("arrival_hour", 8))))
+                delay_days = max(0, min(7, int(record.get("delay_days", 0))))
+                travel_days = max(1, min(7, int(record.get("travel_days", 1))))
+            except Exception:
+                x, y, interior_x, interior_y, route_slot = 58, 1, 27, 18, len(visitors)
+                origin_chunk_x = origin_chunk_y = origin_world_x = origin_world_y = 0
+                distance_chunks, arrival_hour, delay_days, travel_days = 0, 8, 0, 1
+            visitors.append({
+                "id": str(record.get("id", ""))[:80],
+                "name": str(record.get("name", "Traveler"))[:60],
+                "role": str(record.get("role", "Traveler"))[:40],
+                "origin": str(record.get("origin", "the regional roads"))[:80],
+                "purpose": str(record.get("purpose", "visiting town"))[:160],
+                "symbol": "@",
+                "regional_visitor": True,
+                "x": max(0, min(111, x)),
+                "y": max(0, min(47, y)),
+                "interior_x": max(0, min(54, interior_x)),
+                "interior_y": max(0, min(20, interior_y)),
+                "runtime_location": str(record.get("runtime_location", "Town"))[:40],
+                "activity": str(record.get("activity", "arriving by road"))[:180],
+                "facing": str(record.get("facing", "DOWN"))[:8],
+                "route_slot": route_slot,
+                "origin_id": str(record.get("origin_id", ""))[:100],
+                "origin_kind": str(record.get("origin_kind", "road_service"))[:40],
+                "origin_chunk_x": origin_chunk_x,
+                "origin_chunk_y": origin_chunk_y,
+                "origin_world_x": origin_world_x,
+                "origin_world_y": origin_world_y,
+                "distance_chunks": distance_chunks,
+                "route_condition": str(record.get("route_condition", "Open"))[:40],
+                "arrival_hour": arrival_hour,
+                "delay_days": delay_days,
+                "travel_days": travel_days,
+                "origin_exports": [str(item)[:60] for item in (record.get("origin_exports", []) if isinstance(record.get("origin_exports", []), list) else [])][:8],
+                "origin_demand": str(record.get("origin_demand", ""))[:60],
+                "regional_news": str(record.get("regional_news", ""))[:220],
+            })
+        bonds = {}
+        for visitor_id, value in (raw_life.get("visitor_bonds", {}) if isinstance(raw_life.get("visitor_bonds", {}), dict) else {}).items():
+            try:
+                bonds[str(visitor_id)[:80]] = max(-100, min(250, int(value)))
+            except Exception:
+                continue
+        memories = {}
+        for visitor_id, rows in (raw_life.get("visitor_memories", {}) if isinstance(raw_life.get("visitor_memories", {}), dict) else {}).items():
+            if isinstance(rows, list):
+                memories[str(visitor_id)[:80]] = [str(row)[:180] for row in rows if str(row or "").strip()][-8:]
+        social_links = {}
+        for pair_id, record in (raw_life.get("npc_social_links", {}) if isinstance(raw_life.get("npc_social_links", {}), dict) else {}).items():
+            if not isinstance(record, dict):
+                continue
+            try:
+                score = max(-20, min(20, int(record.get("score", 0))))
+            except Exception:
+                score = 0
+            try:
+                meetings = max(0, min(999, int(record.get("meetings", 0) or 0)))
+            except Exception:
+                meetings = 0
+            social_links[str(pair_id)[:180]] = {
+                "score": score,
+                "last_day": str(record.get("last_day", ""))[:32],
+                "meetings": meetings,
+            }
+        journeys = {}
+        for journey_id, record in (raw_life.get("journeys", {}) if isinstance(raw_life.get("journeys", {}), dict) else {}).items():
+            if not isinstance(record, dict):
+                continue
+            try:
+                values = {
+                    "origin_chunk_x": int(record.get("origin_chunk_x", 0)),
+                    "origin_chunk_y": int(record.get("origin_chunk_y", 0)),
+                    "arrival_day_number": max(0, int(record.get("arrival_day_number", 0))),
+                    "arrival_hour": max(6, min(20, int(record.get("arrival_hour", 8)))),
+                    "return_start_day_number": max(0, int(record.get("return_start_day_number", 0))),
+                    "return_end_day_number": max(0, int(record.get("return_end_day_number", 0))),
+                }
+            except Exception:
+                continue
+            journeys[str(journey_id)[:100]] = {
+                "visitor_id": str(record.get("visitor_id", journey_id))[:100],
+                "name": str(record.get("name", "Traveler"))[:60],
+                "role": str(record.get("role", "Traveler"))[:40],
+                "origin_id": str(record.get("origin_id", ""))[:100],
+                "origin_name": str(record.get("origin_name", "Regional Road"))[:80],
+                "origin_kind": str(record.get("origin_kind", "road_service"))[:40],
+                "status": str(record.get("status", "visiting"))[:24],
+                "route_condition": str(record.get("route_condition", "Open"))[:40],
+                **values,
+            }
+        resident_trips = {}
+        for npc_id, record in (raw_life.get("resident_trips", {}) if isinstance(raw_life.get("resident_trips", {}), dict) else {}).items():
+            if not isinstance(record, dict):
+                continue
+            try:
+                return_day = max(0, int(record.get("return_day_number", 0)))
+                chunk_x, chunk_y = int(record.get("chunk_x", 0)), int(record.get("chunk_y", 0))
+                depart_day = max(0, int(record.get("depart_day_number", 0) or 0))
+            except Exception:
+                continue
+            resident_trips[str(npc_id)[:80]] = {
+                "destination_id": str(record.get("destination_id", ""))[:100],
+                "destination_name": str(record.get("destination_name", "Regional Roads"))[:80],
+                "destination_kind": str(record.get("destination_kind", "road_service"))[:40],
+                "chunk_x": chunk_x,
+                "chunk_y": chunk_y,
+                "depart_day_number": depart_day,
+                "return_day_number": return_day,
+                "expected_return": str(record.get("expected_return", ""))[:80],
+                "purpose": str(record.get("purpose", "regional errand"))[:160],
+                "route_condition": str(record.get("route_condition", "Open"))[:40],
+            }
+        self.regional_town_life = {
+            "day_key": str(raw_life.get("day_key", ""))[:32],
+            "occasion_id": str(raw_life.get("occasion_id", ""))[:80],
+            "visitors": visitors[:8],
+            "visitor_bonds": bonds,
+            "visitor_last_talk_day": {
+                str(key)[:80]: str(value)[:32]
+                for key, value in (raw_life.get("visitor_last_talk_day", {}) if isinstance(raw_life.get("visitor_last_talk_day", {}), dict) else {}).items()
+            },
+            "visitor_memories": memories,
+            "visitor_purchase_counts": {
+                str(key)[:180]: max(0, min(9, int(value)))
+                for key, value in (raw_life.get("visitor_purchase_counts", {}) if isinstance(raw_life.get("visitor_purchase_counts", {}), dict) else {}).items()
+                if str(value).lstrip("-").isdigit()
+            },
+            "npc_social_links": social_links,
+            "journeys": journeys,
+            "resident_trips": resident_trips,
+            "event_log": [str(row)[:180] for row in (raw_life.get("event_log", []) if isinstance(raw_life.get("event_log", []), list) else [])][-24:],
+        }
         self.dating_npc_ids = clean_string_list(self.dating_npc_ids)
         self.engaged_npc_id = str(self.engaged_npc_id or "")
         self.spouse_npc_id = str(self.spouse_npc_id or "")
@@ -982,6 +1190,11 @@ class GameState:
         self.manual_party_member_ids = clean_party_ids(self.manual_party_member_ids)
         self.max_travel_followers = 3
         self.travel_follower_ids = clean_party_ids(self.travel_follower_ids)[: self.max_travel_followers]
+        self.travel_follower_movement_style = str(
+            self.travel_follower_movement_style or "Adaptive"
+        ).title()
+        if self.travel_follower_movement_style not in {"Adaptive", "Formation", "Single File"}:
+            self.travel_follower_movement_style = "Adaptive"
         if not isinstance(self.travel_follower_states, dict):
             self.travel_follower_states = {}
         cleaned_follower_states: Dict[str, Dict[str, object]] = {}
@@ -1616,6 +1829,33 @@ class GameState:
             self.wilderness_chunks_visited = max(1, int(self.wilderness_chunks_visited))
         except Exception:
             self.wilderness_chunks_visited = 1
+        self.current_wilderness_outpost_key = str(self.current_wilderness_outpost_key or "")
+        self.current_wilderness_structure_key = str(self.current_wilderness_structure_key or "")
+        self.wilderness_boat_owned = bool(self.wilderness_boat_owned)
+        self.wilderness_boating = bool(self.wilderness_boating)
+        self.wilderness_boat_rental_day = str(self.wilderness_boat_rental_day or "")
+        try:
+            self.wilderness_structure_return_x = int(self.wilderness_structure_return_x)
+            self.wilderness_structure_return_y = int(self.wilderness_structure_return_y)
+        except (TypeError, ValueError):
+            self.wilderness_structure_return_x = 0
+            self.wilderness_structure_return_y = 0
+        self.wilderness_structure_door_side = str(
+            getattr(self, "wilderness_structure_door_side", "south") or "south"
+        ).lower()
+        if self.wilderness_structure_door_side not in {"north", "south", "west", "east"}:
+            self.wilderness_structure_door_side = "south"
+        try:
+            self.wilderness_outpost_return_x = int(self.wilderness_outpost_return_x)
+            self.wilderness_outpost_return_y = int(self.wilderness_outpost_return_y)
+        except Exception:
+            self.wilderness_outpost_return_x = 0
+            self.wilderness_outpost_return_y = 0
+        self.wilderness_outpost_door_side = str(
+            getattr(self, "wilderness_outpost_door_side", "south") or "south"
+        ).lower()
+        if self.wilderness_outpost_door_side not in {"north", "south", "west", "east"}:
+            self.wilderness_outpost_door_side = "south"
         try:
             self.wilderness_animals_seen = max(0, int(self.wilderness_animals_seen))
         except Exception:
@@ -1742,6 +1982,11 @@ class GameState:
             self.wilderness_dungeons_discovered = max(0, int(self.wilderness_dungeons_discovered))
         except Exception:
             self.wilderness_dungeons_discovered = 0
+        self.mine_return_location = (
+            str(self.mine_return_location)
+            if str(self.mine_return_location) in {"Farm", "WildernessOrigin"}
+            else "Farm"
+        )
         if not isinstance(self.wilderness_dungeon_state, dict):
             self.wilderness_dungeon_state = {}
         else:
@@ -1750,6 +1995,31 @@ class GameState:
                 if isinstance(record, dict):
                     cleaned_dungeon_state[str(dungeon_key)] = dict(record)
             self.wilderness_dungeon_state = cleaned_dungeon_state
+        if not isinstance(self.wilderness_field_combat, dict):
+            self.wilderness_field_combat = {}
+        else:
+            self.wilderness_field_combat = dict(self.wilderness_field_combat)
+            self.wilderness_field_combat["active"] = bool(
+                self.wilderness_field_combat.get("active", False)
+            )
+            if str(self.location) != "Wilderness":
+                self.wilderness_field_combat["active"] = False
+        if not isinstance(self.wilderness_field_loot, dict):
+            self.wilderness_field_loot = {}
+        else:
+            self.wilderness_field_loot = {
+                str(key): [dict(pile) for pile in piles if isinstance(pile, dict)]
+                for key, piles in self.wilderness_field_loot.items()
+                if isinstance(piles, list)
+            }
+        if not isinstance(self.wilderness_combat_encounters, dict):
+            self.wilderness_combat_encounters = {}
+        else:
+            self.wilderness_combat_encounters = {
+                str(key): dict(record)
+                for key, record in self.wilderness_combat_encounters.items()
+                if isinstance(record, dict)
+            }
         try:
             self.wilderness_strongholds_cleared = max(0, int(self.wilderness_strongholds_cleared))
         except Exception:
@@ -2010,6 +2280,14 @@ def prepare_loaded_state_data(state_data: Dict[str, object]) -> Dict[str, object
 
     if state_data.get("location") not in VALID_GAME_LOCATIONS:
         state_data["location"] = "Farm"
+    residence_id = str(state_data.get("current_authored_residence_id", ""))
+    if residence_id not in AUTHORED_TOWN_RESIDENCE_DATA:
+        state_data["current_authored_residence_id"] = ""
+        if state_data.get("location") == "TownResidenceInterior":
+            state_data["location"] = "Town"
+            state_data["player_x"] = 57
+            state_data["player_y"] = 22
+            state_data["facing"] = "DOWN"
     location_building_id = town_building_id_for_location(str(state_data.get("location", "")))
     if location_building_id and location_building_id not in set(state_data.get("unlocked_town_buildings", [])):
         door = TOWN_DOORS.get(location_building_id, (41, 20))

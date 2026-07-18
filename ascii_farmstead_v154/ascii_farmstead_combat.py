@@ -6,6 +6,11 @@ from typing import Dict, List, Optional, Tuple
 from ascii_farmstead_data import FISH_DATA, FOOD_DATA
 
 
+NATURAL_STAMINA_RECOVERY_INTERVAL_MINUTES = 5
+NATURAL_HEALTH_RECOVERY_INTERVAL_MINUTES = 20
+NATURAL_HEALTH_RECOVERY_DELAY_MINUTES = 30
+
+
 COMBAT_WEAPON_DATA: Dict[str, Dict[str, object]] = {
     "Rusty Sword": {
         "id": "rusty_sword",
@@ -1913,6 +1918,7 @@ def grant_combat_exp(state: object, amount: int) -> Tuple[int, List[str]]:
 
 def apply_party_status_to_combat_state(state: object, result: object) -> Dict[str, int]:
     profile = farmstead_combat_profile(state)
+    previous_hp = max(1, _safe_int(profile.get("current_hp", 1), 1))
     player_name = str(profile["name"])
     party_status = getattr(result, "party_status", {}) or {}
     status = party_status.get(player_name)
@@ -1929,6 +1935,12 @@ def apply_party_status_to_combat_state(state: object, result: object) -> Dict[st
     focus = max(0, min(max_focus, _safe_int(status.get("mp", profile["focus"]), int(profile["focus"]))))
     state.combat_current_hp = hp
     state.combat_focus = focus
+    if hp < previous_hp:
+        state.natural_health_recovery_delay_minutes = max(
+            NATURAL_HEALTH_RECOVERY_DELAY_MINUTES,
+            _safe_int(getattr(state, "natural_health_recovery_delay_minutes", 0), 0),
+        )
+        state.natural_health_recovery_minutes = 0
     inventory = status.get("inventory", {})
     return {str(k): max(0, _safe_int(v, 0)) for k, v in inventory.items()} if isinstance(inventory, dict) else {}
 
@@ -2047,6 +2059,8 @@ def mine_battle_request_for_enemy(
             "farm_progression_keys": progression_keys,
             "farm_combat_campaign_inventory": {},
             "farm_combat_item_loadout_bonus": dict(getattr(state, "combat_item_loadout_bonus", {}) or {}),
+            "detailed_map_glyphs": bool(getattr(state, "detailed_glyphs_enabled", True)),
+            "high_contrast_visuals": bool(getattr(state, "high_contrast_enabled", False)),
         },
         world_flags_on_victory=[f"mine:floor:{int(floor)}:enemy_defeated"],
         world_flags_on_defeat=[f"mine:floor:{int(floor)}:party_defeated"],

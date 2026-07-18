@@ -10,6 +10,7 @@ entry point and save behavior.
 
 import random
 import textwrap
+import heapq
 from typing import Dict, List, Optional, Tuple
 
 from ascii_farmstead_data import *  # noqa: F403
@@ -26,8 +27,252 @@ from ascii_farmstead_support import (
     read_key,
 )
 from ascii_farmstead_ui import MenuItem, pad_to, text_entry_menu
+from ascii_farmstead_visuals import actor_style
 from ascii_battle_prototype.combat.classes import class_defs as tactical_class_defs
 
+
+AUTHORED_TOWN_INTERIOR_MAP_ATTRS = {
+    "GeneralStoreInterior": "general_store_map",
+    "BlacksmithInterior": "blacksmith_interior_map",
+    "LibraryInterior": "library_interior_map",
+    "MayorHouseInterior": "mayor_house_map",
+    "InnInterior": "inn_interior_map",
+    "FurnitureStoreInterior": "furniture_store_map",
+    "CarpenterStoreInterior": "carpenter_store_map",
+    "AnimalStoreInterior": "animal_store_map",
+    "ClinicInterior": "clinic_map",
+    "TownHallInterior": "town_hall_map",
+    "MarketRowInterior": "market_row_map",
+    "MuseumInterior": "museum_interior_map",
+}
+
+AUTHORED_TOWN_SERVICE_SPECS = {
+    "mira_seed": ("GeneralStoreInterior", "Shop", "buy_menu", "General Store closed."),
+    "brom_smith": ("BlacksmithInterior", "Forge service", "blacksmith_menu", "Blacksmith closed."),
+    "tess_reader": ("LibraryInterior", "Library services", "library_menu", "Library closed."),
+    "eli_carpenter": ("CarpenterStoreInterior", "Building service", "carpenter_menu", "Carpenter closed."),
+    "poppy_rancher": ("AnimalStoreInterior", "Animal store", "animal_store_menu", "Animal Store closed."),
+    "dr_ivy": ("ClinicInterior", "Clinic services", "clinic_menu", "Clinic closed."),
+    "mae_innkeeper": ("InnInterior", "Inn services", "inn_menu", "Inn services closed."),
+    "vera_vendor": ("MarketRowInterior", "Market stall", "market_row_menu", "Market Row closed."),
+    "mayor_ruth": ("TownHallInterior", "Town services", "town_hall_menu", "Town Hall closed."),
+}
+
+AUTHORED_TOWN_SERVICE_HOURS = {
+    "GeneralStoreInterior": "08:00-12:00, 14:00-17:00",
+    "BlacksmithInterior": "08:00-12:00, 14:00-17:00",
+    "LibraryInterior": "08:00-12:00, 14:00-17:00",
+    "CarpenterStoreInterior": "08:00-12:00, 14:00-17:00",
+    "AnimalStoreInterior": "08:00-12:00, 14:00-17:00",
+    "ClinicInterior": "08:00-12:00, 14:00-17:00",
+    "TownHallInterior": "08:00-12:00, 14:00-17:00",
+    "MarketRowInterior": "08:00-17:00",
+    "InnInterior": "06:00-12:00, 14:00-23:00",
+}
+
+REGIONAL_TOWN_VISITOR_ARCHETYPES = (
+    {"id": "elowen_maps", "name": "Elowen", "role": "Cartographer", "origin": "the western survey road", "purpose": "updating regional maps and exchanging route notes"},
+    {"id": "kaspar_trade", "name": "Kaspar", "role": "Traveling Merchant", "origin": "a northern caravan circuit", "purpose": "trading compact goods and comparing town prices"},
+    {"id": "suri_herbs", "name": "Suri", "role": "Herbalist", "origin": "the floodplain settlements", "purpose": "looking for remedies, seeds, and local plant knowledge"},
+    {"id": "oren_road", "name": "Oren", "role": "Pilgrim", "origin": "the eastern shrine road", "purpose": "walking between old waystones and recording acts of kindness"},
+    {"id": "lark_song", "name": "Lark", "role": "Performer", "origin": "the southern inn circuit", "purpose": "finding an audience and collecting regional songs"},
+    {"id": "vale_ranger", "name": "Vale", "role": "Ranger", "origin": "a distant field station", "purpose": "checking road safety and exchanging wilderness reports"},
+    {"id": "nadia_field", "name": "Nadia", "role": "Researcher", "origin": "the lakeside research route", "purpose": "documenting seasonal changes and interviewing residents"},
+    {"id": "bram_stone", "name": "Bram", "role": "Prospector", "origin": "the highland road", "purpose": "buying supplies and comparing geological finds"},
+    {"id": "iona_post", "name": "Iona", "role": "Courier", "origin": "the regional postal route", "purpose": "delivering letters and carrying news between settlements"},
+)
+
+# These are not generic profession slogans. They are concrete subjects an NPC
+# can expand on when the player asks about their work. Location, schedule,
+# weather, relationships, and recent events are layered on separately at
+# runtime, so a conversation can remain specific without becoming a giant set
+# of brittle pre-composed combinations.
+NPC_ROLE_CONVERSATION_INSIGHTS = {
+    "Mayor": (
+        "A town works when the clinic, roads, shops, and homes support one another instead of competing for the same attention.",
+        "I keep two lists: what residents ask for, and what their daily routes show they actually need.",
+        "Opening a building is easy compared with keeping it staffed, supplied, and worth visiting.",
+    ),
+    "Seed Seller": (
+        "I watch what people can water before I recommend what they should plant. A cheap seed is expensive if it dies in the ground.",
+        "Seed stock tells you what kind of season people expect, but their purchases tell you what they are afraid of.",
+        "I separate quick crops from long commitments so a farmer can plan around travel instead of abandoning a field halfway through.",
+    ),
+    "Blacksmith": (
+        "A good tool should save effort on the hundredth swing, not merely look impressive on the first.",
+        "Most broken tools arrive with the same problem: somebody kept working after the handle or edge started warning them.",
+        "Mine gear needs balance more than decoration. Fatigue causes more accidents than dull metal does.",
+    ),
+    "Carpenter": (
+        "I start with how people enter, turn, carry supplies, and leave. Walls come after the route makes sense.",
+        "A room earns its size by what happens inside it. Empty corners and blocked hallways are both failed measurements.",
+        "Repairs last longer when the building sheds water and foot traffic before either reaches the weak joints.",
+    ),
+    "Animal Keeper": (
+        "Animals settle into routines faster than people do, which makes changes in appetite or movement worth noticing early.",
+        "Feed, shelter, clean space, and calm handling matter every day. Affection works best when those basics are already reliable.",
+        "I match animals to the care a household can sustain, not merely to what looks appealing at the counter.",
+    ),
+    "Librarian": (
+        "A useful archive records why something changed, not only the date somebody approved it.",
+        "I compare schedules, maps, and firsthand accounts because official records have a habit of leaving ordinary people out.",
+        "The best reference is the one a tired person can still find quickly when the answer matters.",
+    ),
+    "Traveler": (
+        "A route is more than distance. Shelter, water, road condition, and who expects you at the other end all change its real cost.",
+        "I remember roads by decisions: where you turn before the floodplain, where you rest, and where pride makes people walk too far.",
+        "The safest shortcut is usually local knowledge somebody bothered to share.",
+    ),
+    "Doctor": (
+        "I ask what somebody was doing before they felt unwell. Work, sleep, weather, and food often explain more than the first symptom.",
+        "Recovery is part of the treatment. People keep treating an empty stamina bar like a moral challenge.",
+        "A clinic is strongest when it prevents emergencies instead of becoming very efficient at surviving them.",
+    ),
+    "Innkeeper": (
+        "A good inn gives strangers privacy without making them feel unwelcome in the common room.",
+        "You learn the state of the roads from wet boots, late arrivals, and which meals people order twice.",
+        "Rooms, meals, gossip, and directions are all forms of hospitality, but each needs a different kind of discretion.",
+    ),
+    "Chef": (
+        "I build a meal around what is fresh, what will keep, and what people need after the work they actually did.",
+        "A recipe is a starting agreement. Weather, harvest quality, and who is eating decide the final version.",
+        "Good farm food should taste deliberate without wasting the ingredient that took longest to produce.",
+    ),
+    "Market Vendor": (
+        "A fair price has to respect the producer and still leave the buyer able to return next week.",
+        "Market stock is a map of the roads: shortages tell me which route failed before a courier confirms it.",
+        "I keep rare goods visible and necessities reachable. Making people hunt for basics is poor business.",
+    ),
+    "Gardener": (
+        "Public plantings have to survive feet, shade, weather, and people forgetting that roots extend past the pretty part.",
+        "I plant for the next season as much as this one. A garden should not collapse the moment the flowers finish.",
+        "The healthiest patch is often where insects, soil, and people are all allowed a little room.",
+    ),
+    "Fisher": (
+        "Water temperature, wind, shade, and current tell me where fish may be long before the first bite does.",
+        "A quiet bank is useful, but a safe landing and a route home matter more when the weather turns.",
+        "Taking every good catch is how a good fishing place becomes a story about the past.",
+    ),
+    "Miner": (
+        "Stone changes before a tunnel fails. Dust, sound, seepage, and a new crack all deserve more respect than bravado.",
+        "I decide my return point before I descend. Ore has a way of moving the goal when you are already tired.",
+        "The mine rewards preparation, but it punishes anyone who mistakes one easy floor for a promise.",
+    ),
+    "Kid": (
+        "Adults name streets after destinations. I name them after the loose board, the echo, and the place nobody can tag you.",
+        "You can tell who really knows town by whether they use the long path around the benches.",
+        "I keep track of hiding places, interesting bugs, and which grown-ups notice when something changes.",
+    ),
+    "Courier": (
+        "A delivery route is a chain of promises. One blocked road changes every stop after it.",
+        "I sort by urgency, distance, and whether the recipient will still be where the address says.",
+        "People think speed matters most. Reliability is what makes them trust the next letter to you.",
+    ),
+    "Artist": (
+        "I sketch the light first because buildings and faces both become different subjects when the hour changes.",
+        "Public art has to belong to the place without pretending everybody sees the place the same way.",
+        "I keep failed studies. They show which detail I was forcing instead of actually observing.",
+    ),
+    "Recluse": (
+        "Quiet places are not empty. They are where you can finally hear which road, animal, or person is approaching.",
+        "I watch the edge of town because changes arrive there before the center gives them a name.",
+        "Solitude is useful. Isolation is what happens when pride starts choosing it for you.",
+    ),
+    "Orchardist": (
+        "An orchard is a long agreement with soil, shade, and whoever will still be here for the harvest.",
+        "I prune for air and future weight, not for how full the branch looks today.",
+        "Young trees need protection from impatience almost as much as they need water.",
+    ),
+    "Tailor": (
+        "Work clothes should bend where the wearer bends and reinforce where their routine wears the cloth thin.",
+        "I notice pockets, hems, and shoulders. People reveal their real work by what they repeatedly repair.",
+        "Color is personal, but fit is a conversation between the fabric and the life wearing it.",
+    ),
+    "Musician": (
+        "Every place has a rhythm before anybody writes a song for it: hammers, wheels, rain, doors, and conversation.",
+        "I change a tune when the room stops listening. Performance is attention moving in both directions.",
+        "The songs people request tell me what they miss, even when they never say it plainly.",
+    ),
+    "Beekeeper": (
+        "A hive tells you about every flowering route nearby, but only if you notice what the bees stop bringing home.",
+        "Calm handling matters. Panic spreads through a hive faster than smoke settles it.",
+        "Honey is the visible harvest; pollination is the larger work people forget to count.",
+    ),
+    "Botanist": (
+        "A plant record needs habitat, weather, and neighboring growth. A pressed leaf alone loses most of the story.",
+        "I compare common plants carefully because ordinary species reveal environmental change first.",
+        "Useful harvesting leaves enough root, seed, or stem for the patch to remain useful next season.",
+    ),
+    "Mechanic": (
+        "A machine should fail visibly and safely. Hidden wear is more dangerous than an honest broken part.",
+        "I measure whether a device saves total work, including the time spent feeding, clearing, and repairing it.",
+        "The cleanest mechanism is usually the one with fewer moving parts and a better access panel.",
+    ),
+    "Scholar": (
+        "I compare policy with routine. A rule that nobody can follow in an ordinary week is only ceremonial writing.",
+        "Town history becomes useful when it explains present arguments instead of merely naming former officials.",
+        "I distrust a tidy conclusion until I know which inconvenient account was left outside it.",
+    ),
+    "Retiree": (
+        "After enough years, you learn which urgent problems disappear and which quiet ones become expensive.",
+        "Benches teach you plenty. People speak differently when they think nobody is conducting business.",
+        "I am retired from paid work, not from noticing when somebody is about to repeat an old mistake.",
+    ),
+}
+
+NPC_ROLE_CONVERSATION_INSIGHTS.update({
+    "Cartographer": (
+        "A map should record uncertainty honestly. A blank edge is safer than a confident road that no longer exists.",
+        "I compare travelers' accounts with terrain and travel time before I ink a route as dependable.",
+        "The useful part of a chart is not the paper; it is knowing which choices the terrain will ask you to make.",
+    ),
+    "Traveling Merchant": (
+        "I carry goods that survive the road and information that helps me decide whether the return journey is worth making.",
+        "A trade route becomes reliable when both ends expect one another, not when one lucky caravan arrives.",
+        "Prices tell me about shortages, but conversations tell me whether those shortages will last.",
+    ),
+    "Herbalist": (
+        "I harvest the part I need and leave the patch able to recover. Medicine that destroys its source is poor practice.",
+        "The same plant can change strength with soil, rain, and season, so I record where every bundle came from.",
+        "I ask how a remedy will be used before recommending it. A useful herb is not automatically the right treatment.",
+    ),
+    "Pilgrim": (
+        "I walk between places slowly enough to learn which acts of care never reach official records.",
+        "A pilgrimage is partly destination and partly the discipline of noticing who shares the road.",
+        "Old shrines survive because travelers keep giving them meaning, not because stone remembers by itself.",
+    ),
+    "Performer": (
+        "I listen to a room before choosing the first song. Every audience arrives carrying a different kind of silence.",
+        "Regional songs change on the road; each town keeps the verse that sounds most like its own life.",
+        "A performance is successful when people leave with something to repeat, not merely when they applaud.",
+    ),
+    "Ranger": (
+        "I compare fresh tracks, damaged markers, weather, and traveler reports before calling a route safe.",
+        "A patrol should leave the next traveler better information, not merely proof that I walked through first.",
+        "Wildlife and people often need the same corridor at different hours. Good trail work respects both.",
+    ),
+    "Researcher": (
+        "I repeat observations because one remarkable day can hide the ordinary pattern that actually shapes a region.",
+        "Field notes need location, weather, time, and method or they become anecdotes wearing numbers.",
+        "I ask residents what changed before I decide what my instruments say changed.",
+    ),
+    "Prospector": (
+        "A responsible survey marks unstable ground and what should remain untouched along with anything valuable.",
+        "Rock tells a long story, but greed has a habit of skipping directly to the price of the final page.",
+        "I carry samples small enough to study and leave enough behind that the place still exists afterward.",
+    ),
+    "Naturalist": (
+        "I revisit habitats through the season because relationships between species matter more than a list of names.",
+        "An unusual sighting matters most when you know what ordinarily belongs there.",
+        "Good fieldwork changes how carefully you walk, not only how many notes you bring home.",
+    ),
+})
+
+NPC_DIALOGUE_RESPONSE_PREFERENCES = {
+    "empathetic": {"Doctor", "Animal Keeper", "Innkeeper", "Gardener", "Kid", "Beekeeper", "Retiree"},
+    "curious": {"Librarian", "Traveler", "Fisher", "Artist", "Musician", "Botanist", "Scholar", "Recluse"},
+    "practical": {"Mayor", "Seed Seller", "Blacksmith", "Carpenter", "Chef", "Market Vendor", "Miner", "Courier", "Orchardist", "Tailor", "Mechanic"},
+}
 
 class NpcMixin:
     def town_npc_safe_tile_label(self, x: int, y: int) -> str:
@@ -134,6 +379,13 @@ class NpcMixin:
         if self.is_household_child_npc(npc):
             child = self.child_record_from_npc(npc)
             return self.household_child_activity_label(child) if child else "growing up at home"
+        if (
+            str(npc.get("social_partner_id", ""))
+            and str(npc.get("social_day_key", "")) == self.town_npc_day_key()
+            and str(npc.get("social_phase", "")) == str(npc.get("routine_phase", "") or self.town_routine_phase())
+            and str(npc.get("social_activity", ""))
+        ):
+            return str(npc.get("social_activity"))
         role = str(npc.get("role", "Villager"))
         phase = self.town_npc_current_routine_phase(npc)
         entry = self.town_npc_schedule_raw_value(npc)
@@ -2551,6 +2803,7 @@ class NpcMixin:
                 f"{kin.get('occupation', 'family')}; "
                 f"{kin.get('residence', 'Farmhouse')}"
             )
+        lines.extend(["", *self.home_region_journey_lines()])
         lines.extend(["", "Household help:", f"- {'Enabled' if self.state.family_help_enabled else 'Disabled'}"])
         candidates = self.household_help_candidate_children()
         helper_count = (1 if self.spouse_lives_on_farm() else 0) + len(candidates)
@@ -2748,6 +3001,1049 @@ class NpcMixin:
             total += 366 if is_leap_year(y) else 365
         return total + day_of_year(month, day, year)
 
+    def regional_town_life_state(self) -> Dict[str, object]:
+        if not isinstance(getattr(self.state, "regional_town_life", None), dict):
+            self.state.regional_town_life = {}
+        life = self.state.regional_town_life
+        life.setdefault("day_key", "")
+        life.setdefault("occasion_id", "")
+        life.setdefault("visitors", [])
+        life.setdefault("visitor_bonds", {})
+        life.setdefault("visitor_last_talk_day", {})
+        life.setdefault("visitor_memories", {})
+        life.setdefault("visitor_purchase_counts", {})
+        life.setdefault("npc_social_links", {})
+        life.setdefault("journeys", {})
+        life.setdefault("resident_trips", {})
+        life.setdefault("event_log", [])
+        return life
+
+    def regional_real_destinations(self) -> List[Dict[str, object]]:
+        discovered = self.discovered_procedural_town_plans() if hasattr(self, "discovered_procedural_town_plans") else []
+        signature = (
+            int(getattr(self.state, "wilderness_seed", 0)),
+            tuple(sorted((int(plan.get("chunk_x", 0)), int(plan.get("chunk_y", 0))) for plan in discovered)),
+            self.wilderness_road_state_signature() if hasattr(self, "wilderness_road_state_signature") else (),
+        )
+        cache = getattr(self, "_regional_real_destination_cache", None)
+        if isinstance(cache, tuple) and cache[0] == signature:
+            return [dict(record) for record in cache[1]]
+        destinations: Dict[str, Dict[str, object]] = {}
+        for plan in discovered:
+            cx, cy = int(plan.get("chunk_x", 0)), int(plan.get("chunk_y", 0))
+            identity = self.procedural_town_identity(plan) if hasattr(self, "procedural_town_identity") else {}
+            profile = self.procedural_town_market_profile(plan) if hasattr(self, "procedural_town_market_profile") else {}
+            world_x, world_y = self.wilderness_world_coords(cx, cy, 43, 19)
+            destination_id = f"town:{cx},{cy}"
+            destinations[destination_id] = {
+                "id": destination_id,
+                "name": str(plan.get("name", "Wilderness Town")),
+                "kind": "port_city" if str((plan.get("geography") or {}).get("water_access", "")) == "waterfront" else "town",
+                "chunk_x": cx, "chunk_y": cy, "world_x": world_x, "world_y": world_y,
+                "known": True,
+                "industry": str(identity.get("industry", plan.get("specialty", "regional trade"))),
+                "exports": [str(item) for item in list(identity.get("exports", ()))[:8]],
+                "demand": str(profile.get("demand", "")),
+                "region": str((plan.get("geography") or {}).get("region_name", self.wilderness_region_profile(cx, cy).get("name", "the region"))),
+            }
+        if hasattr(self, "wilderness_road_destinations_for_chunk"):
+            for node in self.wilderness_road_destinations_for_chunk(0, 0):
+                node_id = str(node.get("id", ""))
+                # Home Farm and Home Mine are useful physical destinations for
+                # road travelers, but they are not settlements that originate
+                # the town's rotating regional visitor population.
+                if not node_id or node_id in {"main-town", "home-farm", "home-mine"} or node_id in destinations:
+                    continue
+                cx, cy = int(node.get("chunk_x", 0)), int(node.get("chunk_y", 0))
+                kind = str(node.get("kind", "road_service"))
+                default_exports = {
+                    "port": ["Sunfish", "Marsh Reed"], "port_city": ["Sunfish", "Sea Glass"],
+                    "outpost": ["Field Snack", "Fiber"], "road_service": ["Wild Herbs", "Wood"],
+                    "reclaimed_stronghold": ["Stone", "Coal"], "founded_town": ["Wood", "Stone"],
+                }.get(kind, ["Wood", "Wild Herbs"])
+                destinations[node_id] = {
+                    **dict(node),
+                    "known": bool(self.wilderness_chunk_known(cx, cy)) if hasattr(self, "wilderness_chunk_known") else False,
+                    "industry": kind.replace("_", " "),
+                    "exports": default_exports,
+                    "demand": "Field Snack",
+                    "region": str(self.wilderness_region_profile(cx, cy).get("name", "the region")),
+                }
+        records = sorted(destinations.values(), key=lambda record: (not bool(record.get("known")), str(record.get("name", ""))))
+        self._regional_real_destination_cache = (signature, [dict(record) for record in records])
+        return [dict(record) for record in records]
+
+    def regional_destination_for_identity(self, identity: str, day_number: Optional[int] = None) -> Dict[str, object]:
+        destinations = self.regional_real_destinations()
+        if not destinations:
+            return {
+                "id": "road:origin", "name": "Origin Crossroads", "kind": "road_service",
+                "chunk_x": 0, "chunk_y": -1, "world_x": 43, "world_y": -19,
+                "known": False, "industry": "road services", "exports": ["Field Snack"],
+                "demand": "Wood", "region": "the home region",
+            }
+        day_number = self.absolute_game_day() if day_number is None else int(day_number)
+        known = [record for record in destinations if record.get("known")]
+        pool = known or destinations
+        seed = sum((index + 1) * ord(ch) for index, ch in enumerate(str(identity))) + day_number * 37
+        return dict(pool[seed % len(pool)])
+
+    def regional_route_profile(self, destination: Dict[str, object], identity: str = "") -> Dict[str, object]:
+        cx, cy = int(destination.get("chunk_x", 0)), int(destination.get("chunk_y", 0))
+        distance = max(1, abs(cx) + abs(cy))
+        points, vitality = self.wilderness_region_vitality(cx, cy) if hasattr(self, "wilderness_region_vitality") else (0, "Untended")
+        severe = str(getattr(self.state, "weather", "Sunny")) in {"Storm", "Stormy", "Blizzard"}
+        hazard_roll = (sum(ord(ch) for ch in f"{identity}:{cx},{cy}:{self.absolute_game_day()}") % 11) == 0
+        if severe:
+            condition, delay = "Weather Delayed", 1
+        elif int(points) >= 50:
+            condition, delay = "Well Maintained", 0
+        elif int(points) >= 20:
+            condition, delay = "Reliable", 0
+        elif hazard_roll:
+            condition, delay = "Hazardous", 1
+        else:
+            condition, delay = "Open", 0
+        travel_days = max(1, min(5, (distance + 4) // 5 + delay))
+        return {
+            "distance_chunks": distance,
+            "vitality": vitality,
+            "route_condition": condition,
+            "delay_days": delay,
+            "travel_days": travel_days,
+            "arrival_hour": min(18, 8 + min(6, distance // 2) + delay * 2),
+        }
+
+    def regional_destination_news(self, destination: Dict[str, object]) -> str:
+        name = str(destination.get("name", "a regional settlement"))
+        industry = str(destination.get("industry", "regional trade"))
+        demand = str(destination.get("demand", "supplies") or "supplies")
+        exports = list(destination.get("exports", []) or [])
+        export_text = ", ".join(str(item) for item in exports[:2]) or "local goods"
+        return f"{name} reports active {industry}; it is sending {export_text} and looking for {demand}."
+
+    def regional_return_date_label(self, travel_days: int) -> str:
+        month, day, year = int(self.state.month), int(self.state.day), int(self.state.year)
+        for _ in range(max(1, int(travel_days))):
+            month, day, year = advance_date(month, day, year)
+        return format_date(month, day, year)
+
+    def regional_circulation_calendar_events_for_date(self, month: int, day: int, year: int) -> List[str]:
+        target_day = self.absolute_game_day(month, day, year)
+        events = []
+        for npc_id, trip in self.regional_town_life_state().get("resident_trips", {}).items():
+            if not isinstance(trip, dict):
+                continue
+            npc_name = self.town_npc_name(str(npc_id))
+            destination = str(trip.get("destination_name", "a regional destination"))
+            if target_day == int(trip.get("depart_day_number", -1)):
+                events.append(f"Regional departure: {npc_name} leaves for {destination}")
+            if target_day == int(trip.get("return_day_number", -1)):
+                events.append(f"Expected regional return: {npc_name} from {destination}")
+        return events
+
+    def town_public_occasion_for_date(
+        self,
+        month: Optional[int] = None,
+        day: Optional[int] = None,
+        year: Optional[int] = None,
+    ) -> Dict[str, object]:
+        month = int(self.state.month if month is None else month)
+        day = int(self.state.day if day is None else day)
+        year = int(self.state.year if year is None else year)
+        festival_id = self.festival_id_for_date(month, day, year)
+        if festival_id:
+            festival = dict(self.festival_catalog().get(festival_id, {}))
+            return {
+                "id": f"festival:{festival_id}",
+                "kind": "festival",
+                "name": str(festival.get("name", "Town Festival")),
+                "summary": str(festival.get("description", "The town gathers for a seasonal festival.")),
+                "location": str(festival.get("location", "Central Park")),
+                "visitor_count": 5,
+            }
+        weekday = weekday_for_date(month, day, year)
+        if weekday in {"Wednesday", "Saturday"}:
+            return {
+                "id": f"market:{weekday.lower()}",
+                "kind": "market",
+                "name": f"{weekday} Regional Market",
+                "summary": "Traveling vendors and nearby households gather along Market Promenade.",
+                "location": "Market Promenade",
+                "visitor_count": 4 if weekday == "Saturday" else 3,
+            }
+        if weekday == "Friday":
+            return {
+                "id": "music:friday",
+                "kind": "music",
+                "name": "Friday Inn Music Night",
+                "summary": "Travelers trade road news while local and visiting musicians share the inn floor.",
+                "location": "Town Inn",
+                "visitor_count": 3,
+            }
+        if day in {1, 15}:
+            return {
+                "id": f"supply:{day}",
+                "kind": "supply",
+                "name": "Regional Supply Exchange",
+                "summary": "Couriers and suppliers refresh long-distance orders at Market Row.",
+                "location": "Market Row",
+                "visitor_count": 2,
+            }
+        return {}
+
+    def todays_town_public_occasion(self) -> Dict[str, object]:
+        return self.town_public_occasion_for_date()
+
+    def public_occasion_calendar_label_for_date(self, month: int, day: int, year: int) -> Optional[str]:
+        occasion = self.town_public_occasion_for_date(month, day, year)
+        if not occasion:
+            return None
+        return f"Public occasion: {occasion['name']} at {occasion['location']}. {occasion['summary']}"
+
+    def town_public_event_features(self) -> Dict[Tuple[int, int], Dict[str, object]]:
+        occasion = self.todays_town_public_occasion()
+        if not occasion:
+            return {}
+        kind = str(occasion.get("kind", ""))
+        features: Dict[Tuple[int, int], Dict[str, object]] = {}
+        if kind in {"market", "supply", "festival"}:
+            stall_names = ("Produce Stall", "Road Goods Stall", "Maps and Remedies Stall")
+            for position, name in zip(((82, 28), (86, 28), (90, 28)), stall_names):
+                features[position] = {
+                    "symbol": "$", "color": C.SHOP, "name": name,
+                    "description": f"{name} is active for {occasion['name']}.", "action": "market",
+                }
+            for position in ((84, 27), (88, 27), (92, 27), (84, 33), (88, 33), (92, 33)):
+                features[position] = {
+                    "symbol": "*", "color": C.CROP_READY, "name": "Market Bunting",
+                    "description": f"Bunting marks today's {occasion['name']}.", "action": "notice",
+                }
+        if kind == "festival":
+            features[(49, 29)] = {
+                "symbol": "*", "color": C.PLACEMENT, "name": "Festival Gathering Point",
+                "description": f"The main gathering point for {occasion['name']}.", "action": "festival",
+            }
+            for position in ((43, 29), (46, 29), (52, 29), (55, 29)):
+                features[position] = {
+                    "symbol": "t", "color": C.WOOD, "name": "Community Table",
+                    "description": "A shared table set for residents, families, and travelers.", "action": "notice",
+                }
+        if kind == "music":
+            features[(25, 22)] = {
+                "symbol": "!", "color": C.LAMP, "name": "Music Night Sign",
+                "description": "The inn hosts music and road stories tonight.", "action": "notice",
+            }
+        return features
+
+    def town_public_event_feature_at(self, x: int, y: int) -> Dict[str, object]:
+        return self.town_public_event_features().get((int(x), int(y)), {})
+
+    def interact_town_public_event_feature(self, feature: Dict[str, object]):
+        action = str(feature.get("action", "notice"))
+        if action == "market":
+            self.market_row_menu()
+            return
+        if action == "festival":
+            self.festival_menu()
+            return
+        occasion = self.todays_town_public_occasion()
+        lines = [
+            str(feature.get("name", "Public Occasion")), "",
+            str(feature.get("description", "The town has prepared this space for today's gathering.")), "",
+            f"Occasion: {occasion.get('name', 'Town gathering')}",
+            f"Location: {occasion.get('location', 'Town')}",
+            "Residents and regional visitors follow this occasion through their real schedules.",
+        ]
+        self.vertical_panel_view(str(feature.get("name", "Public Occasion")), lines, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
+        self.set_message(str(feature.get("description", "You inspect the public gathering.")))
+
+    def ensure_regional_town_visitors(self) -> List[Dict[str, object]]:
+        life = self.regional_town_life_state()
+        day_key = self.town_npc_day_key()
+        if str(life.get("day_key", "")) == day_key and isinstance(life.get("visitors"), list):
+            return life["visitors"]
+        occasion = self.todays_town_public_occasion()
+        absolute_day = self.absolute_game_day()
+        journeys = life.setdefault("journeys", {})
+        for old_visitor in list(life.get("visitors", []) or []):
+            visitor_id = str(old_visitor.get("id", ""))
+            journey = journeys.get(visitor_id)
+            if not visitor_id or not isinstance(journey, dict):
+                continue
+            travel_days = max(1, min(5, int(old_visitor.get("travel_days", 1) or 1)))
+            journey["status"] = "returning"
+            journey["return_start_day_number"] = absolute_day
+            journey["return_end_day_number"] = absolute_day + travel_days
+        count = int(occasion.get("visitor_count", 0) or 0)
+        if not count and absolute_day % 3 == 0:
+            count = 1
+        discovered_links = len(self.discovered_procedural_town_plans()) if hasattr(self, "discovered_procedural_town_plans") else 0
+        active_trade_links = sum(
+            bool(record.get("active", True))
+            for record in (getattr(self.state, "player_trade_routes", {}) or {}).values()
+            if isinstance(record, dict)
+        )
+        if occasion and discovered_links + active_trade_links >= 2:
+            count = min(6, count + 1)
+        rng = random.Random(absolute_day * 7919 + int(self.state.year) * 131)
+        archetypes = list(REGIONAL_TOWN_VISITOR_ARCHETYPES)
+        rng.shuffle(archetypes)
+        visitors: List[Dict[str, object]] = []
+        for template in archetypes:
+            if len(visitors) >= count:
+                break
+            visitor_id = f"regional_visitor:{template['id']}"
+            old_journey = journeys.get(visitor_id, {})
+            if (
+                isinstance(old_journey, dict)
+                and str(old_journey.get("status", "")) == "returning"
+                and int(old_journey.get("return_end_day_number", 0) or 0) >= absolute_day
+            ):
+                continue
+            index = len(visitors)
+            origin = self.regional_destination_for_identity(str(template["id"]), absolute_day + index)
+            route = self.regional_route_profile(origin, str(template["id"]))
+            arrival_hour = min(14 if occasion else 17, int(route["arrival_hour"]))
+            visitor = {
+                **template,
+                "id": visitor_id,
+                "origin": str(origin.get("name", template.get("origin", "the regional roads"))),
+                "symbol": "@",
+                "regional_visitor": True,
+                "x": 56 + (index % 4),
+                "y": 1,
+                "interior_x": 27,
+                "interior_y": 18,
+                "runtime_location": "InTransit" if int(self.state.hour) < arrival_hour else "Town",
+                "activity": f"traveling from {origin.get('name', 'the regional roads')} toward Elsewhere",
+                "facing": "DOWN",
+                "route_slot": index,
+                "origin_id": str(origin.get("id", "")),
+                "origin_kind": str(origin.get("kind", "road_service")),
+                "origin_chunk_x": int(origin.get("chunk_x", 0)),
+                "origin_chunk_y": int(origin.get("chunk_y", 0)),
+                "origin_world_x": int(origin.get("world_x", 0)),
+                "origin_world_y": int(origin.get("world_y", 0)),
+                "distance_chunks": int(route["distance_chunks"]),
+                "route_condition": str(route["route_condition"]),
+                "delay_days": int(route["delay_days"]),
+                "travel_days": int(route["travel_days"]),
+                "arrival_hour": arrival_hour,
+                "origin_exports": [str(item) for item in list(origin.get("exports", []))[:8]],
+                "origin_demand": str(origin.get("demand", "")),
+                "regional_news": self.regional_destination_news(origin),
+            }
+            visitors.append(visitor)
+            journeys[visitor_id] = {
+                "visitor_id": visitor_id,
+                "name": str(visitor["name"]), "role": str(visitor["role"]),
+                "origin_id": str(visitor["origin_id"]), "origin_name": str(visitor["origin"]),
+                "origin_kind": str(visitor["origin_kind"]),
+                "origin_chunk_x": int(visitor["origin_chunk_x"]), "origin_chunk_y": int(visitor["origin_chunk_y"]),
+                "arrival_day_number": absolute_day, "arrival_hour": arrival_hour,
+                "return_start_day_number": 0, "return_end_day_number": 0,
+                "status": "visiting", "route_condition": str(visitor["route_condition"]),
+            }
+        life["day_key"] = day_key
+        life["occasion_id"] = str(occasion.get("id", ""))
+        life["visitors"] = visitors
+        life["journeys"] = journeys
+        traveler_cache = getattr(self, "_wilderness_travelers", None)
+        if isinstance(traveler_cache, dict):
+            traveler_cache.clear()
+        if occasion:
+            log = life.setdefault("event_log", [])
+            log.append(f"{day_key}: {occasion['name']} brought {len(visitors)} regional visitors.")
+            life["event_log"] = log[-24:]
+        return visitors
+
+    def regional_circulation_route_chunks(self, origin_x: int, origin_y: int, identity: str = "") -> List[Tuple[int, int]]:
+        x, y = int(origin_x), int(origin_y)
+        path = [(x, y)]
+        horizontal_first = sum(ord(ch) for ch in str(identity)) % 2 == 0
+        axes = ("x", "y") if horizontal_first else ("y", "x")
+        for axis in axes:
+            while (x if axis == "x" else y) != 0 and len(path) < 1200:
+                if axis == "x":
+                    x += -1 if x > 0 else 1
+                else:
+                    y += -1 if y > 0 else 1
+                path.append((x, y))
+        return path
+
+    def home_region_commute_band(self, hour: Optional[int] = None, minute: Optional[int] = None) -> str:
+        """Stable time bands used to refresh short authored-NPC road journeys."""
+        hour = int(self.state.hour if hour is None else hour)
+        minute = int(self.state.minute if minute is None else minute)
+        clock = hour + minute / 60.0
+        if 8.0 <= clock < 10.0:
+            return "outbound"
+        if 10.0 <= clock < 15.0:
+            return "working"
+        if 15.0 <= clock < 17.0:
+            return "returning"
+        return "off"
+
+    def home_region_commute_specs(self) -> Dict[str, Dict[str, object]]:
+        return {
+            "garrick_miner": {
+                "weekdays": {"Monday", "Wednesday", "Friday"},
+                "destination_id": "home-mine", "destination_name": "Home Mine",
+                "destination_kind": "mine",
+                "purpose": "checking supports, ore carts, and the day's mine conditions",
+                "work_activity": "working the safe upper approach and checking mine supports",
+                "allow_bad_weather": True,
+            },
+            "cora_courier": {
+                "weekdays": {"Tuesday", "Thursday", "Saturday"},
+                "destination_id": "home-farm", "destination_name": "Home Farm",
+                "destination_kind": "farm",
+                "purpose": "carrying farm orders, letters, and market delivery notes",
+                "work_activity": "sorting farm deliveries and collecting outgoing market notes",
+            },
+            "rowan_orchard": {
+                "weekdays": {"Wednesday", "Saturday"},
+                "seasons": {"Spring", "Summer", "Fall"},
+                "destination_id": "home-farm", "destination_name": "Home Farm",
+                "destination_kind": "farm",
+                "purpose": "checking orchard growth and seasonal grafting conditions",
+                "work_activity": "examining the farm lane's trees and orchard conditions",
+            },
+            "hana_botanist": {
+                "weekdays": {"Thursday"},
+                "seasons": {"Spring", "Summer", "Fall"},
+                "destination_id": "home-farm", "destination_name": "Home Farm",
+                "destination_kind": "farm",
+                "purpose": "recording field growth and plants along the farm boundary",
+                "work_activity": "cataloguing field-edge plants near the farm approach",
+            },
+        }
+
+    def home_region_commute_plan(self, npc: Dict[str, object], active_only: bool = True) -> Dict[str, object]:
+        """Return today's local farm/mine journey for an authored resident."""
+        npc_id = str(npc.get("id", ""))
+        if not npc_id or (active_only and self.home_region_commute_band() == "off"):
+            return {}
+        if npc_id == str(getattr(self.state, "spouse_npc_id", "")) or self.is_household_child_npc(npc):
+            return {}
+        active_trip = self.regional_town_life_state().setdefault("resident_trips", {}).get(npc_id, {})
+        if isinstance(active_trip, dict) and active_trip:
+            return {}
+        occasion = self.todays_town_public_occasion()
+        if str(occasion.get("kind", "")) == "festival":
+            return {}
+        spec = self.home_region_commute_specs().get(npc_id)
+        if not spec or str(self.state.weekday) not in spec["weekdays"]:
+            return {}
+        if spec.get("seasons") and str(self.state.season) not in spec["seasons"]:
+            return {}
+        if self.town_weather_is_severe_for_routines():
+            return {}
+        if self.town_weather_is_bad_for_routines() and not bool(spec.get("allow_bad_weather", False)):
+            return {}
+        return {**spec, "npc_id": npc_id, "band": self.home_region_commute_band()}
+
+    def home_region_route_points(self, destination_id: str) -> List[Tuple[int, int]]:
+        """Ordered local-road cells from Elsewhere to a home-district endpoint."""
+        gateways = self.origin_world_gateway_positions()
+        start_x, start_y = gateways["town"]
+        gateway_key = "mine" if str(destination_id) == "home-mine" else "farm"
+        end_x, end_y = gateways[gateway_key]
+        points = [(start_x, y) for y in range(start_y, 37)]
+        points.extend((x, 36) for x in range(start_x + 1, end_x + 1))
+        points.extend((end_x, y) for y in range(35, end_y - 1, -1))
+        return points
+
+    def home_region_commuters_for_chunk(self, chunk_x: int, chunk_y: int) -> List[Dict[str, object]]:
+        if (int(chunk_x), int(chunk_y)) != (0, 0):
+            return []
+        band = self.home_region_commute_band()
+        # During the work window these residents have crossed the gateway and
+        # are represented by ordinary NPC actors inside the farm or mine.
+        if band in {"off", "working"}:
+            return []
+        clock = int(self.state.hour) + int(self.state.minute) / 60.0
+        travelers: List[Dict[str, object]] = []
+        for definition in TOWN_NPC_DEFINITIONS:
+            npc = self.npc_record_by_id(str(definition.get("id", "")))
+            if not npc:
+                continue
+            plan = self.home_region_commute_plan(npc)
+            if not plan:
+                continue
+            path = self.home_region_route_points(str(plan["destination_id"]))
+            if len(path) < 3:
+                continue
+            # Keep workers beside entrances rather than occupying transition tiles.
+            usable_path = path[1:-1]
+            if band == "outbound":
+                progress = max(0.0, min(1.0, (clock - 8.0) / 2.0))
+                path_index = int(progress * (len(usable_path) - 1))
+                target_id = str(plan["destination_id"])
+                target_name = str(plan["destination_name"])
+                target_kind = str(plan["destination_kind"])
+                activity = f"walking the home road to {target_name} to {plan['purpose']}"
+            elif band == "returning":
+                progress = max(0.0, min(1.0, (clock - 15.0) / 2.0))
+                path_index = (len(usable_path) - 1) - int(progress * (len(usable_path) - 1))
+                target_id, target_name, target_kind = "main-town", "Elsewhere", "main_town"
+                activity = f"returning to Elsewhere after {plan['purpose']}"
+            else:
+                path_index = len(usable_path) - 1
+                target_id = str(plan["destination_id"])
+                target_name = str(plan["destination_name"])
+                target_kind = str(plan["destination_kind"])
+                activity = str(plan["work_activity"])
+            # Coworkers on the same route walk a few paces apart and use nearby
+            # approach cells while working instead of occupying one actor cell.
+            path_index = max(0, path_index - len(travelers) * 2)
+            preferred_x, preferred_y = usable_path[max(0, min(len(usable_path) - 1, path_index))]
+            target_gateway = "town" if target_id == "main-town" else ("mine" if target_id == "home-mine" else "farm")
+            target_x, target_y = self.origin_world_gateway_positions()[target_gateway]
+            travelers.append({
+                "id": str(npc.get("id", "")), "name": str(npc.get("name", "Town Resident")),
+                "role": str(npc.get("role", "Resident")), "regional_circulation": True,
+                "authored_resident_trip": True, "home_region_commute": True,
+                "road_route": True, "fixed_road_route": True, "static_actor": band == "working",
+                "preferred_x": preferred_x, "preferred_y": preferred_y,
+                "home_route_points": list(usable_path),
+                "route_destination_id": target_id, "route_destination_name": target_name,
+                "route_destination_kind": target_kind, "route_destination_chunk_x": 0,
+                "route_destination_chunk_y": 0, "route_destination_world_x": target_x,
+                "route_destination_world_y": target_y, "route_condition": "Local Maintained Road",
+                "activity": activity, "commute_purpose": str(plan["purpose"]),
+            })
+        return travelers
+
+    def invalidate_home_region_commuter_cache(self) -> None:
+        cache = getattr(self, "_wilderness_travelers", None)
+        if isinstance(cache, dict):
+            cache.pop(self.wilderness_traveler_cache_key(0, 0), None)
+
+    def home_region_destination_for_current_location(self) -> str:
+        if self.on_farm():
+            return "home-farm"
+        if self.on_mine() and int(getattr(self.state, "mine_floor", 1)) == 1:
+            return "home-mine"
+        return ""
+
+    def home_region_destination_tile_open(self, x: int, y: int, used: set) -> bool:
+        if not self.in_active_bounds(x, y) or (int(x), int(y)) in used:
+            return False
+        if (int(x), int(y)) == (int(self.state.player_x), int(self.state.player_y)):
+            return False
+        tile = self.active_map()[int(y)][int(x)]
+        if self.on_farm():
+            if tile in {"#", "~", "H", "T", "o", "*", "<"}:
+                return False
+            if self.get_placed_object(int(x), int(y)) or self.get_crop(int(x), int(y)):
+                return False
+            if self.farm_animal_at(int(x), int(y)) or self.travel_follower_at(int(x), int(y)):
+                return False
+            return True
+        if self.on_mine():
+            if tile not in {".", ":"}:
+                return False
+            if self.mine_enemy_at(int(x), int(y)) or self.travel_follower_at(int(x), int(y)):
+                return False
+            return True
+        return False
+
+    def home_region_destination_position(self, npc_id: str, used: set) -> Tuple[int, int]:
+        if self.on_farm():
+            anchors = {
+                "cora_courier": (max(3, self.active_map_width() - 9), 10),
+                "rowan_orchard": (max(3, self.active_map_width() - 14), 15),
+                "hana_botanist": (max(3, self.active_map_width() - 18), 13),
+            }
+            anchor = anchors.get(str(npc_id), (max(3, self.active_map_width() - 10), 12))
+        else:
+            anchor = (24, 14)
+        ax, ay = int(anchor[0]), int(anchor[1])
+        for radius in range(0, 10):
+            candidates = []
+            for dy in range(-radius, radius + 1):
+                for dx in range(-radius, radius + 1):
+                    if radius and max(abs(dx), abs(dy)) != radius:
+                        continue
+                    candidates.append((ax + dx, ay + dy))
+            candidates.sort(key=lambda point: (abs(point[0] - ax) + abs(point[1] - ay), point[1], point[0]))
+            for x, y in candidates:
+                if self.home_region_destination_tile_open(x, y, used):
+                    return int(x), int(y)
+        return max(1, min(self.active_map_width() - 2, ax)), max(1, min(self.active_map_height() - 2, ay))
+
+    def home_region_destination_npc_positions(self) -> Dict[Tuple[int, int], Dict[str, object]]:
+        destination_id = self.home_region_destination_for_current_location()
+        if not destination_id or self.home_region_commute_band() != "working":
+            return {}
+        lookup: Dict[Tuple[int, int], Dict[str, object]] = {}
+        used = {(int(self.state.player_x), int(self.state.player_y))}
+        for definition in TOWN_NPC_DEFINITIONS:
+            npc = self.npc_record_by_id(str(definition.get("id", "")))
+            if not npc or self.travel_follower_identity_for_npc_id(str(npc.get("id", ""))):
+                continue
+            plan = self.home_region_commute_plan(npc)
+            if not plan or str(plan.get("destination_id", "")) != destination_id:
+                continue
+            position = self.home_region_destination_position(str(npc.get("id", "")), used)
+            npc["home_region_destination_worker"] = True
+            npc["home_region_activity"] = str(plan.get("work_activity", "handling local work"))
+            npc["runtime_activity"] = str(plan.get("work_activity", "handling local work"))
+            lookup[position] = npc
+            used.add(position)
+        return lookup
+
+    def home_region_work_record(self) -> Dict[str, object]:
+        if not isinstance(self.state.wilderness_poi_state, dict):
+            self.state.wilderness_poi_state = {}
+        record = self.state.wilderness_poi_state.setdefault("home_region_work", {})
+        if not isinstance(record, dict):
+            record = {}
+            self.state.wilderness_poi_state["home_region_work"] = record
+        record.setdefault("completed_days", {})
+        return record
+
+    def home_region_local_work_status(self, npc: Dict[str, object]) -> Tuple[bool, str]:
+        npc_id = str(npc.get("id", ""))
+        plan = self.home_region_commute_plan(npc)
+        if (
+            not plan
+            or self.home_region_commute_band() != "working"
+            or str(plan.get("destination_id", "")) != self.home_region_destination_for_current_location()
+        ):
+            return False, "available while working locally"
+        completed = self.home_region_work_record().setdefault("completed_days", {})
+        if str(completed.get(npc_id, "")) == self.town_npc_day_key():
+            return False, "completed today"
+        return True, "small practical daily benefit"
+
+    def home_region_local_work_lines(self, npc: Dict[str, object]) -> List[str]:
+        npc_id = str(npc.get("id", ""))
+        benefits = {
+            "garrick_miner": "Review mine supports: today's Pickaxe stamina costs are reduced by 2.",
+            "cora_courier": "Sort the farm delivery: receive a Field Snack and 25g delivery credit.",
+            "rowan_orchard": "Review the fields: the next crop harvested today yields one extra item.",
+            "hana_botanist": "Complete the field survey: receive useful herbs and improve origin-region vitality.",
+        }
+        return [
+            f"LOCAL WORK WITH {npc.get('name', 'RESIDENT').upper()}", "",
+            str(getattr(npc, "home_region_activity", "") or npc.get("home_region_activity", "Local destination work.")),
+            "", benefits.get(npc_id, "Help with today's local work."), "",
+            "Cost: 3 stamina and 30 minutes", "Relationship: +2", "Available once per workday.",
+        ]
+
+    def complete_home_region_local_work(self, npc: Dict[str, object]) -> bool:
+        available, reason = self.home_region_local_work_status(npc)
+        if not available:
+            self.set_message(f"Local work is not available: {reason}.")
+            return False
+        if not self.spend_stamina(3):
+            return False
+        npc_id = str(npc.get("id", ""))
+        record = self.home_region_work_record()
+        record.setdefault("completed_days", {})[npc_id] = self.town_npc_day_key()
+        drops: Dict[str, int] = {}
+        money = 0
+        vitality = 0
+        if npc_id == "garrick_miner":
+            drops = {"Coal": 1}
+            record["mine_safety_day"] = self.town_npc_day_key()
+        elif npc_id == "cora_courier":
+            drops = {"Field Snack": 1}
+            money = 25
+        elif npc_id == "rowan_orchard":
+            drops = {"Wild Apple": 1}
+            record["crop_bonus_day"] = self.town_npc_day_key()
+            record["crop_bonus_used"] = False
+        elif npc_id == "hana_botanist":
+            drops = {"Wild Herbs": 1, "Cave Herbs": 1}
+            vitality = 1
+        add_inventory_items(self.state.inventory, drops)
+        self.state.money += money
+        relationship = self.adjust_town_npc_relationship(npc_id, 2)
+        if vitality:
+            self.add_wilderness_region_vitality(0, 0, vitality, "completed Hana's home-field survey")
+        self.advance_time(30)
+        log = self.regional_town_life_state().setdefault("event_log", [])
+        log.append(f"{self.town_npc_day_key()}: Helped {npc.get('name', 'a resident')} with local work at {self.home_region_destination_for_current_location()}.")
+        self.regional_town_life_state()["event_log"] = log[-24:]
+        reward_parts = []
+        if drops:
+            reward_parts.append(format_drops(drops))
+        if money:
+            reward_parts.append(f"{money}g")
+        reward_text = ", ".join(reward_parts) or "local progress"
+        self.autosave_with_message(
+            f"Helped {npc.get('name', 'the resident')} with local work: {reward_text}, relationship +{relationship}."
+        )
+        return True
+
+    def home_region_journey_lines(self) -> List[str]:
+        lines = ["Today's local journeys:"]
+        rows = []
+        band = self.home_region_commute_band()
+        status_labels = {"outbound": "on the road", "working": "at destination", "returning": "returning", "off": "scheduled 8:00-17:00"}
+        for definition in TOWN_NPC_DEFINITIONS:
+            npc = self.npc_record_by_id(str(definition.get("id", "")))
+            if not npc:
+                continue
+            plan = self.home_region_commute_plan(npc, active_only=False)
+            if plan:
+                rows.append(f"- {npc.get('name')}: {plan.get('destination_name')} ({status_labels.get(band, band)})")
+        lines.extend(rows or ["- None scheduled under today's conditions."])
+        return lines
+
+    def regional_circulation_travelers_for_chunk(self, chunk_x: int, chunk_y: int) -> List[Dict[str, object]]:
+        self.ensure_regional_town_visitors()
+        life = self.regional_town_life_state()
+        current_day, hour = self.absolute_game_day(), int(self.state.hour)
+        results: List[Dict[str, object]] = []
+        for journey in list(life.get("journeys", {}).values()):
+            if not isinstance(journey, dict):
+                continue
+            status = str(journey.get("status", ""))
+            path = self.regional_circulation_route_chunks(
+                int(journey.get("origin_chunk_x", 0)), int(journey.get("origin_chunk_y", 0)),
+                str(journey.get("visitor_id", "")),
+            )
+            if not path:
+                continue
+            progress: Optional[float] = None
+            inbound = status == "visiting" and current_day == int(journey.get("arrival_day_number", -1)) and hour < int(journey.get("arrival_hour", 8))
+            if inbound:
+                start_hour, arrival_hour = 6, max(7, int(journey.get("arrival_hour", 8)))
+                progress = max(0.0, min(0.98, (hour - start_hour) / float(max(1, arrival_hour - start_hour))))
+            elif status == "returning":
+                start = int(journey.get("return_start_day_number", 0))
+                end = max(start + 1, int(journey.get("return_end_day_number", start + 1)))
+                if current_day > end:
+                    journey["status"] = "completed"
+                    continue
+                if current_day >= start:
+                    elapsed = (current_day - start) + max(0, hour - 6) / 18.0
+                    progress = 1.0 - max(0.0, min(1.0, elapsed / float(end - start)))
+            if progress is None:
+                continue
+            index = min(len(path) - 1, max(0, int(progress * len(path))))
+            if path[index] != (int(chunk_x), int(chunk_y)):
+                continue
+            destination_name = "Elsewhere" if inbound else str(journey.get("origin_name", "their home route"))
+            results.append({
+                "id": str(journey.get("visitor_id", "regional_visitor")),
+                "name": str(journey.get("name", "Traveler")),
+                "role": str(journey.get("role", "Traveler")),
+                "regional_circulation": True,
+                "road_route": True,
+                "route_destination_id": "main-town" if inbound else str(journey.get("origin_id", "")),
+                "route_destination_name": destination_name,
+                "route_destination_kind": "main_town" if inbound else str(journey.get("origin_kind", "road_service")),
+                "route_destination_chunk_x": 0 if inbound else int(journey.get("origin_chunk_x", 0)),
+                "route_destination_chunk_y": 0 if inbound else int(journey.get("origin_chunk_y", 0)),
+                "activity": f"following the regional road toward {destination_name}",
+                "route_condition": str(journey.get("route_condition", "Open")),
+            })
+        for npc_id, trip in list(life.get("resident_trips", {}).items()):
+            if not isinstance(trip, dict):
+                continue
+            depart = int(trip.get("depart_day_number", 0) or 0)
+            returning = max(depart + 1, int(trip.get("return_day_number", depart + 1) or depart + 1))
+            if not (depart <= current_day < returning):
+                continue
+            duration = float(returning - depart)
+            elapsed = (current_day - depart) + max(0, hour - 6) / 18.0
+            journey_progress = max(0.0, min(0.999, elapsed / duration))
+            path = self.regional_circulation_route_chunks(
+                int(trip.get("chunk_x", 0)), int(trip.get("chunk_y", 0)), str(npc_id),
+            )
+            if journey_progress < 0.45:
+                road_progress = 1.0 - journey_progress / 0.45
+                destination_name = str(trip.get("destination_name", "a regional destination"))
+            elif journey_progress > 0.55:
+                road_progress = (journey_progress - 0.55) / 0.45
+                destination_name = "Elsewhere"
+            else:
+                continue
+            index = min(len(path) - 1, max(0, int(road_progress * len(path))))
+            if path[index] != (int(chunk_x), int(chunk_y)):
+                continue
+            npc = self.npc_record_by_id(str(npc_id))
+            if not npc:
+                continue
+            destination_chunk_x = int(trip.get("chunk_x", 0)) if destination_name != "Elsewhere" else 0
+            destination_chunk_y = int(trip.get("chunk_y", 0)) if destination_name != "Elsewhere" else 0
+            results.append({
+                "id": str(npc_id), "name": str(npc.get("name", "Town Resident")),
+                "role": str(npc.get("role", "Traveler")),
+                "regional_circulation": True, "authored_resident_trip": True, "road_route": True,
+                "route_destination_id": str(trip.get("destination_id", "")) if destination_name != "Elsewhere" else "main-town",
+                "route_destination_name": destination_name,
+                "route_destination_kind": str(trip.get("destination_kind", "road_service")) if destination_name != "Elsewhere" else "main_town",
+                "route_destination_chunk_x": destination_chunk_x,
+                "route_destination_chunk_y": destination_chunk_y,
+                "activity": f"traveling for town business toward {destination_name}",
+                "route_condition": str(trip.get("route_condition", "Open")),
+            })
+        results.extend(self.home_region_commuters_for_chunk(chunk_x, chunk_y))
+        return results
+
+    def regional_town_visitors(self) -> List[Dict[str, object]]:
+        return self.ensure_regional_town_visitors()
+
+    def regional_visitor_desired_location(self, visitor: Dict[str, object]) -> str:
+        phase = self.town_routine_phase()
+        occasion = self.todays_town_public_occasion()
+        if phase == "late":
+            return "GuestLodging"
+        if phase == "evening" and str(occasion.get("kind", "")) != "festival":
+            return "InnInterior"
+        if phase == "wake":
+            return "InnInterior"
+        return "Town"
+
+    def regional_visitor_town_target(self, visitor: Dict[str, object]) -> Tuple[int, int]:
+        occasion = self.todays_town_public_occasion()
+        kind = str(occasion.get("kind", ""))
+        offset = int(visitor.get("route_slot", 0) or 0) % 6
+        if kind in {"market", "supply"}:
+            return ((81, 30), (85, 30), (89, 30), (93, 30), (81, 34), (89, 34))[offset]
+        if kind == "festival":
+            return ((42, 29), (45, 29), (51, 29), (54, 29), (48, 25), (58, 29))[offset]
+        return ((57, 10), (49, 22), (73, 22), (88, 35), (39, 10), (25, 22))[offset]
+
+    def town_public_gathering_anchor(self, npc: Dict[str, object], kind: str) -> Tuple[int, int]:
+        npc_id = str(npc.get("id", ""))
+        ordered_ids = [str(record.get("id", "")) for record in TOWN_NPC_DEFINITIONS]
+        if npc_id in ordered_ids:
+            slot = ordered_ids.index(npc_id)
+        else:
+            slot = len(ordered_ids) + sum(ord(ch) for ch in npc_id)
+        if kind == "festival":
+            bounds = (35, 21, 65, 35)
+        else:
+            bounds = (79, 25, 96, 39)
+        x0, y0, x1, y1 = bounds
+        candidates = [
+            (x, y)
+            for y in range(y0, y1 + 1)
+            for x in range(x0, x1 + 1)
+            if self.town_map[y][x] in {".", "=", ":", ","}
+            and (x + y) % 2 == 0
+        ]
+        return candidates[slot % len(candidates)] if candidates else (49, 29)
+
+    def update_regional_town_visitors(self):
+        if not (self.on_town() or self.on_town_interior()):
+            return
+        for index, visitor in enumerate(self.regional_town_visitors()):
+            desired = self.regional_visitor_desired_location(visitor)
+            actual = str(visitor.get("runtime_location", "Town"))
+            if actual == "InTransit":
+                if int(self.state.hour) < int(visitor.get("arrival_hour", 8)):
+                    visitor["activity"] = (
+                        f"delayed along the {visitor.get('route_condition', 'open').lower()} road "
+                        f"from {visitor.get('origin', 'the region')}"
+                    )
+                    continue
+                visitor["runtime_location"] = "Town"
+                visitor["x"], visitor["y"] = 56 + (index % 4), 1
+                visitor["activity"] = "arriving through the north road"
+                actual = "Town"
+            if desired == "GuestLodging":
+                visitor["runtime_location"] = desired
+                visitor["activity"] = "resting in an assigned private guest room"
+                continue
+            if actual == "GuestLodging":
+                visitor["runtime_location"] = "Town"
+                visitor["x"], visitor["y"] = 56 + (index % 4), 1
+                actual = "Town"
+            if desired == "InnInterior":
+                if actual == "InnInterior":
+                    visitor["activity"] = "sharing road news in the inn before retiring to a private room"
+                    continue
+                target = self.town_npc_exterior_access("InnInterior", str(visitor.get("id", "")))
+                visitor["activity"] = "following the road toward the inn"
+                if self.town_npc_move_town_toward(visitor, target):
+                    visitor["runtime_location"] = "InnInterior"
+                    visitor["interior_x"], visitor["interior_y"] = (22 + index * 3, 16)
+                continue
+            if actual == "InnInterior":
+                visitor["runtime_location"] = "Town"
+                visitor["x"], visitor["y"] = self.town_npc_exterior_access("InnInterior", str(visitor.get("id", "")))
+            target = self.regional_visitor_town_target(visitor)
+            occasion = self.todays_town_public_occasion()
+            visitor["activity"] = (
+                f"taking part in {occasion['name']}"
+                if occasion else str(visitor.get("purpose", "walking the regional roads"))
+            )
+            self.town_npc_move_town_toward(visitor, target)
+        if self.town_routine_phase() not in {"lunch", "evening"}:
+            return
+        local_npcs = [
+            npc for npc in self.active_town_npcs()
+            if self.town_npc_actual_location(npc) == "Town" and not str(npc.get("runtime_transition", ""))
+        ]
+        for visitor in self.regional_town_visitors():
+            if str(visitor.get("runtime_location", "")) != "Town":
+                continue
+            vx, vy = int(visitor.get("x", 0)), int(visitor.get("y", 0))
+            nearby = sorted(
+                (
+                    abs(vx - int(npc.get("x", 0))) + abs(vy - int(npc.get("y", 0))),
+                    str(npc.get("id", "")),
+                    npc,
+                )
+                for npc in local_npcs
+            )
+            if not nearby or nearby[0][0] > 5:
+                continue
+            local = nearby[0][2]
+            self.record_town_npc_social_link(visitor, local)
+            visitor["local_contact_id"] = str(local.get("id", ""))
+            visitor["activity"] = f"exchanging regional news with {local.get('name', 'a local resident')}"
+
+    def regional_visitor_position_lookup(self) -> Dict[Tuple[int, int], Dict[str, object]]:
+        lookup: Dict[Tuple[int, int], Dict[str, object]] = {}
+        if self.on_town():
+            for visitor in self.regional_town_visitors():
+                if str(visitor.get("runtime_location", "")) == "Town":
+                    lookup[(int(visitor.get("x", -1)), int(visitor.get("y", -1)))] = visitor
+            return lookup
+        if self.state.location != "InnInterior":
+            return lookup
+        used = set(self.town_indoor_npc_positions(normalize=False).values())
+        anchors = ((23, 15), (29, 15), (34, 15), (24, 9), (30, 9))
+        for index, visitor in enumerate(self.regional_town_visitors()):
+            if str(visitor.get("runtime_location", "")) != "InnInterior":
+                continue
+            anchor = anchors[index % len(anchors)]
+            position = self.town_npc_nearest_interior_tile("InnInterior", anchor[0], anchor[1], used)
+            visitor["interior_x"], visitor["interior_y"] = position
+            used.add(position)
+            lookup[position] = visitor
+        return lookup
+
+    def town_npc_public_schedule_entry(self, npc: Dict[str, object]) -> Dict[str, object]:
+        npc_id = str(npc.get("id", ""))
+        phase = self.town_routine_phase()
+        life = self.regional_town_life_state()
+        trips = life.setdefault("resident_trips", {})
+        active_trip = trips.get(npc_id, {})
+        current_day = self.absolute_game_day()
+        if isinstance(active_trip, dict) and active_trip:
+            if current_day < int(active_trip.get("return_day_number", 0) or 0):
+                npc["regional_destination"] = str(active_trip.get("destination_name", "Regional Roads"))
+                npc["regional_destination_id"] = str(active_trip.get("destination_id", ""))
+                npc["regional_destination_kind"] = str(active_trip.get("destination_kind", "road_service"))
+                npc["regional_destination_chunk_x"] = int(active_trip.get("chunk_x", 0))
+                npc["regional_destination_chunk_y"] = int(active_trip.get("chunk_y", 0))
+                npc["regional_expected_return"] = str(active_trip.get("expected_return", ""))
+                return {
+                    "away": str(active_trip.get("destination_name", "the regional roads")),
+                    "activity": (
+                        f"{active_trip.get('purpose', 'handling a regional errand')} at "
+                        f"{active_trip.get('destination_name', 'a mapped destination')}; "
+                        f"expected back {active_trip.get('expected_return', 'soon')}"
+                    ),
+                }
+            trips.pop(npc_id, None)
+            log = life.setdefault("event_log", [])
+            log.append(f"{self.town_npc_day_key()}: {npc.get('name', 'A resident')} returned from {active_trip.get('destination_name', 'a regional trip')}.")
+            life["event_log"] = log[-24:]
+        occasion = self.todays_town_public_occasion()
+        kind = str(occasion.get("kind", ""))
+        seed = sum(ord(ch) for ch in npc_id)
+        family_member = bool(
+            self.is_household_child_npc(npc)
+            or npc_id == str(getattr(self.state, "spouse_npc_id", ""))
+        )
+        if kind == "festival" and phase in {"lunch", "work_afternoon", "evening"}:
+            return {
+                "at": self.town_public_gathering_anchor(npc, "festival"),
+                "activity": f"attending {occasion['name']} with neighbors and visiting travelers",
+            }
+        if kind in {"market", "supply"} and phase == "work_afternoon":
+            participates = family_member or seed % 3 != 0 or str(npc.get("role", "")) in {"Market Vendor", "Courier", "Seed Seller", "Chef"}
+            if str(npc.get("role", "")) in TOWN_INDOOR_WORK_ROLES and str(npc.get("role", "")) not in {"Market Vendor"}:
+                participates = False
+            if participates:
+                return {
+                    "at": self.town_public_gathering_anchor(npc, "market"),
+                    "activity": f"browsing stalls and exchanging news at {occasion['name']}",
+                }
+        if kind == "music" and phase == "evening":
+            participates = family_member or seed % 2 == 0 or str(npc.get("role", "")) in {"Musician", "Innkeeper", "Chef", "Traveler"}
+            if participates:
+                return {
+                    "inside": "Town Inn",
+                    "activity": "listening to music and exchanging road stories at the inn",
+                }
+        local_commute = self.home_region_commute_plan(npc)
+        if local_commute:
+            npc["regional_destination"] = str(local_commute["destination_name"])
+            npc["regional_destination_id"] = str(local_commute["destination_id"])
+            npc["regional_destination_kind"] = str(local_commute["destination_kind"])
+            npc["regional_destination_chunk_x"] = 0
+            npc["regional_destination_chunk_y"] = 0
+            npc["regional_expected_return"] = "this evening"
+            band = str(local_commute.get("band", "working"))
+            if band == "outbound":
+                activity = f"walking the home road to {local_commute['destination_name']} to {local_commute['purpose']}"
+            elif band == "returning":
+                activity = f"returning from {local_commute['destination_name']} after {local_commute['purpose']}"
+            else:
+                activity = str(local_commute["work_activity"])
+            return {"away": str(local_commute["destination_name"]), "activity": activity}
+        trip_ids = {
+            "finn_fisher", "theo_miner", "silas_recluse", "niko_orchard",
+            "hana_botanist", "marisol_artist", "otto_scholar", "aria_musician",
+            "cora_tailor", "jules_mechanic",
+        }
+        if (
+            npc_id in trip_ids
+            and phase == "work_afternoon"
+            and str(self.state.weekday) in {"Tuesday", "Thursday"}
+            and (seed + self.absolute_game_day()) % 3 == 0
+            and not self.town_weather_is_bad_for_routines()
+        ):
+            destination = self.regional_destination_for_identity(npc_id, current_day)
+            route = self.regional_route_profile(destination, npc_id)
+            purpose = {
+                "Fisher": "checking waterfront prices and ferry conditions",
+                "Miner": "comparing ore reports and supply needs",
+                "Scholar": "exchanging records and civic news",
+                "Artist": "visiting public spaces and gathering new motifs",
+                "Musician": "following a regional performance invitation",
+                "Botanist": "surveying seasonal plants with regional workers",
+                "Mechanic": "inspecting infrastructure and repair requests",
+                "Tailor": "sourcing regional cloth and taking measurements",
+            }.get(str(npc.get("role", "")), "handling a scheduled regional errand")
+            expected_return = self.regional_return_date_label(int(route["travel_days"]))
+            trips[npc_id] = {
+                "destination_id": str(destination.get("id", "")),
+                "destination_name": str(destination.get("name", "Regional Roads")),
+                "destination_kind": str(destination.get("kind", "road_service")),
+                "chunk_x": int(destination.get("chunk_x", 0)),
+                "chunk_y": int(destination.get("chunk_y", 0)),
+                "depart_day_number": current_day,
+                "return_day_number": current_day + int(route["travel_days"]),
+                "expected_return": expected_return,
+                "purpose": purpose,
+                "route_condition": str(route["route_condition"]),
+            }
+            npc["regional_destination"] = str(destination.get("name", "Regional Roads"))
+            npc["regional_destination_id"] = str(destination.get("id", ""))
+            npc["regional_destination_kind"] = str(destination.get("kind", "road_service"))
+            npc["regional_destination_chunk_x"] = int(destination.get("chunk_x", 0))
+            npc["regional_destination_chunk_y"] = int(destination.get("chunk_y", 0))
+            npc["regional_expected_return"] = expected_return
+            return {
+                "away": str(destination.get("name", "the regional roads")),
+                "activity": f"traveling to {destination.get('name', 'a mapped destination')} to {purpose}; expected back {expected_return}",
+            }
+        return {}
+
     def town_weather_is_bad_for_routines(self) -> bool:
         return str(self.state.weather) in ["Rain", "Rainy", "Storm", "Stormy", "Snow", "Snowy", "Blizzard"]
 
@@ -2806,25 +4102,46 @@ class NpcMixin:
         overrides = {
             "mayor_ruth": "Mayor's House",
             "lulu_child": "Mayor's House",
-            "old_jun": "Inn",
-            "finn_fisher": "Inn",
-            "cora_courier": "Inn",
-            "penny_artist": "Inn",
-            "silas_recluse": "Inn",
-            "rowan_orchard": "Inn",
-            "theo_beekeeper": "Inn",
-            "otto_retiree": "Inn",
         }
+        residence_id = AUTHORED_TOWN_RESIDENCE_ID_BY_NPC.get(npc_id, "")
+        if residence_id:
+            return str(AUTHORED_TOWN_RESIDENCE_DATA[residence_id]["label"])
         home = str(overrides.get(npc_id, npc.get("home", "")))
+        # The authored inn has three separate guest rooms. Keep those rooms
+        # one-person spaces instead of using the inn as a fallback residence
+        # for most of town.
+        if home == "Inn" and npc_id not in {"mae_innkeeper", "chef_basil", "aria_musician"}:
+            return "Private Home"
         if self.town_interior_location_for_name(home):
             return home
-        return "Inn"
+        return "Private Home"
 
     def town_npc_home_routine_value(self, npc: Dict[str, object]):
         home = self.town_npc_sleep_home_name(npc)
-        if self.town_interior_location_for_name(home):
+        if self.town_interior_location_for_name(home) or home.strip().lower() in AUTHORED_TOWN_RESIDENCE_ID_BY_NAME:
             return {"inside": home}
-        return (int(npc.get("home_x", npc.get("x", 0))), int(npc.get("home_y", npc.get("y", 0))))
+        return {"inside": "Private Home"}
+
+    def town_npc_residence_runtime_location(self, residence_id: str) -> str:
+        return f"TownResidence:{str(residence_id)}"
+
+    def town_npc_residence_id_from_runtime(self, location: str) -> str:
+        prefix = "TownResidence:"
+        location = str(location)
+        residence_id = location[len(prefix):] if location.startswith(prefix) else ""
+        return residence_id if residence_id in AUTHORED_TOWN_RESIDENCE_DATA else ""
+
+    def town_npc_is_authored_interior_location(self, location: str) -> bool:
+        return bool(
+            str(location) in AUTHORED_TOWN_INTERIOR_MAP_ATTRS
+            or self.town_npc_residence_id_from_runtime(str(location))
+        )
+
+    def town_npc_authored_location_label(self, location: str) -> str:
+        residence_id = self.town_npc_residence_id_from_runtime(location)
+        if residence_id:
+            return str(AUTHORED_TOWN_RESIDENCE_DATA[residence_id]["label"])
+        return TOWN_INTERIOR_NAME_BY_LOCATION.get(str(location), "Building")
 
     def town_npc_role_activity(self, npc: Dict[str, object], phase: Optional[str] = None) -> str:
         role = str(npc.get("role", "Villager"))
@@ -2846,6 +4163,27 @@ class NpcMixin:
             return "turning in for the night"
         return "following their routine"
 
+    def town_npc_evening_routine_value(self, npc: Dict[str, object], scheduled, home):
+        npc_id = str(npc.get("id", ""))
+        residence_id = AUTHORED_TOWN_RESIDENCE_ID_BY_NPC.get(npc_id, "")
+        if not residence_id:
+            return scheduled
+        weekday = str(getattr(self.state, "weekday", ""))
+        if weekday == "Saturday" and sum(ord(ch) for ch in npc_id) % 2 == 0:
+            residence_ids = list(AUTHORED_TOWN_RESIDENCE_DATA)
+            visit_id = residence_ids[(residence_ids.index(residence_id) + 1) % len(residence_ids)]
+            visit_label = str(AUTHORED_TOWN_RESIDENCE_DATA[visit_id]["label"])
+            return {
+                "inside": visit_label,
+                "activity": f"visiting {visit_label} for a shared supper",
+            }
+        if weekday in {"Monday", "Wednesday", "Friday", "Saturday", "Sunday"}:
+            return {
+                "inside": str(AUTHORED_TOWN_RESIDENCE_DATA[residence_id]["label"]),
+                "activity": "sharing the evening meal with their household",
+            }
+        return scheduled
+
     def town_npc_routine_plan(self, npc: Dict[str, object]) -> Dict[str, Dict[str, object]]:
         definition = self.town_npc_definition(str(npc.get("id", "")))
         schedule = definition.get("schedule", {}) if isinstance(definition, dict) else {}
@@ -2853,7 +4191,7 @@ class NpcMixin:
         home = self.town_npc_home_routine_value(npc)
         morning = schedule.get("morning", home)
         midday = schedule.get("midday", morning)
-        evening = schedule.get("evening", home)
+        evening = self.town_npc_evening_routine_value(npc, schedule.get("evening", home), home)
         rain = schedule.get("rain", morning if role in TOWN_INDOOR_WORK_ROLES else home)
         afternoon = schedule.get("afternoon", morning if role in TOWN_INDOOR_WORK_ROLES else midday)
 
@@ -2882,7 +4220,7 @@ class NpcMixin:
         home = self.town_npc_home_routine_value(npc)
         morning = schedule.get("morning", home)
         midday = schedule.get("midday", morning)
-        evening = schedule.get("evening", home)
+        evening = self.town_npc_evening_routine_value(npc, schedule.get("evening", home), home)
         rain = schedule.get("rain", morning if role in TOWN_INDOOR_WORK_ROLES else home)
         afternoon = schedule.get("afternoon", morning if role in TOWN_INDOOR_WORK_ROLES else midday)
         return {
@@ -2896,6 +4234,9 @@ class NpcMixin:
         }
 
     def town_npc_schedule_raw_value(self, npc: Dict[str, object]):
+        public_entry = self.town_npc_public_schedule_entry(npc)
+        if public_entry:
+            return public_entry
         if self.spouse_lives_on_farm() and str(npc.get("id", "")) == self.state.spouse_npc_id:
             return {"inside": "Farmhouse", "activity": self.spouse_household_activity_label(npc)}
         plan = self.town_npc_routine_plan(npc)
@@ -2904,6 +4245,8 @@ class NpcMixin:
 
     def normalize_town_npc_schedule_value(self, value):
         if isinstance(value, dict):
+            if "away" in value:
+                return {"away": str(value.get("away", "the regional roads"))}
             if "inside" in value:
                 return {"inside": str(value.get("inside", "Building"))}
             if "at" in value:
@@ -2914,6 +4257,8 @@ class NpcMixin:
 
     def town_npc_routine_location_label_for_entry(self, entry) -> str:
         raw = self.normalize_town_npc_schedule_value(entry)
+        if isinstance(raw, dict) and "away" in raw:
+            return f"away at {raw.get('away', 'the regional roads')}"
         if isinstance(raw, dict) and "inside" in raw:
             return f"inside {raw.get('inside', 'Building')}"
         try:
@@ -2968,21 +4313,66 @@ class NpcMixin:
             lines.append(f"Bad weather: {activity} ({location})")
         return lines
 
-    def town_npc_is_indoor(self, npc: Dict[str, object]) -> bool:
+    def town_npc_desired_location(self, npc: Dict[str, object]) -> str:
         raw = self.normalize_town_npc_schedule_value(self.town_npc_schedule_raw_value(npc))
-        return isinstance(raw, dict) and "inside" in raw
+        if isinstance(raw, dict) and "away" in raw:
+            npc["regional_destination"] = str(raw.get("away", "the regional roads"))
+            return "RegionalTravel"
+        if isinstance(raw, dict) and "inside" in raw:
+            place = str(raw.get("inside", ""))
+            if place.lower() == "farmhouse":
+                return "HouseInterior"
+            if place.lower() == "private home":
+                return "PrivateResidence"
+            residence_id = AUTHORED_TOWN_RESIDENCE_ID_BY_NAME.get(place.strip().lower(), "")
+            if residence_id:
+                return self.town_npc_residence_runtime_location(residence_id)
+            return self.town_interior_location_for_name(place) or "PrivateResidence"
+        return "Town"
+
+    def town_npc_actual_location(self, npc: Dict[str, object]) -> str:
+        location = str(npc.get("runtime_location", ""))
+        valid = {"Town", "HouseInterior", "PrivateResidence", "RegionalTravel", *AUTHORED_TOWN_INTERIOR_MAP_ATTRS.keys()}
+        if location not in valid and not self.town_npc_residence_id_from_runtime(location):
+            location = self.town_npc_desired_location(npc)
+            npc["runtime_location"] = location
+        return location
+
+    def town_npc_is_indoor(self, npc: Dict[str, object]) -> bool:
+        return self.town_npc_actual_location(npc) != "Town"
 
     def town_npc_indoor_location(self, npc: Dict[str, object]) -> str:
-        raw = self.normalize_town_npc_schedule_value(self.town_npc_schedule_raw_value(npc))
-        if isinstance(raw, dict) and "inside" in raw:
-            return str(raw.get("inside", "Building"))
+        location = self.town_npc_actual_location(npc)
+        if location == "HouseInterior":
+            return "Farmhouse"
+        if location == "PrivateResidence":
+            return "Private Home"
+        if location == "RegionalTravel":
+            return str(npc.get("regional_destination", "Regional Roads"))
+        if self.town_npc_is_authored_interior_location(location):
+            return self.town_npc_authored_location_label(location)
         return ""
 
     def town_npc_location_label(self, npc: Dict[str, object]) -> str:
-        if self.town_npc_is_indoor(npc):
-            return f"inside {self.town_npc_indoor_location(npc)}"
-        ax, ay = self.town_npc_schedule_anchor(npc)
-        return f"near {ax},{ay}"
+        actual = self.town_npc_actual_location(npc)
+        desired = self.town_npc_desired_location(npc)
+        if actual == "PrivateResidence":
+            return "at home"
+        if actual == "RegionalTravel":
+            expected = str(npc.get("regional_expected_return", ""))
+            suffix = f"; expected back {expected}" if expected else ""
+            return f"away at {npc.get('regional_destination', 'the regional roads')}{suffix}"
+        if actual == "HouseInterior":
+            return "inside the Farmhouse"
+        if self.town_npc_is_authored_interior_location(actual):
+            return f"inside {self.town_npc_authored_location_label(actual)}"
+        if self.town_npc_is_authored_interior_location(desired):
+            return f"walking to {self.town_npc_authored_location_label(desired)}"
+        if desired == "PrivateResidence":
+            return "heading home"
+        if desired == "RegionalTravel":
+            return f"heading toward {npc.get('regional_destination', 'the regional roads')}"
+        return f"near {int(npc.get('x', 0))},{int(npc.get('y', 0))}"
 
     def town_npc_is_available(self, npc: Dict[str, object]) -> bool:
         npc_id = str(npc.get("id", ""))
@@ -3645,6 +5035,16 @@ class NpcMixin:
                 "routine_day_key": "",
                 "routine_weather": "",
                 "steps_today": 0,
+                "runtime_location": "",
+                "runtime_target_location": "",
+                "runtime_transition": "",
+                "interior_x": 27,
+                "interior_y": 18,
+                "route_blocked": False,
+                "social_partner_id": "",
+                "social_activity": "",
+                "social_day_key": "",
+                "social_phase": "",
             })
         return npcs
 
@@ -3702,6 +5102,16 @@ class NpcMixin:
                 "routine_day_key": str(npc.get("routine_day_key", "")),
                 "routine_weather": str(npc.get("routine_weather", "")),
                 "steps_today": int(npc.get("steps_today", 0)) if str(npc.get("steps_today", 0)).isdigit() else 0,
+                "runtime_location": str(npc.get("runtime_location", "")),
+                "runtime_target_location": str(npc.get("runtime_target_location", "")),
+                "runtime_transition": str(npc.get("runtime_transition", "")),
+                "interior_x": int(npc.get("interior_x", 27)),
+                "interior_y": int(npc.get("interior_y", 18)),
+                "route_blocked": bool(npc.get("route_blocked", False)),
+                "social_partner_id": str(npc.get("social_partner_id", "")),
+                "social_activity": str(npc.get("social_activity", "")),
+                "social_day_key": str(npc.get("social_day_key", "")),
+                "social_phase": str(npc.get("social_phase", "")),
             })
             clean.append(npc)
         for npc_id, base in definitions.items():
@@ -3724,6 +5134,16 @@ class NpcMixin:
                     "routine_day_key": "",
                     "routine_weather": "",
                     "steps_today": 0,
+                    "runtime_location": "",
+                    "runtime_target_location": "",
+                    "runtime_transition": "",
+                    "interior_x": 27,
+                    "interior_y": 18,
+                    "route_blocked": False,
+                    "social_partner_id": "",
+                    "social_activity": "",
+                    "social_day_key": "",
+                    "social_phase": "",
                 })
         self.state.town_npcs = clean
         if not isinstance(self.state.town_npc_relationships, dict):
@@ -3827,10 +5247,27 @@ class NpcMixin:
         return TOWN_INTERIOR_NAME_BY_LOCATION.get(self.state.location, self.location_label())
 
     def town_npc_indoor_state(self, npc: Dict[str, object]) -> str:
-        place = self.town_npc_indoor_location(npc)
-        if str(place).lower() == "farmhouse":
-            return "HouseInterior"
-        return self.town_interior_location_for_name(place)
+        location = self.town_npc_actual_location(npc)
+        if self.town_npc_residence_id_from_runtime(location):
+            return "TownResidenceInterior"
+        if location in {"HouseInterior", *AUTHORED_TOWN_INTERIOR_MAP_ATTRS.keys()}:
+            return location
+        return ""
+
+    def town_npc_matches_current_interior(self, npc: Dict[str, object]) -> bool:
+        location = self.town_npc_actual_location(npc)
+        if self.state.location == "TownResidenceInterior":
+            return self.town_npc_residence_id_from_runtime(location) == str(
+                getattr(self.state, "current_authored_residence_id", "")
+            )
+        return self.town_npc_indoor_state(npc) == self.state.location
+
+    def town_npc_observed_runtime_location(self) -> str:
+        if self.state.location == "TownResidenceInterior":
+            return self.town_npc_residence_runtime_location(
+                str(getattr(self.state, "current_authored_residence_id", ""))
+            )
+        return str(self.state.location)
 
     def is_household_child_npc(self, npc: Dict[str, object]) -> bool:
         return str(npc.get("id", "")).startswith("household_child:")
@@ -3983,32 +5420,66 @@ class NpcMixin:
             })
         return npcs
 
-    def household_child_talk_lines(self, child: Dict[str, object]) -> List[str]:
+    def household_child_talk_lines(self, child: Dict[str, object], topic: str = "feelings") -> List[str]:
         stage = self.household_child_stage(child)
-        lines = self.household_child_status_lines(child)
-        if self.is_child_birthday(child):
-            lines.extend(["", f"Today is {child.get('name', 'your child')}'s birthday. The farmhouse feels a little more awake because of it."])
-        lines.extend(["", "Check-in:"])
-        if stage == "Newborn":
-            lines.append(f"{child.get('name', 'The baby')} sleeps in short, delicate stretches.")
-        elif stage == "Infant":
-            lines.append(f"{child.get('name', 'The baby')} follows your voice and settles when the house is calm.")
-        elif stage == "Toddler":
-            lines.append(f"{child.get('name', 'The toddler')} toddles a few brave steps before grabbing the nearest safe edge.")
-        elif stage == "Young Child":
-            lines.append(f"{child.get('name', 'Your child')} turns ordinary furniture into whole adventures and asks for one more story.")
-        elif stage == "Child":
-            lines.append(f"{child.get('name', 'Your child')} asks about the farm, the town, and why adults always look busy.")
-        elif stage == "Teen":
-            lines.append(f"{child.get('name', 'Your teen')} wants more responsibility and pretends that does not also mean more chores.")
-        else:
-            lines.append(f"{child.get('name', 'Your child')} has grown into a capable young adult, still rooted in the household for now.")
+        name = str(child.get("name", "Your child"))
+        profile = self.ensure_child_profile_fields(child)
+        personality = str(profile.get("personality_trait", "Curious"))
+        activity = self.household_child_activity_label(child)
         top_topic, top_points = self.child_top_learning_topic(child)
+        chore = self.child_chore_assignment(child)
+        lines = [f"{name} is {activity}.", ""]
+        if self.is_child_birthday(child):
+            lines.extend([f"Today is {name}'s birthday, and they keep noticing every sign that the household remembered.", ""])
+        if stage == "Newborn":
+            lines.append(f"{name} settles at the sound of your voice, one small hand relaxing against the blanket.")
+        elif stage == "Infant":
+            lines.append(f'"Ba," {name} answers seriously, then points toward whatever currently holds their whole attention.')
+        elif stage == "Toddler":
+            toddler_lines = {
+                "learning": f'"I know {str(top_topic or "things").lower()}," {name} announces, with the confidence of somebody still assembling the explanation.',
+                "chores": f'"I help {str(chore or "at home").lower()}," {name} says. The scale of that help remains open to interpretation.',
+                "family": f'"Everybody home?" {name} asks, looking past you for the rest of the household.',
+                "activity": f'"I doing {activity.replace("their ", "my ")}," {name} reports.',
+            }
+            lines.append(toddler_lines.get(topic, f'"Stay here," {name} says, apparently deciding that your company is the answer.'))
+        elif stage == "Young Child":
+            young_lines = {
+                "learning": f'"Can you show me more about {str(top_topic or "the farm").lower()}? I want to know why it works, not just the rule."',
+                "chores": f'"I can do {str(chore or "a real chore").lower()} by myself. Mostly by myself. You can stand nearby."',
+                "family": '"Can we all do something together soon? Not an errand that adults secretly call an outing."',
+                "activity": f'"I was {activity.replace("their ", "my ")}, but I made a better story for what was happening."',
+            }
+            lines.append(young_lines.get(topic, f'"Do you have time to listen all the way to the end?" {name} asks.'))
+        elif stage == "Child":
+            child_lines = {
+                "learning": f'"I think {str(top_topic or "learning").lower()} might be the thing I am best at, but I want to try it somewhere outside the house too."',
+                "chores": f'"I understand why {str(chore or "chores").lower()} matters. I just think knowing why should count for part of the work."',
+                "family": '"Everyone has a schedule now. Could we put something on the calendar that belongs to all of us?"',
+                "activity": f'"I was {activity.replace("their ", "my ")}. There is more to it than it looks like."',
+            }
+            lines.append(child_lines.get(topic, f'"Can I tell you something without it turning into a lesson?" {name} asks.'))
+        elif stage == "Teen":
+            teen_lines = {
+                "learning": f'"I keep coming back to {str(top_topic or "what I want to learn").lower()}. I would rather get good enough to use it than collect another beginner lesson."',
+                "chores": f'"If {str(chore or "household work").lower()} is my responsibility, let me decide how to fit it around the rest of my day."',
+                "family": '"I still want family time. I just do not want every family plan chosen as if I were six."',
+                "activity": f'"I was {activity.replace("their ", "my ")}. I am trying to have a life outside this room, you know."',
+            }
+            lines.append(teen_lines.get(topic, f'"I do want your opinion," {name} says, "but let me finish before you give it."'))
+        else:
+            adult_lines = {
+                "learning": f'"What I learned about {str(top_topic or "the world").lower()} here is becoming part of the path I choose next."',
+                "chores": f'"Doing {str(chore or "household work").lower()} taught me more about reliability than the task itself."',
+                "family": '"I am building my own direction, but I do not want independence to mean becoming a stranger to this household."',
+                "activity": f'"I was {activity.replace("their ", "my ")}. It feels good to choose how I contribute now."',
+            }
+            lines.append(adult_lines.get(topic, f'"I have been thinking about what comes next," {name} says. "I wanted you to know before it became a decision."'))
         lines.extend([
             "",
-            f"Affection: {self.child_affection_rank(child)} ({self.child_affection_score(child)})",
-            f"Chore focus: {self.child_chore_assignment(child)}",
-            f"Learning focus: {top_topic if top_topic else 'none yet'}{f' ({top_points})' if top_topic else ''}",
+            f"Personality: {personality}",
+            f"Bond: {self.child_affection_rank(child)}",
+            f"Current focus: {top_topic if top_topic else 'discovering what interests them'}{f' ({top_points})' if top_topic else ''}",
         ])
         return lines
 
@@ -4019,10 +5490,10 @@ class NpcMixin:
             return
         while True:
             items = [
-                MenuItem(label="Check in", value="talk", enabled=True),
+                MenuItem(label="Check In", value="talk", enabled=True),
                 MenuItem(label="Status", value="status", enabled=True, hint=self.household_child_stage(child)),
                 MenuItem(label="Traits", value="traits", enabled=True, hint=str(self.ensure_child_profile_fields(child).get("personality_trait", ""))),
-                MenuItem(label="Give gift", value="gift", enabled=True, hint=str(child.get("favorite_gift", "favorite"))),
+                MenuItem(label="Give Gift", value="gift", enabled=True, hint=str(child.get("favorite_gift", "favorite"))),
                 MenuItem(label="Lesson", value="lesson", enabled=True, hint="daily"),
                 MenuItem(label="Chore", value="chore", enabled=True, hint=self.child_chore_assignment(child)),
                 MenuItem(label="Back", value=MENU_BACK, enabled=True),
@@ -4032,8 +5503,65 @@ class NpcMixin:
                 self.set_message(f"Stopped checking on {child.get('name', 'the child')}.")
                 return
             if choice.value == "talk":
-                self.vertical_panel_view(str(child.get("name", "Child")), self.household_child_talk_lines(child), LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
-                self.set_message(f"Checked in on {child.get('name', 'the child')}.")
+                topic_items = [
+                    MenuItem(label="Ask How They're Feeling", value="feelings", enabled=True, hint=self.child_affection_rank(child)),
+                    MenuItem(label="Ask What They're Doing", value="activity", enabled=True, hint=self.household_child_activity_label(child)),
+                    MenuItem(label="Ask What They're Learning", value="learning", enabled=True, hint=self.child_top_learning_topic(child)[0] or "No focus yet"),
+                    MenuItem(label="Ask About Their Chore", value="chores", enabled=True, hint=self.child_chore_assignment(child)),
+                    MenuItem(label="Ask About the Family", value="family", enabled=True, hint="Home, outings, and time together"),
+                    MenuItem(label="Back", value=MENU_BACK, enabled=True),
+                ]
+                topic_choice = self.vertical_panel_select(
+                    f"Talk with {child.get('name', 'Child')}",
+                    topic_items,
+                    LEFT_PANEL_WIDTH,
+                    LEFT_PANEL_HEIGHT,
+                    return_back=True,
+                )
+                if not topic_choice or topic_choice.value == MENU_BACK:
+                    continue
+                self.vertical_panel_view(
+                    str(child.get("name", "Child")),
+                    self.household_child_talk_lines(child, str(topic_choice.value)),
+                    LEFT_PANEL_WIDTH,
+                    LEFT_PANEL_HEIGHT,
+                )
+                today = self.town_npc_day_key()
+                influence_available = str(child.get("last_conversation_day", "")) != today
+                child_npc = {
+                    "name": str(child.get("name", "Child")),
+                    "role": self.household_child_stage(child),
+                    "personality": str(self.ensure_child_profile_fields(child).get("personality_trait", "Curious")),
+                }
+                response = self.npc_dialogue_response_choice(
+                    child_npc,
+                    influence_available=influence_available,
+                    title=f"Respond to {child.get('name', 'Them')}",
+                )
+                response_effect = int(response.get("effect", 0) or 0) if influence_available else 0
+                total_gain = 0
+                if influence_available:
+                    child["last_conversation_day"] = today
+                    total_gain += self.adjust_child_affection(child, 1)
+                    total_gain += self.adjust_child_affection(child, response_effect)
+                self.vertical_panel_view(
+                    str(child.get("name", "Child")),
+                    [
+                        str(response.get("reaction", "The moment settles into the household's day.")),
+                        "",
+                        f"Bond influence: {total_gain:+}"
+                        if influence_available and total_gain
+                        else "You already made time for a meaningful check-in today."
+                        if not influence_available
+                        else "No bond change.",
+                    ],
+                    LEFT_PANEL_WIDTH,
+                    LEFT_PANEL_HEIGHT,
+                )
+                self.autosave_with_message(
+                    f"Checked in on {child.get('name', 'the child')}."
+                    + (f" Bond {total_gain:+}." if total_gain else "")
+                )
                 return
             if choice.value == "status":
                 self.vertical_panel_view(str(child.get("name", "Child")), self.household_child_status_lines(child), LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
@@ -4067,6 +5595,153 @@ class NpcMixin:
                 if self.child_chore_menu(child):
                     return
                 continue
+
+    def authored_town_interior_grid(self, location: str) -> List[List[str]]:
+        residence_id = self.town_npc_residence_id_from_runtime(location)
+        if residence_id:
+            return self.authored_town_residence_map(residence_id)
+        map_attr = AUTHORED_TOWN_INTERIOR_MAP_ATTRS.get(str(location), "")
+        grid = getattr(self, map_attr, None) if map_attr else None
+        return grid if isinstance(grid, list) else []
+
+    def authored_town_interior_passable(self, location: str, x: int, y: int) -> bool:
+        grid = self.authored_town_interior_grid(location)
+        return bool(
+            0 <= y < len(grid)
+            and 0 <= x < len(grid[y])
+            and grid[y][x] in {".", ":", ",", "D"}
+        )
+
+    def town_npc_nearest_interior_tile(
+        self,
+        location: str,
+        x: int,
+        y: int,
+        used: Optional[set] = None,
+        radius_limit: int = 10,
+    ) -> Tuple[int, int]:
+        used = used or set()
+        for radius in range(0, radius_limit + 1):
+            candidates = [(x, y)] if radius == 0 else []
+            for dy in range(-radius, radius + 1):
+                for dx in range(-radius, radius + 1):
+                    if abs(dx) + abs(dy) == radius:
+                        candidates.append((x + dx, y + dy))
+            for tx, ty in candidates:
+                if (tx, ty) in used:
+                    continue
+                if self.authored_town_interior_passable(location, tx, ty):
+                    return tx, ty
+        return 27, 18
+
+    def town_npc_fixture_approaches(self, location: str, symbols: set) -> List[Tuple[int, int]]:
+        grid = self.authored_town_interior_grid(location)
+        approaches: List[Tuple[int, int]] = []
+        for y, row in enumerate(grid):
+            for x, tile in enumerate(row):
+                if tile not in symbols:
+                    continue
+                for dx, dy in ((0, 1), (0, -1), (1, 0), (-1, 0)):
+                    point = (x + dx, y + dy)
+                    if self.authored_town_interior_passable(location, *point) and point not in approaches:
+                        approaches.append(point)
+        return approaches
+
+    def town_npc_fixture_room_anchors(self, location: str, symbols: set) -> List[Tuple[int, int]]:
+        """Choose one walkable anchor per fixture, preserving separate rooms."""
+        grid = self.authored_town_interior_grid(location)
+        anchors: List[Tuple[int, int]] = []
+        for y, row in enumerate(grid):
+            for x, tile in enumerate(row):
+                if tile not in symbols:
+                    continue
+                for dx, dy in ((0, 1), (1, 0), (-1, 0), (0, -1)):
+                    point = (x + dx, y + dy)
+                    if self.authored_town_interior_passable(location, *point):
+                        anchors.append(point)
+                        break
+        return anchors
+
+    def town_npc_interior_anchor(self, npc: Dict[str, object], location: str) -> Tuple[int, int]:
+        phase = self.town_npc_current_routine_phase(npc)
+        npc_id = str(npc.get("id", ""))
+        occupants = sorted(
+            str(other.get("id", ""))
+            for other in getattr(self.state, "town_npcs", [])
+            if isinstance(other, dict) and self.town_npc_actual_location(other) == location
+        )
+        occupant_index = occupants.index(npc_id) if npc_id in occupants else 0
+
+        if phase in {"wake", "late"}:
+            bed_approaches = self.town_npc_fixture_room_anchors(location, {"B"})
+            if bed_approaches:
+                return bed_approaches[occupant_index % len(bed_approaches)]
+
+        if self.town_npc_residence_id_from_runtime(location) and phase in {"evening", "bad_weather"}:
+            shared_room = self.town_npc_fixture_approaches(location, {"t", "k"})
+            if shared_room:
+                return shared_room[occupant_index % len(shared_room)]
+
+        service = AUTHORED_TOWN_SERVICE_SPECS.get(npc_id)
+        if service and service[0] == location:
+            approaches = self.town_npc_fixture_approaches(location, {"&"})
+            if approaches:
+                return approaches[0]
+
+        if npc_id == "chef_basil" and location == "InnInterior":
+            kitchen = self.town_npc_fixture_approaches(location, {"k", "p"})
+            if kitchen:
+                return kitchen[0]
+
+        preferred = self.indoor_npc_base_position(location)
+        return self.town_npc_nearest_interior_tile(location, preferred[0], preferred[1])
+
+    def town_npc_path_step(
+        self,
+        start: Tuple[int, int],
+        target: Tuple[int, int],
+        passable,
+        max_nodes: int = 1800,
+    ) -> Optional[Tuple[int, int]]:
+        if start == target:
+            return start
+        frontier = [(abs(start[0] - target[0]) + abs(start[1] - target[1]), 0, start)]
+        previous = {start: None}
+        costs = {start: 0}
+        while frontier and len(previous) <= max_nodes:
+            _priority, cost, current = heapq.heappop(frontier)
+            if cost != costs.get(current):
+                continue
+            x, y = current
+            options = [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)]
+            options.sort(key=lambda point: abs(point[0] - target[0]) + abs(point[1] - target[1]))
+            for point in options:
+                if not passable(*point):
+                    continue
+                next_cost = cost + 1
+                if next_cost >= costs.get(point, 10 ** 9):
+                    continue
+                costs[point] = next_cost
+                previous[point] = current
+                if point == target:
+                    cursor = point
+                    while previous.get(cursor) not in {None, start}:
+                        cursor = previous[cursor]
+                    return cursor
+                heuristic = abs(point[0] - target[0]) + abs(point[1] - target[1])
+                heapq.heappush(frontier, (next_cost + heuristic, next_cost, point))
+        return None
+
+    def town_npc_set_facing_for_step(self, npc: Dict[str, object], old: Tuple[int, int], new: Tuple[int, int]):
+        dx, dy = new[0] - old[0], new[1] - old[1]
+        if dx > 0:
+            npc["facing"] = "RIGHT"
+        elif dx < 0:
+            npc["facing"] = "LEFT"
+        elif dy > 0:
+            npc["facing"] = "DOWN"
+        elif dy < 0:
+            npc["facing"] = "UP"
 
     def indoor_npc_base_position(self, location: str) -> Tuple[int, int]:
         if self.town_routine_phase() in ["wake", "late"]:
@@ -4108,44 +5783,31 @@ class NpcMixin:
             self.normalize_town_npcs()
         npcs = [
             npc for npc in self.active_town_npcs()
-            if self.town_npc_is_indoor(npc) and self.town_npc_indoor_state(npc) == self.state.location
+            if self.town_npc_is_indoor(npc) and self.town_npc_matches_current_interior(npc)
         ]
         npcs.sort(key=lambda npc: str(npc.get("id", "")))
-        base_x, base_y = self.indoor_npc_base_position(self.state.location)
-        offsets = [
-            (0, 0), (-2, 0), (2, 0), (0, 2), (0, -2), (-4, 1), (4, 1),
-            (-3, 3), (3, 3), (-5, -1), (5, -1), (-1, 4), (1, 4),
-        ]
         positions: Dict[str, Tuple[int, int]] = {}
         used = set()
+        interior_location = self.town_npc_observed_runtime_location()
 
         for npc in npcs:
             npc_id = str(npc.get("id", ""))
-            assigned: Optional[Tuple[int, int]] = None
-            for dx, dy in offsets:
-                cx, cy = base_x + dx, base_y + dy
-                for radius in range(0, 5):
-                    candidates = [(cx, cy)] if radius == 0 else []
-                    if radius > 0:
-                        for yy in range(cy - radius, cy + radius + 1):
-                            for xx in range(cx - radius, cx + radius + 1):
-                                if abs(xx - cx) + abs(yy - cy) == radius:
-                                    candidates.append((xx, yy))
-                    for tx, ty in candidates:
-                        if (tx, ty) in used:
-                            continue
-                        if tx == self.state.player_x and ty == self.state.player_y:
-                            continue
-                        if self.in_active_bounds(tx, ty) and self.passable(tx, ty):
-                            assigned = (tx, ty)
-                            break
-                    if assigned is not None:
-                        break
-                if assigned is not None:
-                    break
-            if assigned is not None:
-                positions[npc_id] = assigned
-                used.add(assigned)
+            current = (int(npc.get("interior_x", 27)), int(npc.get("interior_y", 18)))
+            if (
+                current in used
+                or current == (self.state.player_x, self.state.player_y)
+                or not self.authored_town_interior_passable(interior_location, *current)
+            ):
+                anchor = self.town_npc_interior_anchor(npc, interior_location)
+                current = self.town_npc_nearest_interior_tile(
+                    interior_location,
+                    anchor[0],
+                    anchor[1],
+                    used | {(self.state.player_x, self.state.player_y)},
+                )
+                npc["interior_x"], npc["interior_y"] = current
+            positions[npc_id] = current
+            used.add(current)
         return positions
 
     def town_npc_position_lookup(self) -> Dict[Tuple[int, int], Dict[str, object]]:
@@ -4162,6 +5824,8 @@ class NpcMixin:
             procedural_lookup = self.procedural_town_resident_position_lookup()
             if procedural_lookup:
                 return procedural_lookup
+        if self.on_farm() or self.on_mine():
+            return self.home_region_destination_npc_positions()
         if not (self.on_town() or self.on_town_interior() or self.on_house()):
             return {}
         self.normalize_town_npcs()
@@ -4214,6 +5878,9 @@ class NpcMixin:
                 position = positions.get(npc_id)
                 if position:
                     lookup[position] = npc
+            for position, visitor in self.regional_visitor_position_lookup().items():
+                if position not in lookup:
+                    lookup[position] = visitor
             return lookup
 
         for npc in self.active_town_npcs():
@@ -4225,6 +5892,9 @@ class NpcMixin:
                 lookup[(int(npc.get("x", -1)), int(npc.get("y", -1)))] = npc
             except Exception:
                 continue
+        for position, visitor in self.regional_visitor_position_lookup().items():
+            if position not in lookup:
+                lookup[position] = visitor
         return lookup
 
     def town_npc_at(self, x: int, y: int) -> Optional[Dict[str, object]]:
@@ -4232,8 +5902,13 @@ class NpcMixin:
 
     def render_town_npc(self, npc: Dict[str, object]) -> str:
         if npc.get("procedural_caravan"):
-            return colorize("C", C.SHOP)
-        return colorize("@", self.town_npc_role_color(npc))
+            symbol, color = actor_style("visitor", "C", "Traveling Merchant", detailed=bool(getattr(self.state, "detailed_glyphs_enabled", True)), high_contrast=bool(getattr(self.state, "high_contrast_enabled", False)))
+            return colorize(symbol, color)
+        if npc.get("regional_visitor"):
+            symbol, color = actor_style("visitor", "@", str(npc.get("role", "Traveler")), high_contrast=bool(getattr(self.state, "high_contrast_enabled", False)))
+            return colorize(symbol, color)
+        symbol, color = actor_style("npc", "@", str(npc.get("role", "Villager")), self.town_npc_role_color(npc), high_contrast=bool(getattr(self.state, "high_contrast_enabled", False)))
+        return colorize(symbol, color)
 
     def town_npc_passable_tile(self, x: int, y: int, ignore_npc_id: Optional[str] = None) -> bool:
         if not self.on_town():
@@ -4256,6 +5931,13 @@ class NpcMixin:
                     return False
             except Exception:
                 continue
+        for other in self.regional_town_visitors():
+            if str(other.get("id", "")) == str(ignore_npc_id or ""):
+                continue
+            if str(other.get("runtime_location", "")) != "Town":
+                continue
+            if (int(other.get("x", -1)), int(other.get("y", -1))) == (int(x), int(y)):
+                return False
         tile = self.active_map()[y][x]
         return tile in [".", "=", ":", ",", "?", "!"]
 
@@ -4270,8 +5952,146 @@ class NpcMixin:
                         return nx, ny
         return self.nearest_town_passable_tile(x, y)
 
+    def town_npc_town_static_tile(self, x: int, y: int) -> bool:
+        if not (0 <= x < TOWN_WIDTH and 0 <= y < TOWN_HEIGHT):
+            return False
+        if self.town_map[y][x] not in {".", "=", ":", ","}:
+            return False
+        return True
+
+    def town_npc_town_route_tile(self, x: int, y: int, npc_id: str = "") -> bool:
+        if not self.town_npc_town_static_tile(x, y):
+            return False
+        if self.on_town() and (x, y) == (self.state.player_x, self.state.player_y):
+            return False
+        for other in getattr(self.state, "town_npcs", []):
+            if not isinstance(other, dict) or str(other.get("id", "")) == str(npc_id):
+                continue
+            if self.town_npc_actual_location(other) != "Town":
+                continue
+            if (int(other.get("x", -1)), int(other.get("y", -1))) == (x, y):
+                return False
+        return True
+
+    def town_npc_nearest_town_route_tile(self, x: int, y: int, npc_id: str = "") -> Tuple[int, int]:
+        for radius in range(0, 10):
+            for dy in range(-radius, radius + 1):
+                for dx in range(-radius, radius + 1):
+                    if abs(dx) + abs(dy) != radius:
+                        continue
+                    point = (x + dx, y + dy)
+                    if self.town_npc_town_route_tile(*point, npc_id):
+                        return point
+        return int(x), int(y)
+
+    def town_npc_exterior_access(self, location: str, npc_id: str = "") -> Tuple[int, int]:
+        residence_id = self.town_npc_residence_id_from_runtime(location)
+        if residence_id:
+            door_x, door_y = AUTHORED_TOWN_RESIDENCE_DATA[residence_id]["door"]
+        else:
+            building_id = TOWN_BUILDING_ID_BY_LOCATION.get(str(location), "")
+            door_x, door_y = TOWN_DOORS.get(building_id, (27, 18))
+        return self.town_npc_nearest_town_route_tile(door_x, door_y + 1, npc_id)
+
+    def town_npc_private_home_anchor(self, npc: Dict[str, object]) -> Tuple[int, int]:
+        return self.town_npc_nearest_town_route_tile(
+            int(npc.get("home_x", npc.get("x", 0))),
+            int(npc.get("home_y", npc.get("y", 0))),
+            str(npc.get("id", "")),
+        )
+
+    def town_npc_interior_route_tile(self, location: str, x: int, y: int, npc_id: str) -> bool:
+        if not self.authored_town_interior_passable(location, x, y):
+            return False
+        if self.state.location == location and (x, y) == (self.state.player_x, self.state.player_y):
+            return False
+        for other in getattr(self.state, "town_npcs", []):
+            if not isinstance(other, dict) or str(other.get("id", "")) == str(npc_id):
+                continue
+            if self.town_npc_actual_location(other) != location:
+                continue
+            if (int(other.get("interior_x", -1)), int(other.get("interior_y", -1))) == (x, y):
+                return False
+        return True
+
+    def town_npc_move_interior_toward(self, npc: Dict[str, object], location: str, target: Tuple[int, int]) -> bool:
+        npc_id = str(npc.get("id", ""))
+        start = (int(npc.get("interior_x", 27)), int(npc.get("interior_y", 18)))
+        if start == target:
+            npc["route_blocked"] = False
+            return True
+        step = self.town_npc_path_step(
+            start,
+            target,
+            lambda x, y: self.authored_town_interior_passable(location, x, y),
+            max_nodes=700,
+        )
+        if step is None:
+            npc["route_blocked"] = True
+            return False
+        if step != start and not self.town_npc_interior_route_tile(location, step[0], step[1], npc_id):
+            alternatives = [
+                point for point in ((start[0] + 1, start[1]), (start[0] - 1, start[1]), (start[0], start[1] + 1), (start[0], start[1] - 1))
+                if self.town_npc_interior_route_tile(location, point[0], point[1], npc_id)
+            ]
+            alternatives.sort(key=lambda point: abs(point[0] - target[0]) + abs(point[1] - target[1]))
+            if not alternatives:
+                npc["route_blocked"] = True
+                return False
+            step = alternatives[0]
+        self.town_npc_set_facing_for_step(npc, start, step)
+        npc["interior_x"], npc["interior_y"] = step
+        npc["steps_today"] = int(npc.get("steps_today", 0)) + 1
+        npc["route_blocked"] = False
+        return step == target
+
+    def town_npc_move_town_toward(self, npc: Dict[str, object], target: Tuple[int, int]) -> bool:
+        npc_id = str(npc.get("id", ""))
+        start = (int(npc.get("x", 0)), int(npc.get("y", 0)))
+        if start == target:
+            npc["route_blocked"] = False
+            return True
+        step = self.town_npc_path_step(
+            start,
+            target,
+            self.town_npc_town_static_tile,
+        )
+        if step is None:
+            npc["route_blocked"] = True
+            return False
+        if step != start and not self.town_npc_town_route_tile(step[0], step[1], npc_id):
+            alternatives = [
+                point for point in ((start[0] + 1, start[1]), (start[0] - 1, start[1]), (start[0], start[1] + 1), (start[0], start[1] - 1))
+                if self.town_npc_town_route_tile(point[0], point[1], npc_id)
+            ]
+            alternatives.sort(key=lambda point: abs(point[0] - target[0]) + abs(point[1] - target[1]))
+            if not alternatives:
+                npc["route_blocked"] = True
+                return False
+            step = alternatives[0]
+        self.town_npc_set_facing_for_step(npc, start, step)
+        npc["x"], npc["y"] = step
+        npc["steps_today"] = int(npc.get("steps_today", 0)) + 1
+        npc["route_blocked"] = False
+        return step == target
+
+    def town_npc_place_at_destination(self, npc: Dict[str, object], desired: str):
+        npc_id = str(npc.get("id", ""))
+        if desired == "Town":
+            target = self.town_npc_schedule_anchor(npc)
+            npc["x"], npc["y"] = self.town_npc_nearest_town_route_tile(*target, npc_id)
+        elif desired in {"PrivateResidence", "RegionalTravel"}:
+            pass
+        elif self.town_npc_is_authored_interior_location(desired):
+            npc["interior_x"], npc["interior_y"] = self.town_npc_interior_anchor(npc, desired)
+        npc["runtime_location"] = desired
+        npc["runtime_transition"] = ""
+        npc["runtime_target_location"] = desired
+        npc["route_blocked"] = False
+
     def reset_town_npc_daily_routines(self):
         self.normalize_town_npcs()
+        self.invalidate_home_region_commuter_cache()
         for npc in self.state.town_npcs:
             npc["steps_today"] = 0
             npc["routine_phase"] = ""
@@ -4279,46 +6099,238 @@ class NpcMixin:
             npc["routine_day_key"] = self.town_npc_day_key()
             npc["routine_weather"] = str(self.state.weather)
 
+    def record_town_npc_social_link(self, first: Dict[str, object], second: Dict[str, object]) -> Dict[str, object]:
+        first_id, second_id = sorted((str(first.get("id", "")), str(second.get("id", ""))))
+        pair_id = f"{first_id}|{second_id}"
+        links = self.regional_town_life_state().setdefault("npc_social_links", {})
+        record = links.setdefault(pair_id, {"score": 0, "last_day": "", "meetings": 0})
+        day_key = self.town_npc_day_key()
+        if str(record.get("last_day", "")) != day_key:
+            affinity = sum(ord(ch) for ch in pair_id) % 7
+            change = -1 if affinity == 0 else 1
+            record["score"] = max(-20, min(20, int(record.get("score", 0)) + change))
+            record["meetings"] = int(record.get("meetings", 0)) + 1
+            record["last_day"] = day_key
+        return record
+
+    def town_npc_social_link_label(self, first_id: str, second_id: str) -> str:
+        pair_id = "|".join(sorted((str(first_id), str(second_id))))
+        record = self.regional_town_life_state().get("npc_social_links", {}).get(pair_id, {})
+        score = int(record.get("score", 0) or 0) if isinstance(record, dict) else 0
+        if score >= 8:
+            return "close friends"
+        if score >= 3:
+            return "friends"
+        if score <= -5:
+            return "rivals"
+        if score < 0:
+            return "frequent debaters"
+        return "acquaintances"
+
+    def update_town_npc_social_encounters(self):
+        phase = self.town_routine_phase()
+        day_key = self.town_npc_day_key()
+        npcs = self.active_town_npcs()
+        for npc in npcs:
+            if str(npc.get("social_day_key", "")) != day_key or str(npc.get("social_phase", "")) != phase:
+                npc["social_partner_id"] = ""
+                npc["social_activity"] = ""
+                npc["social_day_key"] = ""
+                npc["social_phase"] = ""
+        if phase not in {"lunch", "evening"}:
+            return
+
+        grouped: Dict[str, List[Dict[str, object]]] = {}
+        for npc in npcs:
+            if str(npc.get("runtime_transition", "")):
+                continue
+            location = self.town_npc_actual_location(npc)
+            if location in {"HouseInterior", "PrivateResidence"}:
+                continue
+            grouped.setdefault(location, []).append(npc)
+
+        for location, residents in grouped.items():
+            residents.sort(key=lambda record: str(record.get("id", "")))
+            available = list(residents)
+            while len(available) >= 2:
+                npc = available.pop(0)
+                x1, y1 = (
+                    (int(npc.get("x", 0)), int(npc.get("y", 0)))
+                    if location == "Town"
+                    else (int(npc.get("interior_x", 0)), int(npc.get("interior_y", 0)))
+                )
+                nearby = []
+                for other in available:
+                    x2, y2 = (
+                        (int(other.get("x", 0)), int(other.get("y", 0)))
+                        if location == "Town"
+                        else (int(other.get("interior_x", 0)), int(other.get("interior_y", 0)))
+                    )
+                    distance = abs(x1 - x2) + abs(y1 - y2)
+                    if distance <= (5 if location == "Town" else 8):
+                        nearby.append((distance, str(other.get("id", "")), other))
+                if not nearby:
+                    continue
+                nearby.sort(key=lambda item: (item[0], item[1]))
+                other = nearby[0][2]
+                pair_seed = sum(ord(ch) for ch in f"{day_key}:{phase}:{npc.get('id')}:{other.get('id')}")
+                if location == "Town" and pair_seed % 3 != 0:
+                    continue
+                available.remove(other)
+                at_home = bool(self.town_npc_residence_id_from_runtime(location))
+                social_link = self.record_town_npc_social_link(npc, other)
+                first_name = str(npc.get("name", "a neighbor"))
+                second_name = str(other.get("name", "a neighbor"))
+                if not at_home and int(social_link.get("score", 0)) < 0:
+                    activity_a = f"debating town news with {second_name}"
+                    activity_b = f"debating town news with {first_name}"
+                else:
+                    activity_a = (
+                        f"sharing supper and household news with {second_name}"
+                        if at_home else f"stopped along the route to talk with {second_name}"
+                    )
+                    activity_b = (
+                        f"sharing supper and household news with {first_name}"
+                        if at_home else f"stopped along the route to talk with {first_name}"
+                    )
+                for subject, partner, activity in ((npc, other, activity_a), (other, npc, activity_b)):
+                    subject["social_partner_id"] = str(partner.get("id", ""))
+                    subject["social_activity"] = activity
+                    subject["social_day_key"] = day_key
+                    subject["social_phase"] = phase
+
     def update_town_npcs(self, force_reanchor: bool = False):
-        if not self.on_town():
+        if not (self.on_town() or self.on_town_interior()):
             return
         self.normalize_town_npcs()
         for npc in self.active_town_npcs():
             try:
                 npc_id = str(npc.get("id", ""))
                 phase = self.town_npc_current_routine_phase(npc)
-                previous_phase = str(npc.get("routine_phase", ""))
-                previous_weather = str(npc.get("routine_weather", ""))
-                phase_changed = (
-                    force_reanchor
-                    or previous_phase != phase
-                    or previous_weather != str(self.state.weather)
-                    or str(npc.get("routine_day_key", "")) != self.town_npc_day_key()
-                )
                 npc["routine_phase"] = phase
                 npc["routine_label"] = self.town_routine_phase_label(phase)
                 npc["routine_weather"] = str(self.state.weather)
                 npc["routine_day_key"] = self.town_npc_day_key()
+                desired = self.town_npc_desired_location(npc)
+                actual = self.town_npc_actual_location(npc)
+                npc["runtime_target_location"] = desired
+                npc["activity"] = self.town_npc_activity_label(npc)
 
-                if self.town_npc_is_indoor(npc):
+                if actual == "HouseInterior":
                     npc["indoors"] = True
-                    npc["indoor_location"] = self.town_npc_indoor_location(npc)
-                    npc["activity"] = self.town_npc_activity_label(npc)
+                    npc["indoor_location"] = "Farmhouse"
+                    continue
+
+                # Locations outside the map the player is currently observing
+                # can advance immediately. Visible exits and entrances still
+                # happen one tile at a time on the current map.
+                observed_location = self.town_npc_observed_runtime_location()
+                if self.on_town_interior() and actual not in {observed_location, "Town"}:
+                    self.town_npc_place_at_destination(npc, desired)
+                    actual = desired
+
+                if self.on_town_interior() and actual == "Town":
+                    if desired == observed_location:
+                        npc["runtime_location"] = desired
+                        npc["interior_x"], npc["interior_y"] = self.town_npc_nearest_interior_tile(desired, 27, 18)
+                        npc["runtime_transition"] = "entering_building"
+                        anchor = self.town_npc_interior_anchor(npc, desired)
+                        self.town_npc_move_interior_toward(npc, desired, anchor)
+                    else:
+                        self.town_npc_place_at_destination(npc, desired)
+                    continue
+
+                if actual == "PrivateResidence":
+                    if desired == "PrivateResidence":
+                        npc["indoors"] = True
+                        npc["indoor_location"] = "Private Home"
+                        npc["runtime_transition"] = ""
+                        continue
+                    npc["runtime_location"] = "Town"
+                    npc["x"], npc["y"] = self.town_npc_private_home_anchor(npc)
+                    npc["runtime_transition"] = "leaving_home"
+                    actual = "Town"
+
+                if actual == "RegionalTravel":
+                    if desired == "RegionalTravel":
+                        npc["indoors"] = True
+                        npc["indoor_location"] = str(npc.get("regional_destination", "Regional Roads"))
+                        npc["runtime_transition"] = ""
+                        continue
+                    npc["runtime_location"] = "Town"
+                    npc["x"], npc["y"] = (58, 1)
+                    npc["runtime_transition"] = "returning_from_region"
+                    actual = "Town"
+
+                if self.town_npc_is_authored_interior_location(actual):
+                    if desired == actual:
+                        npc["indoors"] = True
+                        npc["indoor_location"] = self.town_npc_indoor_location(npc)
+                        anchor = self.town_npc_interior_anchor(npc, actual)
+                        if observed_location == actual:
+                            npc["runtime_transition"] = "walking_inside"
+                            self.town_npc_move_interior_toward(npc, actual, anchor)
+                        else:
+                            npc["interior_x"], npc["interior_y"] = anchor
+                        if (int(npc.get("interior_x", -1)), int(npc.get("interior_y", -1))) == anchor:
+                            npc["runtime_transition"] = ""
+                        continue
+
+                    landing = self.town_npc_nearest_interior_tile(actual, 27, 18)
+                    if observed_location == actual:
+                        npc["runtime_transition"] = "leaving_building"
+                        if not self.town_npc_move_interior_toward(npc, actual, landing):
+                            continue
+                    npc["runtime_location"] = "Town"
+                    npc["x"], npc["y"] = self.town_npc_exterior_access(actual, npc_id)
+                    npc["runtime_transition"] = "outside_door"
+                    actual = "Town"
+                    if not self.on_town():
+                        continue
+
+                if actual != "Town":
                     continue
 
                 npc["indoors"] = False
                 npc["indoor_location"] = ""
+                if desired == "HouseInterior":
+                    self.town_npc_place_at_destination(npc, desired)
+                    continue
+                if desired == "PrivateResidence":
+                    target = self.town_npc_private_home_anchor(npc)
+                    npc["runtime_transition"] = "going_home"
+                    if self.town_npc_move_town_toward(npc, target):
+                        self.town_npc_place_at_destination(npc, desired)
+                    continue
+                if desired == "RegionalTravel":
+                    npc["runtime_transition"] = "leaving_for_region"
+                    if self.town_npc_move_town_toward(npc, (58, 1)):
+                        self.town_npc_place_at_destination(npc, desired)
+                    continue
+                if self.town_npc_is_authored_interior_location(desired):
+                    target = self.town_npc_exterior_access(desired, npc_id)
+                    npc["runtime_transition"] = "going_to_door"
+                    if self.town_npc_move_town_toward(npc, target):
+                        npc["runtime_location"] = desired
+                        npc["interior_x"], npc["interior_y"] = self.town_npc_nearest_interior_tile(desired, 27, 18)
+                        npc["runtime_transition"] = "entering_building"
+                    continue
+
                 x = int(npc.get("x", 0))
                 y = int(npc.get("y", 0))
                 ax, ay = self.town_npc_schedule_anchor(npc)
                 npc["current_anchor_x"] = ax
                 npc["current_anchor_y"] = ay
-                npc["activity"] = self.town_npc_activity_label(npc)
-
-                # If an NPC was effectively unavailable/indoors and is now outside, place them near their current anchor.
-                if phase_changed or self.town_map[y][x] not in [".", "=", ":", ","] or abs(x - ax) + abs(y - ay) > max(12, int(npc.get("wander_radius", 5)) * 3):
-                    npc["x"], npc["y"] = self.nearest_town_npc_passable_tile(ax, ay, npc_id)
+                travel_radius = max(3, int(npc.get("wander_radius", 5)) // 2 + 2)
+                distance_to_anchor = abs(x - ax) + abs(y - ay)
+                completing_route = str(npc.get("runtime_transition", "")) in {
+                    "outside_door", "leaving_home", "walking_to_routine"
+                }
+                if distance_to_anchor > 0 and (completing_route or distance_to_anchor > travel_radius):
+                    npc["runtime_transition"] = "walking_to_routine"
+                    self.town_npc_move_town_toward(npc, (ax, ay))
                     continue
+                npc["runtime_transition"] = ""
 
                 if self.town_npc_near_player(npc, distance=2):
                     self.town_npc_face_player(npc)
@@ -4349,7 +6361,7 @@ class NpcMixin:
                 if random.random() > move_chance:
                     continue
 
-                radius = max(3, int(npc.get("wander_radius", 5)) // 2 + 2)
+                radius = travel_radius
                 options = [(1,0),(-1,0),(0,1),(0,-1)]
                 random.shuffle(options)
 
@@ -4372,8 +6384,11 @@ class NpcMixin:
                         elif dy < 0:
                             npc["facing"] = "UP"
                         break
-            except Exception:
+            except Exception as exc:
+                append_debug_log(f"Authored town NPC update skipped for {npc.get('id', '?')}: {type(exc).__name__}: {exc}")
                 continue
+        self.update_town_npc_social_encounters()
+        self.update_regional_town_visitors()
 
     def town_npc_role_dialogue_lines(self, npc: Dict[str, object]) -> List[str]:
         first = self.choose_npc_dialogue(npc)
@@ -4382,6 +6397,335 @@ class NpcMixin:
         if second.get("id") != first.get("id"):
             lines.append(f'"{second.get("text", "Good to see you.")}"')
         return lines
+
+    def npc_dialogue_preferred_response_style(self, npc: Dict[str, object]) -> str:
+        role = str(npc.get("role") or npc.get("profession") or "Villager")
+        for style, roles in NPC_DIALOGUE_RESPONSE_PREFERENCES.items():
+            if role in roles:
+                return style
+        personality_text = " ".join(
+            [
+                str(npc.get("personality", "")),
+                *(str(value) for value in npc.get("personality_traits", []) or []),
+            ]
+        ).lower()
+        if any(word in personality_text for word in ("kind", "warm", "gentle", "caring", "patient")):
+            return "empathetic"
+        if any(word in personality_text for word in ("curious", "scholar", "thoughtful", "observant", "creative")):
+            return "curious"
+        return "practical"
+
+    def npc_dialogue_response_choice(
+        self,
+        npc: Dict[str, object],
+        influence_available: bool = True,
+        title: str = "Your Response",
+    ) -> Dict[str, object]:
+        """Let the player answer an NPC and return a bounded social effect."""
+        preference = self.npc_dialogue_preferred_response_style(npc)
+        availability_hint = "Can influence your standing" if influence_available else "No further influence today"
+        items = [
+            MenuItem(
+                label="Listen Without Interrupting",
+                value="empathetic",
+                enabled=True,
+                hint=availability_hint,
+            ),
+            MenuItem(
+                label="Ask a Thoughtful Follow-Up",
+                value="curious",
+                enabled=True,
+                hint=availability_hint,
+            ),
+            MenuItem(
+                label="Suggest a Concrete Next Step",
+                value="practical",
+                enabled=True,
+                hint=availability_hint,
+            ),
+            MenuItem(
+                label="Brush It Aside",
+                value="dismissive",
+                enabled=True,
+                hint="May damage trust" if influence_available else "No further influence today",
+            ),
+            MenuItem(label="Leave the Conversation There", value="leave", enabled=True),
+        ]
+        choice = self.vertical_panel_select(
+            title,
+            items,
+            LEFT_PANEL_WIDTH,
+            LEFT_PANEL_HEIGHT,
+            return_back=True,
+        )
+        style = str(choice.value) if choice else "leave"
+        if style == MENU_BACK:
+            style = "leave"
+        if not influence_available or style == "leave":
+            effect = 0
+        elif style == "dismissive":
+            effect = -3
+        elif style == preference:
+            effect = 2
+        else:
+            effect = 1
+        name = str(npc.get("name", "They"))
+        if style == "leave":
+            reaction = f"{name} lets the subject rest without taking offense."
+        elif style == "dismissive":
+            reaction = f"{name}'s expression closes. They clearly expected the subject to be taken more seriously."
+        elif style == preference:
+            reaction = {
+                "empathetic": f"{name} relaxes when you give them room to finish the thought in their own way.",
+                "curious": f"{name} considers your follow-up carefully and answers with more detail than before.",
+                "practical": f"{name} tests your suggestion against the problem and nods at the part that might actually work.",
+            }.get(style, f"{name} appreciates the response.")
+        else:
+            reaction = f"{name} considers your response. It was not quite their instinct, but the effort feels sincere."
+        return {
+            "style": style,
+            "preferred_style": preference,
+            "effect": effect,
+            "reaction": reaction,
+        }
+
+    def town_npc_work_insight(self, npc: Dict[str, object]) -> str:
+        role = str(npc.get("role", "Villager"))
+        choices = list(NPC_ROLE_CONVERSATION_INSIGHTS.get(role, ()))
+        if not choices:
+            data = self.town_npc_dialogue_data(npc)
+            return str(data.get("motivation", "The work changes according to who needs it and what the day allows."))
+        return self.town_npc_daily_pick(npc, "work_insight", choices)
+
+    def town_npc_first_person_statement(self, npc: Dict[str, object], text: object) -> str:
+        statement = " ".join(str(text or "").strip().split())
+        name = str(npc.get("name", ""))
+        replacements = {
+            f"{name} wants": "I want",
+            f"{name} keeps": "I keep",
+            f"{name} says": "I think",
+            f"{name} worries": "I worry",
+            f"{name} hopes": "I hope",
+            f"{name} believes": "I believe",
+        }
+        for source, replacement in replacements.items():
+            if source and statement.startswith(source):
+                return replacement + statement[len(source):]
+        return statement
+
+    def town_npc_known_person_line(self, npc: Dict[str, object]) -> str:
+        npc_id = str(npc.get("id", ""))
+        partner_id = str(npc.get("social_partner_id", ""))
+        if partner_id:
+            partner = self.npc_record_by_id(partner_id)
+            if partner:
+                link = self.town_npc_social_link_label(npc_id, partner_id)
+                activity = str(npc.get("social_activity", "spending time together") or "spending time together")
+                return (
+                    f"{partner.get('name', 'A neighbor')} and I are {link}. "
+                    f"You learn a surprising amount about somebody while {activity}."
+                )
+        links = self.regional_town_life_state().get("npc_social_links", {})
+        candidates: List[Tuple[int, str]] = []
+        if isinstance(links, dict):
+            for pair_id, record in links.items():
+                ids = str(pair_id).split("|", 1)
+                if len(ids) != 2 or npc_id not in ids or not isinstance(record, dict):
+                    continue
+                other_id = ids[1] if ids[0] == npc_id else ids[0]
+                candidates.append((abs(int(record.get("score", 0) or 0)), other_id))
+        if candidates:
+            _weight, other_id = sorted(candidates, reverse=True)[0]
+            other = self.npc_record_by_id(other_id)
+            if other:
+                return (
+                    f"{other.get('name', 'A neighbor')} and I are "
+                    f"{self.town_npc_social_link_label(npc_id, other_id)}. "
+                    "Town gets smaller once you know which disagreements are permanent and which only needed lunch."
+                )
+        rumor = self.town_npc_dialogue_data(npc).get("rumor", "")
+        if rumor:
+            return self.town_npc_first_person_statement(npc, rumor)
+        return "I know people by their routines more than by their introductions."
+
+    def town_npc_conversation_topic_items(self, npc: Dict[str, object]) -> List[MenuItem]:
+        relationship = self.town_npc_relationship(str(npc.get("id", "")))
+        return [
+            MenuItem(label="Ask What's on Their Mind", value="mind", enabled=True, hint=self.town_npc_mood(npc).title()),
+            MenuItem(label="Ask What They're Doing", value="activity", enabled=True, hint=self.town_npc_activity_label(npc)),
+            MenuItem(label="Ask About Their Work", value="work", enabled=True, hint=str(npc.get("role", "Villager"))),
+            MenuItem(label="Ask About This Place", value="place", enabled=True, hint=self.town_npc_location_label(npc)),
+            MenuItem(label="Ask About Someone They Know", value="people", enabled=True, hint="Friends, family, and neighbors"),
+            MenuItem(
+                label="Ask Something Personal",
+                value="personal",
+                enabled=relationship >= 25,
+                hint="Requires Acquaintance" if relationship < 25 else self.relationship_tier_for_npc(npc),
+            ),
+            MenuItem(label="Back", value=MENU_BACK, enabled=True),
+        ]
+
+    def town_npc_conversation_topic_lines(
+        self,
+        npc: Dict[str, object],
+        topic: str,
+    ) -> List[str]:
+        topic = str(topic or "mind")
+        name = str(npc.get("name", "Villager"))
+        role = str(npc.get("role", "Villager"))
+        activity = self.town_npc_activity_label(npc)
+        location = self.town_npc_location_label(npc)
+        first_person_activity = activity.replace("their ", "my ")
+        place_phrase = f"life {location}" if location.lower().startswith("inside ") else location
+        data = self.town_npc_dialogue_data(npc)
+        lines: List[str] = [self.town_npc_context_line(npc), ""]
+
+        if topic == "activity":
+            lines.extend([
+                f'"I am {first_person_activity}. It is one of those tasks that looks simpler from across the room."',
+                "",
+                f'"{self.town_npc_work_insight(npc)}"',
+            ])
+        elif topic == "work":
+            lines.extend([
+                f'"{self.town_npc_work_insight(npc)}"',
+                "",
+                f"{name} explains how the work of a {role.lower()} fits into the routines of {place_phrase}.",
+            ])
+        elif topic == "place":
+            context_category = self.weather_dialogue_category()
+            entry = self.choose_npc_dialogue(npc, immediate_category=context_category)
+            occasion = self.todays_town_public_occasion()
+            lines.append(f'"{entry.get("text", "The place changes with the day.")}"')
+            lines.extend([
+                "",
+                f'"Right now I am thinking about {place_phrase}, {self.state.weather.lower()} weather, and what {self.state.season.lower()} asks of this town."',
+            ])
+            if occasion:
+                lines.extend(["", f'"{occasion.get("name", "Today’s gathering")} changes who passes through {occasion.get("location", "town")} and what they notice."'])
+        elif topic == "people":
+            lines.extend([f'"{self.town_npc_known_person_line(npc)}"'])
+            if self.town_npc_relationship(str(npc.get("id", ""))) >= 60 and data.get("secret"):
+                lines.extend(["", f'"{self.town_npc_first_person_statement(npc, data.get("secret"))}"'])
+        elif topic == "personal":
+            relationship_category = self.relationship_dialogue_category_for_tier(self.relationship_tier_for_npc(npc))
+            entry = self.choose_npc_dialogue(npc, immediate_category=relationship_category)
+            lines.append(f'"{entry.get("text", "I am still deciding how much of that answer to share.")}"')
+            personal = data.get("secret") if self.town_npc_relationship(str(npc.get("id", ""))) >= 60 else data.get("motivation")
+            if personal:
+                lines.extend(["", f'"{self.town_npc_first_person_statement(npc, personal)}"'])
+        else:
+            first = self.choose_npc_dialogue(npc)
+            second = self.choose_npc_dialogue(npc)
+            lines.append(f'"{first.get("text", "Good to see you.")}"')
+            if second.get("id") != first.get("id"):
+                lines.extend(["", f'"{second.get("text", self.town_npc_work_insight(npc))}"'])
+            lines.extend(["", f'"{self.town_npc_work_insight(npc)}"'])
+        return lines
+
+    def town_npc_conversation_menu(
+        self,
+        npc: Dict[str, object],
+        influence_available: bool,
+    ) -> Dict[str, object]:
+        topic_choice = self.vertical_panel_select(
+            f"Talk with {npc.get('name', 'Villager')}",
+            self.town_npc_conversation_topic_items(npc),
+            LEFT_PANEL_WIDTH,
+            LEFT_PANEL_HEIGHT,
+            return_back=True,
+        )
+        if not topic_choice or topic_choice.value == MENU_BACK:
+            return {"effect": 0, "style": "leave", "topic": ""}
+        topic = str(topic_choice.value)
+        self.vertical_panel_view(
+            str(npc.get("name", "Villager")),
+            self.town_npc_conversation_topic_lines(npc, topic),
+            LEFT_PANEL_WIDTH,
+            LEFT_PANEL_HEIGHT,
+        )
+        response = self.npc_dialogue_response_choice(
+            npc,
+            influence_available=influence_available,
+            title=f"Respond to {npc.get('name', 'Them')}",
+        )
+        response["topic"] = topic
+        self.vertical_panel_view(
+            str(npc.get("name", "Villager")),
+            [
+                str(response.get("reaction", "The conversation settles.")),
+                "",
+                (
+                    f"Relationship influence: {int(response.get('effect', 0)):+}"
+                    if influence_available and int(response.get("effect", 0))
+                    else "You have already had your meaningful conversation today."
+                    if not influence_available
+                    else "No relationship change."
+                ),
+            ],
+            LEFT_PANEL_WIDTH,
+            LEFT_PANEL_HEIGHT,
+        )
+        return response
+
+    def authored_town_service_spec(self, npc: Dict[str, object]):
+        return AUTHORED_TOWN_SERVICE_SPECS.get(str(npc.get("id", "")))
+
+    def town_npc_work_service_available(self, npc: Dict[str, object]) -> bool:
+        spec = self.authored_town_service_spec(npc)
+        return bool(
+            spec
+            and self.state.location == spec[0]
+            and self.town_npc_actual_location(npc) == spec[0]
+            and self.is_town_building_unlocked(TOWN_BUILDING_ID_BY_LOCATION.get(spec[0], ""))
+        )
+
+    def open_town_npc_work_service(self, npc: Dict[str, object]) -> bool:
+        spec = self.authored_town_service_spec(npc)
+        if not spec or not self.town_npc_work_service_available(npc):
+            self.set_message(f"{npc.get('name', 'They')} is not currently on duty here.")
+            return False
+        _location, _label, method_name, fallback = spec
+        method = getattr(self, method_name, None)
+        if not callable(method):
+            self.set_message("That service is not available right now.")
+            return False
+        if method_name in {"buy_menu", "blacksmith_menu", "carpenter_menu"}:
+            callback = lambda: method(auto_opened=False)
+        else:
+            callback = method
+        self.safe_menu(callback, fallback)
+        return True
+
+    def authored_town_service_hours(self, location: str) -> str:
+        return AUTHORED_TOWN_SERVICE_HOURS.get(str(location), "By appointment")
+
+    def authored_town_staff_names(self, location: str, present_only: bool = True) -> List[str]:
+        names: List[str] = []
+        for npc in self.active_town_npcs():
+            spec = self.authored_town_service_spec(npc)
+            if not spec or spec[0] != str(location):
+                continue
+            if present_only and self.town_npc_actual_location(npc) != str(location):
+                continue
+            names.append(str(npc.get("name", "Staff")))
+        return names
+
+    def authored_town_building_detail(self, building_id: str) -> str:
+        data = TOWN_BUILDING_DATA.get(str(building_id), {})
+        location = str(data.get("location", ""))
+        if not location:
+            return ""
+        hours = self.authored_town_service_hours(location)
+        assigned = self.authored_town_staff_names(location, present_only=False)
+        present = self.authored_town_staff_names(location, present_only=True)
+        if present:
+            staffing = f"on duty: {', '.join(present)}"
+        elif assigned:
+            staffing = f"staff away: {', '.join(assigned)}"
+        else:
+            staffing = "self-service counter"
+        return f"Hours: {hours}; {staffing}."
 
     def town_npc_weather_dialogue_line(self, npc: Dict[str, object]) -> str:
         choices = self.curated_dialogue_lines_for_category(npc, self.weather_dialogue_category())
@@ -5118,7 +7462,16 @@ class NpcMixin:
         if not isinstance(data, dict):
             data = {}
         curated_pool = self.curated_dialogue_lines_for_category(npc, category)
-        raw_pool = curated_pool if curated_pool else data.get(category, [])
+        authored_pool = data.get(category, [])
+        if isinstance(authored_pool, (str, dict)):
+            authored_pool = [authored_pool]
+        if not isinstance(authored_pool, list):
+            authored_pool = []
+        # Character-specific writing must win. The shared contextual pool is a
+        # fallback only; it previously replaced authored lines for every common
+        # season/weather/story category, making all 26 residents sound alike
+        # despite their large individual dialogue catalogs.
+        raw_pool = list(authored_pool) if authored_pool else list(curated_pool)
         if category == "legacy_talk":
             legacy_data = self.town_npc_dialogue_data(npc)
             raw_pool = legacy_data.get("talk", [])
@@ -5185,12 +7538,13 @@ class NpcMixin:
         except Exception as exc:
             append_debug_log(f"Dialogue selection fallback for {npc_id}: {type(exc).__name__}: {exc}")
 
+        activity = self.town_npc_activity_label(npc)
         fallback = str(self.town_npc_daily_pick(npc, "fallback_talk", [
-            "Hey.",
-            "Need something?",
-            "I am busy right now.",
-            "Come back later.",
-        ]) or "Hey.")
+            f"I am {activity.replace('their ', 'my ')}. What did you want to ask about?",
+            self.town_npc_work_insight(npc),
+            f"This part of the day usually finds me {activity.replace('their ', 'my ')}.",
+            f"You caught me near {self.town_npc_location_label(npc)}. I have a moment to talk.",
+        ]) or "I have a moment to talk.")
         line_id = self.stable_dialogue_line_id(npc_id, "fallback", fallback)
         if remember:
             self.remember_npc_dialogue_line(npc_id, line_id)
@@ -5862,10 +8216,404 @@ class NpcMixin:
 
     def town_npc_dialogue_lines(self, npc: Dict[str, object], first_talk_today: Optional[bool] = None) -> List[str]:
         conversation = self.town_npc_role_dialogue_lines(npc)
-        primary_line = conversation[0] if conversation else "Good to see you."
-        return [str(primary_line)]
+        if not conversation:
+            conversation = [f'"{self.town_npc_work_insight(npc)}"']
+        context_lines: List[str] = []
+        occasion = self.todays_town_public_occasion()
+        if occasion:
+            context_lines.append(f'"Today everyone is adjusting around {occasion["name"]} at {occasion["location"]}."')
+        partner_id = str(npc.get("social_partner_id", ""))
+        if partner_id:
+            partner = self.npc_record_by_id(partner_id)
+            if partner:
+                link = self.town_npc_social_link_label(str(npc.get("id", "")), partner_id)
+                context_lines.append(f'"{partner.get("name", "A neighbor")} and I have become {link} through our repeated meetings."')
+        return [
+            self.town_npc_context_line(npc),
+            "",
+            *conversation,
+            *(["", *context_lines] if context_lines else []),
+            "",
+            f'"{self.town_npc_work_insight(npc)}"',
+        ]
+
+    def regional_visitor_bond_label(self, value: int) -> str:
+        if value >= 12:
+            return "Trusted Route Friend"
+        if value >= 6:
+            return "Familiar Traveler"
+        if value >= 2:
+            return "Recognized Visitor"
+        return "New Arrival"
+
+    def regional_visitor_stock(self, visitor: Dict[str, object]) -> List[Dict[str, object]]:
+        role = str(visitor.get("role", "Traveler"))
+        items = list(visitor.get("origin_exports", []) or [])
+        items.extend({
+            "Traveling Merchant": ["Field Snack", "Wild Herbs"],
+            "Herbalist": ["Wild Herbs", "Cave Herbs"],
+            "Prospector": ["Stone", "Coal"],
+            "Performer": ["Honey"],
+            "Ranger": ["Field Snack", "Fiber"],
+        }.get(role, []))
+        stock = []
+        for item in list(dict.fromkeys(str(item) for item in items if str(item or "").strip()))[:5]:
+            base = int(self.shippable_unit_price(item)) if hasattr(self, "shippable_unit_price") else 0
+            price = max(20, base * 2 if base else 45)
+            stock.append({"item": item, "price": price, "note": f"Carried from {visitor.get('origin', 'the region')}"})
+        return stock
+
+    def regional_visitor_purchase_key(self, visitor: Dict[str, object], item: str) -> str:
+        return f"{self.town_npc_day_key()}:{visitor.get('id', 'visitor')}:{item}"
+
+    def regional_visitor_goods_menu(self, visitor: Dict[str, object]):
+        stock = self.regional_visitor_stock(visitor)
+        life = self.regional_town_life_state()
+        counts = life.setdefault("visitor_purchase_counts", {})
+        items = []
+        for record in stock:
+            key = self.regional_visitor_purchase_key(visitor, str(record["item"]))
+            sold = int(counts.get(key, 0) or 0) >= 1
+            items.append(MenuItem(
+                label=f"{record['item']} - {record['price']}g",
+                value=str(record["item"]), enabled=not sold and int(self.state.money) >= int(record["price"]),
+                hint="Sold today" if sold else str(record["note"]),
+            ))
+        items.append(MenuItem(label="Back", value=MENU_BACK, enabled=True))
+        choice = self.vertical_panel_select("Origin Goods", items, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT, return_back=True)
+        if not choice or choice.value == MENU_BACK:
+            return
+        record = next((row for row in stock if str(row["item"]) == str(choice.value)), None)
+        if not record:
+            return
+        price = int(record["price"])
+        key = self.regional_visitor_purchase_key(visitor, str(record["item"]))
+        if int(self.state.money) < price or int(counts.get(key, 0) or 0) >= 1:
+            self.set_message("That origin good is no longer available today.")
+            return
+        self.state.money -= price
+        add_inventory_items(self.state.inventory, {str(record["item"]): 1})
+        counts[key] = 1
+        self.autosave_with_message(f"Bought {record['item']} from {visitor.get('name', 'the traveler')} for {price}g.")
+
+    def regional_origin_chart_unknown_count(self, visitor: Dict[str, object]) -> int:
+        cx, cy = int(visitor.get("origin_chunk_x", 0)), int(visitor.get("origin_chunk_y", 0))
+        return sum(not self.wilderness_chunk_known(x, y) for x, y in self.wilderness_region_chunks(cx, cy))
+
+    def purchase_regional_visitor_origin_chart(self, visitor: Dict[str, object]) -> bool:
+        unknown = self.regional_origin_chart_unknown_count(visitor)
+        if unknown <= 0:
+            self.set_message(f"You already know the region around {visitor.get('origin', 'that origin')}.")
+            return False
+        price = 160 + min(240, int(visitor.get("distance_chunks", 0)) * 5)
+        if int(self.state.money) < price:
+            self.set_message(f"The origin chart costs {price}g.")
+            return False
+        cx, cy = int(visitor.get("origin_chunk_x", 0)), int(visitor.get("origin_chunk_y", 0))
+        record = self.wilderness_region_record(cx, cy)
+        mapped = record.setdefault("mapped_chunks", [])
+        added = 0
+        for x, y in self.wilderness_region_chunks(cx, cy):
+            key = f"{x},{y}"
+            if key not in mapped:
+                mapped.append(key)
+                added += 1
+        self.state.money -= price
+        self.autosave_with_message(f"Bought a chart of {visitor.get('origin', 'the origin region')} for {price}g; mapped {added} chunk(s).")
+        return True
+
+    def talk_to_regional_circulation_traveler(self, traveler: Dict[str, object]) -> bool:
+        visitor_id = str(traveler.get("id", "regional_visitor"))
+        if traveler.get("authored_resident_trip"):
+            today = self.town_npc_day_key()
+            if self.state.town_npc_last_talk_day.get(visitor_id) == today:
+                self.set_message(f"{traveler.get('name', 'The resident')} has already caught up with you today.")
+                return False
+            self.state.town_npc_last_talk_day[visitor_id] = today
+            gain = self.adjust_town_npc_relationship(visitor_id, RELATIONSHIP_TALK_GAIN)
+            self.autosave_with_message(f"Met {traveler.get('name', 'a town resident')} on their regional errand. Relationship +{gain}.")
+            return True
+        life = self.regional_town_life_state()
+        today = self.town_npc_day_key()
+        last_talk = life.setdefault("visitor_last_talk_day", {}).get(visitor_id, "")
+        if last_talk == today:
+            self.set_message(f"{traveler.get('name', 'The traveler')} has already shared today's road news.")
+            return False
+        bonds = life.setdefault("visitor_bonds", {})
+        bonds[visitor_id] = min(250, int(bonds.get(visitor_id, 0) or 0) + 1)
+        life["visitor_last_talk_day"][visitor_id] = today
+        memories = life.setdefault("visitor_memories", {}).setdefault(visitor_id, [])
+        memories.append(f"{today}: Met on the road toward {traveler.get('route_destination_name', 'a regional destination')}.")
+        life["visitor_memories"][visitor_id] = memories[-8:]
+        self.autosave_with_message(f"Met {traveler.get('name', 'a familiar traveler')} on the regional road. Connection +1.")
+        return True
+
+    def assist_regional_circulation_traveler(self, traveler: Dict[str, object]) -> bool:
+        traveler_id = str(traveler.get("id", "regional_visitor"))
+        life = self.regional_town_life_state()
+        assistance = life.setdefault("visitor_purchase_counts", {})
+        key = f"assist:{self.town_npc_day_key()}:{traveler_id}"
+        if int(assistance.get(key, 0) or 0) >= 1:
+            self.set_message(f"You already helped {traveler.get('name', 'this traveler')} along the route today.")
+            return False
+        local_commute = bool(traveler.get("home_region_commute"))
+        stamina_cost = 2 if local_commute else 4
+        minutes = 20 if local_commute else 40
+        reward = 20 if local_commute else 45
+        vitality_gain = 1 if local_commute else 2
+        if not self.spend_stamina(stamina_cost):
+            return False
+        self.advance_time(minutes)
+        assistance[key] = 1
+        traveler["route_condition"] = "Traveler Assisted"
+        if traveler.get("authored_resident_trip"):
+            gain = self.adjust_town_npc_relationship(traveler_id, 2)
+            trip = life.setdefault("resident_trips", {}).get(traveler_id, {})
+            if isinstance(trip, dict):
+                trip["route_condition"] = "Traveler Assisted"
+            connection_text = f"relationship +{gain}"
+        else:
+            bonds = life.setdefault("visitor_bonds", {})
+            bonds[traveler_id] = min(250, int(bonds.get(traveler_id, 0) or 0) + 2)
+            journey = life.setdefault("journeys", {}).get(traveler_id, {})
+            if isinstance(journey, dict):
+                journey["route_condition"] = "Traveler Assisted"
+                if int(journey.get("arrival_hour", 8)) > int(self.state.hour):
+                    journey["arrival_hour"] = max(int(self.state.hour) + 1, int(journey["arrival_hour"]) - 2)
+            memories = life.setdefault("visitor_memories", {}).setdefault(traveler_id, [])
+            memories.append(f"{self.town_npc_day_key()}: Escorted safely along the road toward {traveler.get('route_destination_name', 'the next stop')}.")
+            life["visitor_memories"][traveler_id] = memories[-8:]
+            connection_text = "route connection +2"
+        if hasattr(self, "add_wilderness_region_vitality"):
+            self.add_wilderness_region_vitality(
+                int(self.state.wilderness_chunk_x), int(self.state.wilderness_chunk_y), vitality_gain,
+                f"escorted {traveler.get('name', 'a regional traveler')}",
+            )
+        self.state.money += reward
+        action = "Walked the local route with" if local_commute else "Escorted"
+        self.autosave_with_message(
+            f"{action} {traveler.get('name', 'the traveler')}: "
+            f"+{reward}g, +{vitality_gain} vitality, {connection_text}."
+        )
+        return True
+
+    def inn_guest_register_lines(self) -> List[str]:
+        visitors = self.regional_town_visitors()
+        lines = ["INN GUEST REGISTER", "", f"Date: {self.state.date_label}"]
+        if visitors:
+            for index, visitor in enumerate(visitors, 1):
+                lines.extend([
+                    "",
+                    f"Room {index}: {visitor.get('name', 'Traveler')} - {visitor.get('role', 'Traveler')}",
+                    f"Origin: {visitor.get('origin', 'Regional roads')} at chunk ({visitor.get('origin_chunk_x', 0)},{visitor.get('origin_chunk_y', 0)})",
+                    f"Route: {visitor.get('distance_chunks', 0)} chunks; {visitor.get('route_condition', 'Open')}",
+                    f"Arrival: {int(visitor.get('arrival_hour', 8)):02d}:00 | Status: {visitor.get('runtime_location', 'Traveling')}",
+                ])
+        else:
+            lines.extend(["", "No regional guests are registered today."])
+        returning = [
+            journey for journey in self.regional_town_life_state().get("journeys", {}).values()
+            if isinstance(journey, dict) and str(journey.get("status", "")) == "returning"
+        ]
+        if returning:
+            lines.extend(["", "Recently departed:"])
+            lines.extend(f"- {row.get('name', 'Traveler')} returning to {row.get('origin_name', 'their home route')}" for row in returning[:6])
+        return lines
+
+    def regional_visitor_conversation_lines(
+        self,
+        visitor: Dict[str, object],
+        topic: str,
+        bond: int,
+    ) -> List[str]:
+        role = str(visitor.get("role", "Traveler"))
+        origin = str(visitor.get("origin", "the regional roads"))
+        purpose = str(visitor.get("purpose", "visiting town"))
+        activity = str(visitor.get("activity", "visiting town"))
+        if topic == "origin":
+            text = (
+                f"I came from {origin}. The journey is {visitor.get('distance_chunks', 0)} chunks by the route I used, "
+                f"and it is currently {str(visitor.get('route_condition', 'open')).lower()}."
+            )
+        elif topic == "town":
+            occasion = self.todays_town_public_occasion()
+            text = (
+                f"I notice {occasion.get('name', 'ordinary town life')} first because visitors follow movement before they learn names. "
+                "A useful town makes its roads, services, and gathering places explain one another."
+            )
+        elif topic == "news":
+            text = str(visitor.get(
+                "regional_news",
+                "The roads are carrying merchants, field workers, letters, and settlement news more reliably than they did last season.",
+            ))
+        elif topic == "personal":
+            text = (
+                f"You have remembered me across several visits, so I will answer plainly: being a {role.lower()} lets me belong to several places without pretending any one road is home."
+                if bond >= 6
+                else f"For now, know that I am {purpose}. Familiarity takes more than recognizing the same coat at the inn."
+            )
+        else:
+            insight = self.town_npc_work_insight(visitor)
+            text = f"I am {activity} because I am {purpose}. {insight}"
+        return [
+            f'"{text}"',
+            "",
+            f"Role: {role}",
+            f"Origin: {origin}",
+            f"Current activity: {activity}",
+            f"Connection: {self.regional_visitor_bond_label(bond)} ({bond})",
+        ]
+
+    def regional_town_visitor_menu(self, visitor: Dict[str, object]):
+        visitor_id = str(visitor.get("id", "regional_visitor"))
+        while True:
+            life = self.regional_town_life_state()
+            bond = int(life.setdefault("visitor_bonds", {}).get(visitor_id, 0) or 0)
+            items = [
+                MenuItem(label="Talk", value="talk", enabled=True, hint=self.regional_visitor_bond_label(bond)),
+                MenuItem(label="Ask About Their Journey", value="journey", enabled=True),
+                MenuItem(label="Ask for Regional News", value="news", enabled=True),
+            ]
+            if self.regional_visitor_stock(visitor):
+                items.append(MenuItem(label="Browse Origin Goods", value="goods", enabled=True, hint=str(visitor.get("origin", "Regional stock"))))
+            if str(visitor.get("role", "")) == "Cartographer":
+                unknown = self.regional_origin_chart_unknown_count(visitor)
+                price = 160 + min(240, int(visitor.get("distance_chunks", 0)) * 5)
+                items.append(MenuItem(label="Purchase Origin Chart", value="origin_chart", enabled=unknown > 0 and int(self.state.money) >= price, hint=f"{price}g; maps {unknown} unknown chunks" if unknown else "Region already known"))
+            items.extend([
+                MenuItem(label="Visitor Profile", value="profile", enabled=True),
+                MenuItem(label="Back", value=MENU_BACK, enabled=True),
+            ])
+            choice = self.vertical_panel_select(
+                str(visitor.get("name", "Traveler")),
+                items,
+                LEFT_PANEL_WIDTH,
+                LEFT_PANEL_HEIGHT,
+                return_back=True,
+            )
+            if not choice or choice.value == MENU_BACK:
+                return
+            if choice.value == "talk":
+                today = self.town_npc_day_key()
+                last_talk = life.setdefault("visitor_last_talk_day", {}).get(visitor_id, "")
+                gain = 0
+                topic_items = [
+                    MenuItem(label="Ask What They're Doing", value="work", enabled=True, hint=str(visitor.get("activity", "Visiting town"))),
+                    MenuItem(label="Ask About Their Origin", value="origin", enabled=True, hint=str(visitor.get("origin", "Regional roads"))),
+                    MenuItem(label="Ask What They Notice Here", value="town", enabled=True, hint="Elsewhere through a visitor's eyes"),
+                    MenuItem(label="Ask for Regional News", value="news", enabled=True, hint=str(visitor.get("route_condition", "Open route"))),
+                    MenuItem(label="Ask Something Personal", value="personal", enabled=bond >= 2, hint="Requires Recognized Visitor" if bond < 2 else self.regional_visitor_bond_label(bond)),
+                    MenuItem(label="Back", value=MENU_BACK, enabled=True),
+                ]
+                topic_choice = self.vertical_panel_select(
+                    f"Talk with {visitor.get('name', 'Traveler')}",
+                    topic_items,
+                    LEFT_PANEL_WIDTH,
+                    LEFT_PANEL_HEIGHT,
+                    return_back=True,
+                )
+                if not topic_choice or topic_choice.value == MENU_BACK:
+                    continue
+                influence_available = last_talk != today
+                if last_talk != today:
+                    gain = 1
+                    life["visitor_bonds"][visitor_id] = min(250, bond + gain)
+                    life["visitor_last_talk_day"][visitor_id] = today
+                    memory = f"{today}: Spoke during {self.todays_town_public_occasion().get('name', 'a town visit')}."
+                    memories = life.setdefault("visitor_memories", {}).setdefault(visitor_id, [])
+                    memories.append(memory)
+                    life["visitor_memories"][visitor_id] = memories[-8:]
+                current_bond = int(life["visitor_bonds"].get(visitor_id, bond + gain) or 0)
+                self.vertical_panel_view(
+                    str(visitor.get("name", "Traveler")),
+                    self.regional_visitor_conversation_lines(visitor, str(topic_choice.value), current_bond),
+                    LEFT_PANEL_WIDTH,
+                    LEFT_PANEL_HEIGHT,
+                )
+                response = self.npc_dialogue_response_choice(
+                    visitor,
+                    influence_available=influence_available,
+                    title=f"Respond to {visitor.get('name', 'Them')}",
+                )
+                response_effect = int(response.get("effect", 0) or 0) if influence_available else 0
+                if response_effect:
+                    life["visitor_bonds"][visitor_id] = max(
+                        0,
+                        min(250, int(life["visitor_bonds"].get(visitor_id, 0) or 0) + response_effect),
+                    )
+                self.vertical_panel_view(
+                    str(visitor.get("name", "Traveler")),
+                    [
+                        str(response.get("reaction", "The visitor turns back toward town.")),
+                        "",
+                        f"Connection influence: {response_effect:+}"
+                        if response_effect
+                        else "No further connection influence today."
+                        if not influence_available
+                        else "No connection change.",
+                    ],
+                    LEFT_PANEL_WIDTH,
+                    LEFT_PANEL_HEIGHT,
+                )
+                self.autosave_with_message(
+                    f"Talked with {visitor.get('name', 'a regional visitor')}."
+                    + (f" Connection {gain + response_effect:+}." if influence_available else "")
+                )
+                continue
+            if choice.value == "journey":
+                self.vertical_panel_view(
+                    f"{visitor.get('name', 'Traveler')}'s Journey",
+                    [
+                        f"Origin: {visitor.get('origin', 'the regional roads')}",
+                        f"Origin coordinates: ({visitor.get('origin_chunk_x', 0)},{visitor.get('origin_chunk_y', 0)})",
+                        f"Road distance: {visitor.get('distance_chunks', 0)} chunks",
+                        f"Route condition: {visitor.get('route_condition', 'Open')}",
+                        f"Purpose: {visitor.get('purpose', 'visiting town')}",
+                        f"Current activity: {visitor.get('activity', 'visiting town')}",
+                        "Tonight they will use an assigned private guest room rather than crowding another guest.",
+                    ],
+                    LEFT_PANEL_WIDTH,
+                    LEFT_PANEL_HEIGHT,
+                )
+                continue
+            if choice.value == "news":
+                occasion = self.todays_town_public_occasion()
+                news = [
+                    f"Road report from {visitor.get('origin', 'the region')}:",
+                    str(visitor.get("regional_news", "Purposeful roads are carrying merchants, field workers, mail, and settlement news.")),
+                    f"The route is currently {str(visitor.get('route_condition', 'open')).lower()}.",
+                    f"Town today: {occasion.get('name', 'ordinary road traffic')}",
+                    "Repeated visits are remembered, so familiar travelers may recognize you later.",
+                ]
+                self.vertical_panel_view("Regional News", news, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
+                continue
+            if choice.value == "goods":
+                self.regional_visitor_goods_menu(visitor)
+                continue
+            if choice.value == "origin_chart":
+                self.purchase_regional_visitor_origin_chart(visitor)
+                continue
+            if choice.value == "profile":
+                memories = life.setdefault("visitor_memories", {}).get(visitor_id, [])
+                lines = [
+                    f"Name: {visitor.get('name', 'Traveler')}",
+                    f"Role: {visitor.get('role', 'Traveler')}",
+                    f"Origin: {visitor.get('origin', 'Regional roads')}",
+                    f"Origin coordinates: ({visitor.get('origin_chunk_x', 0)},{visitor.get('origin_chunk_y', 0)})",
+                    f"Route: {visitor.get('distance_chunks', 0)} chunks - {visitor.get('route_condition', 'Open')}",
+                    f"Connection: {self.regional_visitor_bond_label(bond)} ({bond})",
+                    "", "Shared memories:",
+                ]
+                lines.extend(f"- {row}" for row in memories[-5:])
+                if not memories:
+                    lines.append("- None yet")
+                self.vertical_panel_view("Visitor Profile", lines, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
+                continue
 
     def town_npc_menu(self, npc: Dict[str, object]):
+        if npc.get("regional_visitor"):
+            self.regional_town_visitor_menu(npc)
+            return
         if self.is_household_child_npc(npc):
             self.household_child_menu(npc)
             return
@@ -5902,10 +8650,30 @@ class NpcMixin:
             proposal_menu_hint = "Ready" if proposal_ok else proposal_reason
             items = [
                 MenuItem(label="Talk", value="talk", enabled=True),
-                MenuItem(label="Give gift", value="gift", enabled=not gifted_today, hint="Choose a carried item" if not gifted_today else "Already gave a gift today"),
-                MenuItem(label="Ask rumor", value="rumor", enabled=True),
+                MenuItem(label="Give Gift", value="gift", enabled=not gifted_today, hint="Choose a carried item" if not gifted_today else "Already gave a gift today"),
+                MenuItem(label="Ask Rumor", value="rumor", enabled=True),
                 MenuItem(label="Errand", value="errand", enabled=True, hint=errand_hint),
             ]
+            service_spec = self.authored_town_service_spec(npc)
+            if service_spec and self.town_npc_work_service_available(npc):
+                items.append(
+                    MenuItem(
+                        label=str(service_spec[1]),
+                        value="work_service",
+                        enabled=True,
+                        hint="on duty",
+                    )
+                )
+            if npc.get("home_region_destination_worker"):
+                local_work_ok, local_work_reason = self.home_region_local_work_status(npc)
+                items.append(
+                    MenuItem(
+                        label="Help with local work",
+                        value="local_work",
+                        enabled=local_work_ok,
+                        hint=local_work_reason,
+                    )
+                )
             if self.is_marriageable_npc(npc):
                 items.append(
                     MenuItem(
@@ -6011,6 +8779,19 @@ class NpcMixin:
                 self.vertical_panel_view(f"{npc.get('name')} Errand", self.errand_lines(errand), LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
                 self.set_message(f"{npc.get('name')} needs {errand.get('qty')} {errand.get('item')}.")
                 continue
+            if choice.value == "work_service":
+                self.open_town_npc_work_service(npc)
+                return
+            if choice.value == "local_work":
+                self.vertical_panel_view(
+                    "Local Work",
+                    self.home_region_local_work_lines(npc),
+                    LEFT_PANEL_WIDTH,
+                    LEFT_PANEL_HEIGHT,
+                )
+                if self.complete_home_region_local_work(npc):
+                    return
+                continue
             if choice.value == "courtship":
                 if self.court_town_npc(npc):
                     return
@@ -6089,10 +8870,30 @@ class NpcMixin:
                 message = self.state.message or f"Shared a moment with {npc.get('name', 'the villager')}."
                 self.autosave_with_message(message)
                 return
-        title = f"{npc.get('name', 'Villager')}"
-        lines = self.town_npc_dialogue_lines(npc, first_talk_today=first_talk_today)
-        self.vertical_panel_view(title, lines, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
+        response = self.town_npc_conversation_menu(
+            npc,
+            influence_available=first_talk_today,
+        )
+        if not response.get("topic"):
+            if first_talk_today:
+                if actual_gain:
+                    self.adjust_town_npc_relationship(npc_id, -actual_gain)
+                if self.state.town_npc_last_talk_day.get(npc_id) == today:
+                    self.state.town_npc_last_talk_day.pop(npc_id, None)
+            self.state.town_npc_dialogue_counts[npc_id] = max(
+                0,
+                int(self.state.town_npc_dialogue_counts.get(npc_id, 1)) - 1,
+            )
+            self.set_message(f"Stopped talking to {npc.get('name', 'the villager')}.")
+            return
+        if first_talk_today:
+            actual_gain += self.adjust_town_npc_relationship(
+                npc_id,
+                int(response.get("effect", 0) or 0),
+            )
         bonus = f" Relationship +{actual_gain}." if actual_gain > 0 else ""
+        if actual_gain < 0:
+            bonus = f" Relationship {actual_gain}."
         self.autosave_with_message(f"Talked to {npc.get('name', 'the villager')}.{bonus}")
 
 

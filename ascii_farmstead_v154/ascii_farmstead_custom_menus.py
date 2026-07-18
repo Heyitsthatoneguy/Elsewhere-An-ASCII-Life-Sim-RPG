@@ -121,6 +121,76 @@ class CustomContentMenuMixin:
             return None
         return str(choice.value)
 
+    def custom_ability_pattern_editor(
+        self,
+        existing: Sequence[Sequence[int]] = (),
+    ) -> Optional[List[List[int]]]:
+        """Draw an arbitrary attack footprint on a caster/target-relative grid."""
+        radius = 6
+        selected = {
+            (max(-radius, min(radius, int(point[0]))), max(-radius, min(radius, int(point[1]))))
+            for point in existing
+            if isinstance(point, (list, tuple)) and len(point) == 2
+        }
+        if not selected:
+            selected.add((0, 0))
+        cursor_x = cursor_y = 0
+        notice = "The center @ is the selected anchor. The drawing is authored facing right."
+        while True:
+            clear_screen()
+            print("Custom Attack Pattern")
+            print("=" * 48)
+            print("Draw every tile affected when the ability is used.")
+            print("Rotation and whether @ follows the caster or target are chosen next.")
+            print()
+            print("+" + "-" * (radius * 2 + 1) + "+")
+            for y in range(-radius, radius + 1):
+                row = []
+                for x in range(-radius, radius + 1):
+                    point = (x, y)
+                    if point == (cursor_x, cursor_y):
+                        glyph = "X" if point in selected else "+"
+                    elif point == (0, 0):
+                        glyph = "@" if point not in selected else "O"
+                    else:
+                        glyph = "#" if point in selected else "."
+                    row.append(glyph)
+                print("|" + "".join(row) + "|")
+            print("+" + "-" * (radius * 2 + 1) + "+")
+            print(f"Cursor: {cursor_x:+d},{cursor_y:+d} | Affected tiles: {len(selected)}/169")
+            print(notice)
+            print("WASD/arrows move | Z/Space toggle | C clear | R reset | Enter accept | X/Esc cancel")
+            key = normalize_key(read_key())
+            if key in {"\x1b", "x", "q", "b"}:
+                return None
+            if key in {"w", "UP"}:
+                cursor_y = max(-radius, cursor_y - 1)
+            elif key in {"s", "DOWN"}:
+                cursor_y = min(radius, cursor_y + 1)
+            elif key in {"a", "LEFT"}:
+                cursor_x = max(-radius, cursor_x - 1)
+            elif key in {"d", "RIGHT"}:
+                cursor_x = min(radius, cursor_x + 1)
+            elif key in {"z", " "}:
+                point = (cursor_x, cursor_y)
+                if point in selected:
+                    selected.remove(point)
+                else:
+                    selected.add(point)
+                notice = "Tile removed." if point not in selected else "Tile added."
+            elif key == "c":
+                selected.clear()
+                notice = "Pattern cleared. Add at least one affected tile."
+            elif key == "r":
+                selected = {(0, 0)}
+                cursor_x = cursor_y = 0
+                notice = "Pattern reset to the anchor tile."
+            elif key in {"\r", "\n"}:
+                if not selected:
+                    notice = "The pattern needs at least one affected tile."
+                    continue
+                return [[x, y] for x, y in sorted(selected, key=lambda point: (point[1], point[0]))]
+
     def custom_ability_builder(
         self,
         existing: Optional[Dict[str, object]] = None,
@@ -161,7 +231,7 @@ class CustomContentMenuMixin:
             "Ability Cost",
             "MP cost",
             0,
-            12,
+            20,
             int(current.get("mp_cost", 4)),
         )
         if mp_cost is None:
@@ -189,12 +259,12 @@ class CustomContentMenuMixin:
             record["mp_amount"] = power
         elif effect == "damage":
             damage = self.custom_number_menu(
-                "Ability Damage", "Damage", 1, 14, int(current.get("damage", 5))
+                "Ability Damage", "Damage", 1, 24, int(current.get("damage", 5))
             )
             if damage is None:
                 return None
             range_max = self.custom_number_menu(
-                "Ability Range", "Range", 1, 8, int(current.get("range_max", 4))
+                "Ability Range", "Range", 1, 12, int(current.get("range_max", 4))
             )
             if range_max is None:
                 return None
@@ -209,6 +279,7 @@ class CustomContentMenuMixin:
                     "cone": "Widening area from the caster.",
                     "cross": "Cross-shaped area.",
                     "multishot": "Several nearby targets.",
+                    "custom": "Draw an entirely new area tile by tile.",
                 },
             )
             if shape is None:
@@ -235,6 +306,37 @@ class CustomContentMenuMixin:
                 if shots is None:
                     return None
                 record["shots"] = shots
+            if shape == "custom":
+                pattern = self.custom_ability_pattern_editor(current.get("custom_pattern", [[0, 0]]))
+                if pattern is None:
+                    return None
+                anchor = self.custom_choice_menu(
+                    "Pattern Anchor",
+                    ["target", "caster"],
+                    str(current.get("pattern_anchor", "target")),
+                    hints={
+                        "target": "The drawn @ moves to the target cursor.",
+                        "caster": "The drawn @ remains on the ability user.",
+                    },
+                )
+                if anchor is None:
+                    return None
+                rotate = self.custom_choice_menu(
+                    "Pattern Rotation",
+                    ["yes", "no"],
+                    "yes" if bool(current.get("pattern_rotate", True)) else "no",
+                    hints={
+                        "yes": "Rotate the right-facing drawing toward the cursor.",
+                        "no": "Keep the drawing fixed in world orientation.",
+                    },
+                )
+                if rotate is None:
+                    return None
+                record.update({
+                    "custom_pattern": pattern,
+                    "pattern_anchor": anchor,
+                    "pattern_rotate": rotate == "yes",
+                })
             status = self.custom_choice_menu(
                 "Inflicted Status",
                 ABILITY_STATUSES,
@@ -254,6 +356,78 @@ class CustomContentMenuMixin:
                 if duration is None:
                     return None
                 record["status_duration"] = duration
+
+            armor_pierce = self.custom_number_menu(
+                "Attack Properties", "Armor pierced", 0, 8, int(current.get("armor_pierce", 0))
+            )
+            if armor_pierce is None:
+                return None
+            displacement = self.custom_choice_menu(
+                "Attack Movement",
+                [str(value) for value in range(-3, 4)],
+                str(current.get("displacement", 0)),
+                labels={
+                    **{str(value): f"Pull {abs(value)} tile{'s' if abs(value) != 1 else ''}" for value in range(-3, 0)},
+                    "0": "No forced movement",
+                    **{str(value): f"Push {value} tile{'s' if value != 1 else ''}" for value in range(1, 4)},
+                },
+            )
+            if displacement is None:
+                return None
+            life_steal = self.custom_number_menu(
+                "Attack Properties", "Maximum HP drained", 0, 12, int(current.get("life_steal", 0))
+            )
+            if life_steal is None:
+                return None
+            record.update({
+                "armor_pierce": armor_pierce,
+                "displacement": int(displacement),
+                "life_steal": life_steal,
+            })
+
+            combo_trigger = self.custom_choice_menu(
+                "Conditional Combo",
+                ["", "poison", "root", "vulnerable", "any_status", "caster_guarded"],
+                (
+                    str(current.get("combo_status", ""))
+                    or ("any_status" if current.get("combo_any_status") else "")
+                    or ("caster_guarded" if current.get("combo_guarded") else "")
+                ),
+                labels={"": "No combo", "any_status": "Target has any status", "caster_guarded": "Caster is guarding"},
+                hints={
+                    "poison": "Bonus when the target is poisoned.",
+                    "root": "Bonus when the target is rooted.",
+                    "vulnerable": "Bonus when the target is vulnerable.",
+                    "any_status": "Bonus when any supported status is present.",
+                    "caster_guarded": "Bonus while the ability user is guarding.",
+                },
+            )
+            if combo_trigger is None:
+                return None
+            if combo_trigger:
+                combo_damage = self.custom_number_menu(
+                    "Combo Rewards", "Bonus damage", 0, 10, int(current.get("combo_damage_bonus", 3))
+                )
+                if combo_damage is None:
+                    return None
+                combo_ap = self.custom_number_menu(
+                    "Combo Rewards", "AP refunded", 0, 1, int(current.get("combo_ap_gain", 0))
+                )
+                if combo_ap is None:
+                    return None
+                combo_mp = self.custom_number_menu(
+                    "Combo Rewards", "MP restored", 0, 8, int(current.get("combo_mp_gain", 0))
+                )
+                if combo_mp is None:
+                    return None
+                record.update({
+                    "combo_status": combo_trigger if combo_trigger in ABILITY_STATUSES else "",
+                    "combo_any_status": combo_trigger == "any_status",
+                    "combo_guarded": combo_trigger == "caster_guarded",
+                    "combo_damage_bonus": combo_damage,
+                    "combo_ap_gain": combo_ap,
+                    "combo_mp_gain": combo_mp,
+                })
 
             zone_type = self.custom_choice_menu(
                 "Persistent Zone",
@@ -367,30 +541,56 @@ class CustomContentMenuMixin:
         custom_only: bool = False,
     ) -> Optional[str]:
         excluded_keys = {name.casefold() for name in excluded}
-        custom_names = {
-            str(record.get("name", ""))
-            for record in self.custom_content_data()["abilities"]
-            if isinstance(record, dict)
-        }
-        skills = [
-            skill for skill in create_default_skills()
-            if skill.name.casefold() not in excluded_keys
-            and (not custom_only or skill.name in custom_names)
-        ]
-        items = [
-            MenuItem(
-                label=skill.name,
-                value=skill.name,
-                enabled=True,
-                hint=f"{skill.effect.replace('_', ' ')} | {skill.mp_cost} MP | {skill.description[:54]}",
+        while True:
+            custom_names = {
+                str(record.get("name", "")).casefold()
+                for record in self.custom_content_data()["abilities"]
+                if isinstance(record, dict)
+            }
+            skills = [
+                skill for skill in create_default_skills()
+                if skill.name.casefold() not in excluded_keys
+                and (not custom_only or skill.name.casefold() in custom_names)
+            ]
+            items = [
+                MenuItem(
+                    label="Create a new ability...",
+                    value="__create_ability__",
+                    enabled=True,
+                    hint="Open the complete attack/effect and hand-drawn pattern designer, then use the result here.",
+                )
+            ]
+            items.extend(
+                MenuItem(
+                    label=("[Custom] " if skill.name.casefold() in custom_names else "") + skill.name,
+                    value=skill.name,
+                    enabled=True,
+                    hint=f"{skill.effect.replace('_', ' ')} | {skill.mp_cost} MP | {skill.description[:54]}",
+                )
+                for skill in skills
             )
-            for skill in skills
-        ]
-        items.append(MenuItem(label="Back", value=MENU_BACK, enabled=True))
-        choice = menu_select(title, items, footer="Choose an ability.")
-        if choice is None or choice.value == MENU_BACK:
-            return None
-        return str(choice.value)
+            items.append(MenuItem(label="Back", value=MENU_BACK, enabled=True))
+            choice = menu_select(
+                title,
+                items,
+                footer="Choose an ability, or design a new one without leaving the class builder.",
+            )
+            if choice is None or choice.value == MENU_BACK:
+                return None
+            if choice.value == "__create_ability__":
+                record = self.custom_ability_builder()
+                if record is None:
+                    continue
+                self.state.message = self.save_custom_ability_record(record)
+                created_name = str(record.get("name", ""))
+                if any(
+                    str(saved.get("name", "")).casefold() == created_name.casefold()
+                    for saved in self.custom_content_data()["abilities"]
+                    if isinstance(saved, dict)
+                ):
+                    return created_name
+                continue
+            return str(choice.value)
 
     def custom_class_builder(
         self,
@@ -2020,10 +2220,13 @@ class CustomContentMenuMixin:
             "",
             "Abilities",
             "- Create attacks, healing, guard, cleanse, or focus-restoration skills.",
-            "- Damage abilities can use point, burst, line, cone, cross, or multishot shapes.",
+            "- Damage abilities can use standard shapes or a hand-drawn 13x13 area-of-effect pattern.",
+            "- Drawn patterns may follow the target or caster and may rotate toward the aiming cursor.",
+            "- Attacks can pierce armor, push or pull enemies, drain HP, and trigger conditional combo rewards.",
             "- Optional poison, root, vulnerable, and persistent elemental zones are supported.",
+            "- Long builder lists scroll automatically; W/S moves by row and A/D pages.",
             "- Values are bounded to combinations the tactical engine can resolve safely.",
-            "- The balance estimate warns about unusually efficient abilities but does not forbid them.",
+            "- The balance estimate includes drawn coverage and advanced attack properties but does not forbid them.",
             "",
             "Classes",
             "- Choose three starting abilities, three to six ordered progression abilities, and a mastery art.",

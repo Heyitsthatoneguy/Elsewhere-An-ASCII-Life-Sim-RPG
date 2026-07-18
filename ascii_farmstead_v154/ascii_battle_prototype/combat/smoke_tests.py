@@ -25,6 +25,46 @@ def run_smoke_tests() -> None:
     assert game.maps, "maps did not load"
     assert game.skills, "skills did not load"
     assert game.class_slot_limit() == 3
+    visual_game = Game()
+    visual_game.map = [list("....."), list("#####"), list(".....")]
+    raw_wall = visual_game.map[1][2]
+    assert visual_game.tactical_wall_glyph((2, 1)) == "─"
+    assert visual_game.tactical_tile_glyph((2, 1)) == "─"
+    assert game_module.strip_ansi(visual_game.base_tile("#", (2, 1))) == " ─ "
+    assert visual_game.map[1][2] == raw_wall == "#"
+    visual_game.detailed_map_glyphs = False
+    assert visual_game.tactical_wall_glyph((2, 1)) == "#"
+    assert visual_game.tactical_tile_glyph((2, 1)) == "#"
+    assert game_module.strip_ansi(visual_game.objective_marker_cell("exit")) == " E "
+    assert game_module.strip_ansi(visual_game.objective_marker_cell("hold")) == " H "
+    assert game_module.strip_ansi(visual_game.objective_marker_cell("object")) == " X "
+    assert "objectives: E/H/X" in visual_game.combat_legend_line()
+    visual_game.detailed_map_glyphs = True
+    assert visual_game.tactical_tile_glyph((0, 0), "~") == "≈"
+    assert visual_game.tactical_tile_glyph((0, 0), "=") == "═"
+    assert visual_game.tactical_tile_glyph((0, 0), "m") == "♦"
+    assert visual_game.zone_glyph(Zone("Flame", {(0, 0)}, "fire", 2)) == "✹"
+    assert game_module.strip_ansi(visual_game.objective_marker_cell("exit")) == " ⇥ "
+    assert game_module.strip_ansi(visual_game.objective_marker_cell("hold")) == " ◎ "
+    assert game_module.strip_ansi(visual_game.objective_marker_cell("object")) == " ▣ "
+
+    overlay_game = Game()
+    free_overlay_pos = next(
+        (x, y)
+        for y, row in enumerate(overlay_game.map)
+        for x, tile in enumerate(row)
+        if tile in game_module.PASSABLE and overlay_game.unit_at((x, y)) is None and (x, y) != overlay_game.cursor
+    )
+    empty: set = set()
+    reachable_cell = overlay_game.cell(free_overlay_pos, {free_overlay_pos}, empty, empty, empty, empty, empty)
+    path_cell = overlay_game.cell(free_overlay_pos, {free_overlay_pos}, {free_overlay_pos}, empty, empty, empty, empty)
+    attack_cell = overlay_game.cell(free_overlay_pos, empty, empty, empty, {free_overlay_pos}, empty, empty)
+    area_cell = overlay_game.cell(free_overlay_pos, empty, empty, empty, empty, empty, {free_overlay_pos})
+    assert game_module.strip_ansi(reachable_cell) == " · "
+    assert game_module.strip_ansi(path_cell) == " • "
+    assert game_module.strip_ansi(attack_cell) == " × "
+    assert game_module.strip_ansi(area_cell) == " ◎ "
+    assert "· move" in overlay_game.combat_legend_line()
     forbidden_audio_terms = ["win" + "sound", "\a"]
     package_text = "\n".join(
         path.read_text(encoding="utf-8", errors="ignore")
@@ -270,10 +310,16 @@ def run_smoke_tests() -> None:
 
     farmstead_fast = configure_game_from_request(
         Game(),
-        BattleRequest(source="ascii_farmstead", enemy_counts={"Slime": 1}),
+        BattleRequest(
+            source="ascii_farmstead",
+            enemy_counts={"Slime": 1},
+            return_context={"detailed_map_glyphs": False, "high_contrast_visuals": True},
+        ),
     )
     assert farmstead_fast.frame_delay == 0.025
     assert not farmstead_fast.allow_battle_map_selection
+    assert farmstead_fast.detailed_map_glyphs is False
+    assert farmstead_fast.high_contrast_visuals is True
     assert "Map" not in farmstead_fast.command_menu_options()
     farmstead_fast.state = "command"
     farmstead_fast.start_map_menu()

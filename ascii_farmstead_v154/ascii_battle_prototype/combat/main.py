@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 from typing import Dict, Optional
 
+from .constants import ASCII_MODE
 from .game import Game
 from .models import Unit, Weapon
 from .rendering import clear_screen, show_cursor
@@ -416,6 +417,8 @@ def configure_game_from_request(game: Game, request: BattleRequest) -> Game:
     game.frame_delay = _farmstead_frame_delay(request)
     game.battle_return_context = dict(request.return_context)
     game.battle_world_flags = dict(request.world_flags)
+    game.detailed_map_glyphs = bool(request.return_context.get("detailed_map_glyphs", True)) and not ASCII_MODE
+    game.high_contrast_visuals = bool(request.return_context.get("high_contrast_visuals", False))
     game.allow_battle_map_selection = bool(request.is_debug)
     game.current_mission_id = str(request.mission_id or "")
     _apply_farmstead_campaign_state(game, request)
@@ -502,4 +505,4 @@ def main() -> None:
     except KeyboardInterrupt:
         show_cursor()
         clear_screen()
-        print("Exited combat prototype.")
+        print("Exited tactical combat.")

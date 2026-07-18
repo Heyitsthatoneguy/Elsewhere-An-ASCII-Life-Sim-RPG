@@ -7,14 +7,14 @@ Run:
     python ascii_farmstead.py
 
 Controls:
-    WASD / Arrow Keys  Move
+    WASD / Arrows / Numpad  Move (eight directions on numpad)
     F                  Use selected farm/mine tool
     Q / E              Cycle tool
     1 / 2              Cycle owned seed type
     Tab                Inventory / settings
     B                  Reopen shop menu while already standing in shop
     N                  Sleep when inside the farmhouse
-    Menus              Arrow keys/WASD move, Z/Enter select, X/Esc/Q cancel
+    Menus              Arrow keys/WASD/numpad move, Z/Enter select, X/Esc/Q cancel
     G                  Write debug report file
     H                  Help
     C                  Toggle color
@@ -36,7 +36,7 @@ import time
 import math
 import collections
 from pathlib import Path
-from typing import Dict, Tuple, Optional, List
+from typing import Dict, Tuple, Optional, List, Set
 
 from ascii_farmstead_support import (
     C,
@@ -57,6 +57,7 @@ from ascii_farmstead_support import (
     enable_ansi_colors,
     get_color_enabled,
     normalize_key,
+    movement_delta_for_key,
     pad_visual,
     read_key,
     read_key_timeout,
@@ -64,6 +65,26 @@ from ascii_farmstead_support import (
     set_color_enabled,
     write_debug_report,
     write_error_log,
+)
+from ascii_farmstead_visuals import (
+    actor_style,
+    architectural_wall_glyph,
+    cartography_symbol_style,
+    connected_network_glyph,
+    exterior_window_at,
+    farm_structure_surface,
+    farmhouse_surface,
+    interior_light_positions,
+    interior_tile_color,
+    outdoor_time_color,
+    weather_overlay_allowed,
+    weather_overlay_style,
+    weather_glyphs,
+    town_building_surface,
+    underground_tile_style,
+    wilderness_landmark_style,
+    wilderness_display_glyph,
+    wilderness_tile_color,
 )
 
 # Compatibility imports: the legacy single-file game still expects these
@@ -106,6 +127,7 @@ from ascii_farmstead_state import (
     unlock_town_building,
 )
 from ascii_farmstead_inventory import (
+    CapacityInventory,
     add_inventory_items,
     consume_crop_ingredient,
     consume_fish_ingredient,
@@ -126,6 +148,9 @@ from ascii_farmstead_combat import (
     FARMSTEAD_MAX_PARTY_MEMBERS,
     FARMSTEAD_PARTY_TACTICS,
     MINE_ENEMY_PROFILES,
+    NATURAL_HEALTH_RECOVERY_DELAY_MINUTES,
+    NATURAL_HEALTH_RECOVERY_INTERVAL_MINUTES,
+    NATURAL_STAMINA_RECOVERY_INTERVAL_MINUTES,
     apply_party_status_to_combat_state,
     build_player_combat_profile,
     combat_result_outcome,
@@ -153,7 +178,10 @@ from ascii_farmstead_ui import (
     fit_text,
     left_margin,
     menu_context_lines,
+    meter_text,
     menu_select,
+    status_chip,
+    style_labeled_row,
     pad_to,
     quantity_menu,
     strip_ansi,
@@ -162,11 +190,15 @@ from ascii_farmstead_ui import (
     visible_text_len,
     wrap_panel_row,
     wrap_panel_rows,
+    wrap_status_chips,
 )
+from ascii_farmstead_containers import ContainerSystemMixin
 from ascii_farmstead_saves import SaveLoadMixin
 from ascii_farmstead_npcs import NpcMixin
 from ascii_farmstead_building import BuildingMixin
 from ascii_farmstead_actors import ActorNavigationMixin
+from ascii_farmstead_landmarks import WildernessLandmarkMixin
+from ascii_farmstead_wilderness import FIELD_SITE_SYMBOL, WILDERNESS_DOCK_SYMBOL, WILDERNESS_EXCURSION_SYMBOL, WILDERNESS_FISHING_SETTLEMENT_SYMBOL, WILDERNESS_LANDSCAPE_SYMBOL, WILDERNESS_OUTPOST_SYMBOL, WILDERNESS_REFUGE_SYMBOL, WILDERNESS_STAFFED_SITE_SYMBOL, WILDERNESS_STRUCTURE_SYMBOL, WildernessRevampMixin
 from ascii_farmstead_town_builder import (
     SETTLEMENT_BUILDING_CATALOG,
     SETTLEMENT_PHASES,
@@ -180,6 +212,7 @@ from ascii_farmstead_npc_builder import (
 )
 from ascii_farmstead_npc_dialogue import ProceduralNpcDialogueMixin
 from ascii_farmstead_procedural_towns import (
+    PROCEDURAL_TOWN_DOOR_SYMBOL,
     PROCEDURAL_TOWN_INTERIOR_LOCATION,
     PROCEDURAL_TOWN_OPEN_BUILDINGS,
     PROCEDURAL_TOWN_OVERWORLD_SYMBOL,
@@ -187,8 +220,10 @@ from ascii_farmstead_procedural_towns import (
     ProceduralTownRuntimeMixin,
 )
 from ascii_farmstead_civic_economy import CivicEconomyMixin
+from ascii_farmstead_regional_economy import RegionalEconomyMixin
 from ascii_farmstead_dynasty import DynastyMixin
 from ascii_farmstead_custom_menus import CustomContentMenuMixin
+from ascii_farmstead_dungeon_combat import DungeonRoguelikeCombatMixin
 from ascii_battle_prototype.combat.classes import class_defs as tactical_class_defs
 from ascii_battle_prototype.combat.equipment import equipment_defs as tactical_equipment_defs
 from ascii_battle_prototype.combat.loot import loot_profile_for_enemy as tactical_loot_profile_for_enemy
@@ -513,6 +548,11 @@ RECLAIMED_STRONGHOLD_FEATURE_CATALOG: Dict[str, Dict[str, object]] = {
 
 class FarmGame(
     CustomContentMenuMixin,
+    DungeonRoguelikeCombatMixin,
+    ContainerSystemMixin,
+    RegionalEconomyMixin,
+    WildernessLandmarkMixin,
+    WildernessRevampMixin,
     DynastyMixin,
     CivicEconomyMixin,
     ProceduralTownRuntimeMixin,
@@ -552,6 +592,7 @@ class FarmGame(
 
     def __init__(self):
         self.state = GameState()
+        self.ensure_container_state()
         self.ensure_civic_economy_state()
         # New games should not always start with the exact same wilderness.
         # Loading a save overwrites this seed with the saved value, so existing saves remain stable.
@@ -646,17 +687,23 @@ class FarmGame(
                 if grid[y][x] in ["^", "o", "*"]:
                     grid[y][x] = "."
 
-        # West gate to town.
+        # West lane to town. The border opening is a road, not a compass letter.
         for y in range(8, 13):
-            grid[y][0] = "E"
+            grid[y][0] = ":"
             grid[y][1] = "."
             grid[y][2] = "."
 
-        # North cave path to the mine.
+        # North mine entrance. '<' reads as an entrance rather than north.
         for x in range(25, 30):
-            grid[0][x] = "N"
+            grid[0][x] = "<"
             grid[1][x] = "."
             grid[2][x] = "."
+
+        # East lane joins the farm physically to the continuous origin region.
+        for y in range(8, 13):
+            grid[y][WIDTH - 1] = ":"
+            grid[y][WIDTH - 2] = "."
+            grid[y][WIDTH - 3] = "."
 
         return grid
 
@@ -812,31 +859,22 @@ class FarmGame(
         status = self.town_building_status_label(building_id)
         if not self.is_town_building_unlocked(building_id):
             return f"{label}: {status}. {self.locked_town_building_message(building_id)}"
-        if building_id == "general_store":
-            return "General Store: Open. Walk into the door, then use Z/Enter at the shopkeeper to shop."
-        if building_id == "blacksmith":
-            return "Blacksmith: Open. Walk into the door, then use Z/Enter at the blacksmith for service."
-        if building_id == "library":
-            return "Old Library: Open. Walk into the door, then use Z/Enter at the librarian for research."
-        if building_id == "mayor_house":
-            return "Mayor's House: Private residence. Walk into the door to visit."
-        if building_id == "inn":
-            return "Inn: Open. Walk into the door, then use Z/Enter at the innkeeper for meals, rooms, and gossip."
-        if building_id == "furniture_store":
-            return "Furniture Store: Open. Walk into the door, then use Z/Enter on the clerk to shop."
-        if building_id == "carpenter":
-            return "Carpenter: Open. Walk into the door for farm expansions, buildings, and house upgrades."
-        if building_id == "animal_store":
-            return "Animal Store: Open. Walk into the door, then use Z/Enter on the clerk to buy animals."
-        if building_id == "clinic":
-            return "Clinic: Open. Walk into the door, then use Z/Enter at the doctor for care."
-        if building_id == "town_hall":
-            return "Town Hall: Open. Walk into the door, then use Z/Enter at the clerk for town services."
-        if building_id == "market_row":
-            return "Market Row: Open. Walk into the door, then use Z/Enter at the vendor to shop."
-        if building_id == "museum":
-            return "Museum: Open. Walk into the door, then use Z/Enter at the curator to donate or review exhibits."
-        return f"{label}: {status}."
+        instructions = {
+            "general_store": "Enter and talk to Mira to shop.",
+            "blacksmith": "Enter and talk to Brom for forge service.",
+            "library": "Enter and talk to Tess for research.",
+            "mayor_house": "Private residence; visitors may enter.",
+            "inn": "Enter and talk to Mae for meals, rooms, and gossip.",
+            "furniture_store": "Enter and use the staffed catalog counter.",
+            "carpenter": "Enter and talk to Eli about buildings and upgrades.",
+            "animal_store": "Enter and talk to Poppy about livestock.",
+            "clinic": "Enter and talk to Dr. Ivy for care.",
+            "town_hall": "Enter and talk to Mayor Ruth for town services.",
+            "market_row": "Enter and talk to Vera to browse today's goods.",
+            "museum": "Enter and use the donation desk or exhibits.",
+        }
+        detail = self.authored_town_building_detail(building_id)
+        return f"{label}: {status}. {instructions.get(building_id, '')} {detail}".strip()
 
     def ensure_current_town_service_unlocked(self) -> bool:
         building_id = self.town_building_id_for_current_location()
@@ -1918,6 +1956,15 @@ class FarmGame(
         self.autosave_with_message(f"{summary}. The bounty target slips away nearby.{party_text}")
 
     def start_bounty_combat_encounter(self, bounty: Dict[str, object], reason: str = "nearby"):
+        if self.on_wilderness():
+            bounty = self.bounty_record_as_enemy(bounty)
+            bounty["field_combat_kind"] = "bounty"
+            if self.begin_wilderness_field_combat(bounty, reason=reason):
+                if reason in {"bump", "interact", "tool"}:
+                    self.dungeon_player_melee_attack(bounty)
+                else:
+                    self.advance_dungeon_roguelike_turn("hostile engagement")
+            return
         species = str(bounty.get("species", "enemy"))
         bounty_id = str(bounty.get("id", bounty.get("bounty_id", "bounty")))
         depth = self.bounty_target_depth(bounty)
@@ -2639,14 +2686,14 @@ class FarmGame(
         # Farm boulevard runs from the grid to the east edge.
         path_rect(96, 18, width - 2 - 96, 5, "=")
         for y in range(18, 23):
-            set_tile(width - 1, y, "E")
+            set_tile(width - 1, y, ":")
             set_tile(width - 2, y, "=")
             set_tile(width - 3, y, "=")
 
         # North wilderness road.
         path_rect(56, 1, 4, 10, "=")
         for x in range(56, 60):
-            set_tile(x, 0, "W")
+            set_tile(x, 0, ":")
 
         # Service buildings sit inside grid blocks and open onto frontage paths.
         place_building(5, 3, 11, 6, "G", TOWN_DOORS["general_store"][0])
@@ -2663,6 +2710,19 @@ class FarmGame(
 
         place_building(5, 27, 11, 6, "H", TOWN_DOORS["clinic"][0])
         place_building(68, 27, 11, 6, "P", TOWN_DOORS["market_row"][0])
+
+        # Residential row: six small households front the south road above
+        # the canal. Their interiors are selected by the exact entered door.
+        for residence in AUTHORED_TOWN_RESIDENCE_DATA.values():
+            door_x, door_y = residence["door"]
+            place_building(
+                int(door_x) - 5,
+                int(door_y) - 5,
+                11,
+                6,
+                str(residence.get("symbol", "h")),
+                int(door_x),
+            )
 
         # Plazas and district surfaces.
         plaza_rect(3, 8, 46, 5)       # North market/service court.
@@ -3228,7 +3288,15 @@ class FarmGame(
         species = str(enemy.get("species", "Slime")).replace("Elite ", "").strip()
         profile = mine_enemy_profile(species)
         symbol = str(profile.get("symbol", "s"))[:1] or "s"
-        return colorize(symbol, C.HOSTILE)
+        glyph, color = actor_style(
+            "hostile",
+            symbol,
+            elite=bool(str(enemy.get("species", "")).startswith("Elite ") or enemy.get("boss")),
+            bounty=bool(enemy.get("bounty_id")),
+            detailed=bool(getattr(self.state, "detailed_glyphs_enabled", True)),
+            high_contrast=bool(getattr(self.state, "high_contrast_enabled", False)),
+        )
+        return colorize(glyph, color)
 
     def mine_enemy_description(self, enemy: Dict[str, object]) -> str:
         species = str(enemy.get("species", "Slime"))
@@ -4148,8 +4216,109 @@ class FarmGame(
             (cx + 2, y, "-"),
         ]
 
+    def make_authored_town_residence_map(self, residence_id: str) -> List[List[str]]:
+        """Build one of six deliberately different starting-town homes."""
+        specs = {
+            "meadow_cottage": {
+                "rooms": [
+                    (20, 13, 34, 18, [(27, 18), (27, 13), (20, 15), (34, 15)]),
+                    (20, 6, 34, 12, [(27, 12)]),
+                    (5, 4, 16, 10, [(16, 8)]), (5, 12, 16, 18, [(16, 15)]),
+                    (38, 4, 49, 10, [(38, 8)]), (38, 12, 49, 18, [(38, 15)]),
+                ],
+                "halls": [[(27, 18), (27, 12)], [(20, 15), (16, 15), (16, 8)], [(34, 15), (38, 15), (38, 8)]],
+                "fixtures": [(8, 6, "B"), (8, 14, "B"), (46, 6, "B"), (46, 14, "B"),
+                             (22, 8, "k"), (22, 10, "p"), (29, 9, "t"), (28, 9, "c"), (30, 9, "c"),
+                             (24, 16, "r"), (31, 16, "s"), (13, 6, "u"), (43, 14, "u")],
+            },
+            "forge_house": {
+                "rooms": [
+                    (19, 14, 35, 18, [(27, 18), (27, 14), (19, 16), (35, 16)]),
+                    (23, 4, 31, 13, [(27, 13), (23, 8), (31, 9)]),
+                    (5, 4, 18, 10, [(18, 8)]), (5, 12, 18, 18, [(18, 16)]),
+                    (37, 5, 50, 11, [(37, 9)]), (37, 13, 50, 18, [(37, 16)]),
+                ],
+                "halls": [[(27, 18), (27, 4)], [(23, 8), (18, 8)], [(19, 16), (18, 16)],
+                          [(31, 9), (37, 9)], [(35, 16), (37, 16)]],
+                "fixtures": [(8, 6, "B"), (8, 14, "B"), (47, 7, "B"), (47, 15, "B"),
+                             (25, 6, "k"), (29, 6, "p"), (25, 10, "t"), (26, 10, "c"), (28, 10, "c"),
+                             (12, 8, "u"), (42, 9, "s"), (24, 16, "r")],
+            },
+            "canal_house": {
+                "rooms": [
+                    (21, 14, 37, 18, [(27, 18), (21, 16), (27, 14), (37, 16)]),
+                    (6, 12, 20, 18, [(20, 16)]), (6, 4, 18, 10, [(18, 8)]),
+                    (21, 4, 34, 12, [(27, 12), (21, 8)]), (38, 5, 50, 12, [(38, 9)]),
+                    (39, 14, 49, 18, [(39, 16)]),
+                ],
+                "halls": [[(27, 18), (27, 12)], [(21, 16), (20, 16)], [(27, 9), (18, 9), (18, 8)],
+                          [(34, 9), (38, 9)], [(37, 16), (39, 16)]],
+                "fixtures": [(9, 6, "B"), (9, 14, "B"), (47, 7, "B"), (23, 7, "k"), (23, 10, "p"),
+                             (30, 8, "t"), (29, 8, "c"), (31, 8, "c"), (43, 16, "r"), (45, 16, "s")],
+            },
+            "cedar_house": {
+                "rooms": [
+                    (18, 13, 36, 18, [(27, 18), (18, 15), (27, 13), (36, 15)]),
+                    (18, 5, 36, 12, [(27, 12), (18, 9), (36, 9)]),
+                    (5, 5, 16, 13, [(16, 9)]), (5, 15, 16, 18, [(16, 16)]),
+                    (38, 4, 50, 11, [(38, 9)]), (39, 13, 49, 18, [(39, 15)]),
+                ],
+                "halls": [[(27, 18), (27, 12)], [(18, 9), (16, 9)], [(18, 15), (16, 15), (16, 16)],
+                          [(36, 9), (38, 9)], [(36, 15), (39, 15)]],
+                "fixtures": [(8, 7, "B"), (8, 16, "B"), (47, 6, "B"), (21, 7, "k"), (22, 10, "p"),
+                             (30, 9, "t"), (29, 9, "c"), (31, 9, "c"), (43, 15, "s"), (24, 16, "r")],
+            },
+            "market_house": {
+                "rooms": [
+                    (15, 13, 39, 18, [(27, 18), (15, 15), (27, 13), (39, 15)]),
+                    (19, 6, 35, 12, [(27, 12), (19, 9), (35, 9)]),
+                    (5, 4, 17, 11, [(17, 9)]), (5, 13, 13, 18, [(13, 15)]),
+                    (37, 4, 50, 11, [(37, 9)]), (41, 13, 50, 18, [(41, 15)]),
+                ],
+                "halls": [[(27, 18), (27, 12)], [(19, 9), (17, 9)], [(15, 15), (13, 15)],
+                          [(35, 9), (37, 9)], [(39, 15), (41, 15)]],
+                "fixtures": [(8, 6, "B"), (47, 6, "B"), (47, 15, "B"), (21, 8, "k"), (21, 10, "p"),
+                             (30, 9, "t"), (29, 9, "c"), (31, 9, "c"), (8, 15, "s"), (22, 16, "r")],
+            },
+            "scholar_house": {
+                "rooms": [
+                    (20, 14, 34, 18, [(27, 18), (27, 14), (20, 16), (34, 16)]),
+                    (20, 7, 34, 13, [(27, 13), (20, 10), (34, 10)]),
+                    (5, 3, 18, 9, [(18, 7)]), (5, 11, 18, 18, [(18, 15)]),
+                    (36, 3, 50, 9, [(36, 7)]), (36, 11, 50, 18, [(36, 15)]),
+                ],
+                "halls": [[(27, 18), (27, 7)], [(20, 10), (18, 10), (18, 7)], [(20, 16), (18, 16), (18, 15)],
+                          [(34, 10), (36, 10), (36, 7)], [(34, 16), (36, 16), (36, 15)]],
+                "fixtures": [(8, 5, "B"), (8, 13, "B"), (47, 5, "B"), (47, 13, "B"),
+                             (22, 9, "k"), (22, 11, "p"), (30, 10, "t"), (29, 10, "c"), (31, 10, "c"),
+                             (14, 6, "l"), (42, 6, "l"), (42, 15, "l"), (24, 16, "r")],
+            },
+        }
+        spec = specs.get(str(residence_id), specs["meadow_cottage"])
+        return self.make_practical_town_interior(
+            rooms=spec["rooms"],
+            halls=spec["halls"],
+            fixtures=spec["fixtures"],
+        )
+
+    def authored_town_residence_map(self, residence_id: Optional[str] = None) -> List[List[str]]:
+        residence_id = str(residence_id or self.state.current_authored_residence_id)
+        if residence_id not in AUTHORED_TOWN_RESIDENCE_DATA:
+            residence_id = "meadow_cottage"
+        cache = getattr(self, "_authored_town_residence_maps", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._authored_town_residence_maps = cache
+        if residence_id not in cache:
+            cache[residence_id] = self.make_authored_town_residence_map(residence_id)
+        return cache[residence_id]
+
     def town_interior_tile_catalog(self, location: Optional[str] = None) -> Dict[str, Dict[str, str]]:
         location = str(location or self.state.location)
+        residence = AUTHORED_TOWN_RESIDENCE_DATA.get(
+            str(getattr(self.state, "current_authored_residence_id", "")),
+            {},
+        )
         room = {
             "GeneralStoreInterior": "General Store",
             "BlacksmithInterior": "Blacksmith",
@@ -4163,6 +4332,7 @@ class FarmGame(
             "TownHallInterior": "Town Hall",
             "MarketRowInterior": "Market Row",
             "MuseumInterior": "Museum",
+            "TownResidenceInterior": str(residence.get("label", "Town Residence")),
         }.get(location, "Building")
         common = {
             ".": {"desc": f"{room} floor", "hint": f"Z/Enter: inspect {room.lower()}"},
@@ -4176,6 +4346,11 @@ class FarmGame(
             "u": {"desc": f"Dresser and personal storage for someone who lives above or behind the {room.lower()}.", "hint": "Z/Enter: inspect dresser"},
             "c": {"desc": f"Small chair in the {room.lower()} living space.", "hint": "Z/Enter: inspect chair"},
             "t": {"desc": f"Small side table in the {room.lower()} living space.", "hint": "Z/Enter: inspect side table"},
+            "k": {"desc": f"Working kitchen in {room}, used for the household's morning and evening meals.", "hint": "Z/Enter: inspect kitchen"},
+            "p": {"desc": f"Household pantry in {room}.", "hint": "Z/Enter: inspect pantry"},
+            "r": {"desc": f"Woven rug defining the shared room in {room}.", "hint": "Z/Enter: inspect sitting room"},
+            "s": {"desc": f"Household storage shelf in {room}.", "hint": "Z/Enter: inspect shelf"},
+            "l": {"desc": f"Bookcase holding the household's shared books and notes.", "hint": "Z/Enter: inspect bookcase"},
         }
         room_tiles = {
             "GeneralStoreInterior": {
@@ -4226,7 +4401,7 @@ class FarmGame(
                 "c": {"desc": "Dining chair pulled close to the warm part of the room.", "hint": "Z/Enter: inspect chair"},
                 "k": {"desc": "Kitchen pass with soup pots and packed lunch notes.", "hint": "Z/Enter: inspect kitchen"},
                 "p": {"desc": "Pantry shelves for meal prep and travel food.", "hint": "Z/Enter: inspect pantry"},
-                "P": {"desc": "Inn notice corner with rumors, market notes, and festival reminders.", "hint": "Z/Enter: listen to gossip"},
+                "P": {"desc": "Inn guest register listing regional arrivals, origins, rooms, and departures.", "hint": "Z/Enter: read guest register"},
                 "r": {"desc": "Worn rug in the common room.", "hint": "Z/Enter: inspect common room"},
             },
             "FurnitureStoreInterior": {
@@ -4739,6 +4914,15 @@ class FarmGame(
             # Ridge: hardy forage and occasional winter roots.
             choices = ["h", "a"] if season != "Winter" else ["j", "k", "h"]
             return rng.choice([c for c in choices if c in WILDERNESS_FORAGE_DATA])
+        if biome_tile == "`":
+            choices = ["h", "h"] + (["y"] if season == "Summer" else []) + (["j"] if season == "Winter" else [])
+            return rng.choice([c for c in choices if c in WILDERNESS_FORAGE_DATA])
+        if biome_tile == '"':
+            choices = ["j", "k", "h"] if season == "Winter" else ["h", "j"] + (["v"] if season == "Spring" else [])
+            return rng.choice([c for c in choices if c in WILDERNESS_FORAGE_DATA])
+        if biome_tile == "[":
+            choices = ["W", "h"] + (["v"] if season == "Spring" else []) + (["a"] if season == "Fall" else [])
+            return rng.choice([c for c in choices if c == "W" or c in WILDERNESS_FORAGE_DATA])
         return rng.choice(seasonal)
 
     def add_biome_forage_to_inventory(self, symbol: str) -> Optional[str]:
@@ -5010,6 +5194,7 @@ class FarmGame(
         w = len(grid[0]) if h else 0
         if not h or not w:
             return
+        oceanic = self.wilderness_count_tile(grid, "~") > int(w * h * 0.35)
         bridge_made = False
         for y in range(2, h - 2):
             for x in range(2, w - 2):
@@ -5024,7 +5209,7 @@ class FarmGame(
                         if grid[ny][nx] == "~" and rng.random() < 0.70:
                             grid[ny][nx] = "="
 
-        if bridge_made or not fallback:
+        if bridge_made or not fallback or oceanic:
             return
 
         # A single practical crossing is enough. Avoid turning that crossing into
@@ -5092,7 +5277,7 @@ class FarmGame(
         return set([".", ";", "%", "l", "r", "x", "^"])
 
     def wilderness_blocking_interactable_tiles(self) -> set:
-        return set([WILDERNESS_CLAIM_SYMBOL, "?", "R", "J", "P", "K", "Q", "Y", "u", "W", "N", "F", "V", "X", "O", "L", "e", "p", "M", "G", "Z", "!"])
+        return set([WILDERNESS_CLAIM_SYMBOL, FIELD_SITE_SYMBOL, WILDERNESS_OUTPOST_SYMBOL, WILDERNESS_STRUCTURE_SYMBOL, WILDERNESS_LANDSCAPE_SYMBOL, WILDERNESS_DOCK_SYMBOL, WILDERNESS_FISHING_SETTLEMENT_SYMBOL, WILDERNESS_REFUGE_SYMBOL, WILDERNESS_STAFFED_SITE_SYMBOL, WILDERNESS_EXCURSION_SYMBOL, "?", "R", "J", "P", "K", "Q", "Y", "u", "W", "N", "F", "V", "X", "O", "L", "e", "p", "M", "G", "Z", "!"])
 
     def wilderness_is_walkable_for_access(self, tile: str) -> bool:
         return tile not in set(["#", "~", "T", "o", "*"]) | self.wilderness_blocking_interactable_tiles()
@@ -5178,65 +5363,36 @@ class FarmGame(
                 self.wilderness_resource_cluster(grid, rng, cx, cy, rng.randint(3, 6), rng.randint(2, 3), ["r", "W", "p", "G", "^"], 0.16)
 
     def place_wilderness_chunk_landmark(self, grid: List[List[str]], chunk_x: int, chunk_y: int, rng: random.Random):
-        """Place one memorable minor landmark on non-origin chunks."""
+        """Place one complete, purpose-built minor landmark on an ordinary chunk."""
         h = len(grid)
         w = len(grid[0]) if h else 0
         if not h or not w:
             return
+        if (
+            self.procedural_town_plan(chunk_x, chunk_y)
+            or self.wilderness_chunk_has_stronghold(chunk_x, chunk_y)
+            or self.is_claimable_wilderness_chunk(chunk_x, chunk_y)
+            or self.owned_wilderness_claim(chunk_x, chunk_y)
+            or self.wilderness_chunk_has_outpost(chunk_x, chunk_y)
+            or self.wilderness_chunk_has_structure(chunk_x, chunk_y)
+        ):
+            return
         lx = 12 + int(self.wilderness_hash01(chunk_x, chunk_y, 201) * (w - 24))
         ly = 7 + int(self.wilderness_hash01(chunk_x, chunk_y, 202) * (h - 14))
+        lx, ly = self.choose_wilderness_landmark_center(grid, lx, ly)
         style_roll = self.wilderness_hash01(chunk_x, chunk_y, 204)
-        for yy in range(max(1, ly - 3), min(h - 1, ly + 4)):
-            for xx in range(max(1, lx - 5), min(w - 1, lx + 6)):
-                if grid[yy][xx] not in ["~", "="]:
-                    grid[yy][xx] = "."
-
         if style_roll < 0.20:
-            grid[ly][lx] = "P"
-            for dx, dy in [(-3,0), (3,0), (0,-2), (0,2)]:
-                if 1 <= lx + dx < w - 1 and 1 <= ly + dy < h - 1:
-                    grid[ly + dy][lx + dx] = "J"
+            kind = "stone_ruin"
         elif style_roll < 0.38:
-            grid[ly][lx] = "K"
-            for xx in range(max(1, lx - 3), min(w - 1, lx + 4)):
-                if grid[ly + 1][xx] not in ["S"]:
-                    grid[ly + 1][xx] = "~" if xx != lx else "="
+            kind = "overlook"
         elif style_roll < 0.56:
-            for xx in range(max(1, lx - 2), min(w - 1, lx + 3)):
-                if grid[ly - 1][xx] not in ["~", "="]:
-                    grid[ly - 1][xx] = "#"
-                if grid[ly + 1][xx] not in ["~", "="]:
-                    grid[ly + 1][xx] = "#"
-            for yy in range(max(1, ly - 1), min(h - 1, ly + 2)):
-                if grid[yy][lx - 2] not in ["~", "="]:
-                    grid[yy][lx - 2] = "#"
-                if grid[yy][lx + 2] not in ["~", "="]:
-                    grid[yy][lx + 2] = "#"
-            grid[ly][lx] = "."
-            grid[ly + 1][lx] = "Q"
-            if ly + 2 < h - 1 and grid[ly + 2][lx] not in ["~", "="]:
-                grid[ly + 2][lx] = "."
-            for xx in range(max(1, lx - 4), min(w - 1, lx + 5)):
-                if ly + 3 < h - 1 and grid[ly + 3][xx] not in ["~", "="]:
-                    grid[ly + 3][xx] = "F" if rng.random() < 0.25 else ";"
+            kind = "trail_shelter"
         elif style_roll < 0.74:
-            grid[ly][lx] = "M"
-            for _ in range(9):
-                xx = rng.randint(max(1, lx - 5), min(w - 2, lx + 5))
-                yy = rng.randint(max(1, ly - 3), min(h - 2, ly + 3))
-                if grid[yy][xx] not in ["~", "="]:
-                    grid[yy][xx] = rng.choice(["o", "x", "^"])
+            kind = "old_quarry"
         else:
-            grid[ly][lx] = "?"
-            for _ in range(8):
-                xx = rng.randint(max(1, lx - 5), min(w - 2, lx + 5))
-                yy = rng.randint(max(1, ly - 3), min(h - 2, ly + 3))
-                if grid[yy][xx] not in ["~", "="]:
-                    grid[yy][xx] = rng.choice(["Y", "L", "G", ".", ".", ";"])
-        if self.wilderness_hash01(chunk_x, chunk_y, 203) > 0.5:
-            crate_y = min(h - 2, ly + 2)
-            if grid[crate_y][lx] not in ["~", "="]:
-                grid[crate_y][lx] = "B"
+            biome = str(self.wilderness_region_profile(chunk_x, chunk_y).get("biome", ";"))
+            kind = "fungal_garden" if biome in {"%", "l"} else ("spring_garden" if biome in {";", "r"} else "waystone")
+        self.stamp_wilderness_landmark_site(grid, lx, ly, kind, rng)
 
     def ensure_wilderness_interactable_accessibility(self, grid: List[List[str]]):
         """Give special wilderness features at least one adjacent approach tile."""
@@ -5289,6 +5445,10 @@ class FarmGame(
         h = len(grid)
         w = len(grid[0]) if h else 0
         if not h or not w:
+            return
+        if self.wilderness_count_tile(grid, "~") > int(w * h * 0.35):
+            # Ocean chunks are connected by watercraft, currents, docks, and
+            # ferries. Cross-map trail bands would become implausible bridges.
             return
         center = (w // 2, h // 2)
         if self.wilderness_count_tile(grid, ":") > max(48, (w + h) // 3):
@@ -5645,11 +5805,6 @@ class FarmGame(
                         grid[ay][ax] = "."
                         break
 
-        # A few general landmarks. Place them near trails/openings.
-        grid[7][12] = "?"
-        grid[14][width - 14] = "?"
-        grid[height - 4][gate_x] = "?"
-
         # Safe entry area and town exit.
         for yy in range(height - 5, height - 1):
             for xx in range(gate_x - 4, gate_x + 5):
@@ -5669,85 +5824,28 @@ class FarmGame(
         return grid
 
     def decorate_wilderness_points_of_interest(self, grid: List[List[str]], rng: random.Random):
-        """Add named wilderness landmarks/clearings without breaking river/path navigation."""
+        """Build the authored home-region collection as complete landmark sites."""
         height = len(grid)
         width = len(grid[0]) if height else 0
         if width <= 0:
             return
-
-        def clear_area(cx: int, cy: int, rx: int, ry: int, fill: str = "."):
-            for yy in range(max(1, cy - ry), min(height - 1, cy + ry + 1)):
-                for xx in range(max(1, cx - rx), min(width - 1, cx + rx + 1)):
-                    if grid[yy][xx] not in ["S", "=", "~"]:
-                        grid[yy][xx] = fill
-
-        def place_if_safe(x: int, y: int, ch: str):
-            if 1 <= x < width - 1 and 1 <= y < height - 1 and grid[y][x] not in ["S", "="]:
-                grid[y][x] = ch
-
-        camp_x, camp_y = width // 2 + 10, height - 9
-        clear_area(camp_x, camp_y, 5, 3, ".")
-        for xx in range(camp_x - 4, camp_x + 5):
-            if 1 <= xx < width - 1 and grid[camp_y + 3][xx] != "~":
-                grid[camp_y + 3][xx] = ":"
-        place_if_safe(camp_x, camp_y, "R")
-        place_if_safe(camp_x - 2, camp_y + 1, "H")
-        place_if_safe(camp_x + 2, camp_y + 1, "B")
-        place_if_safe(camp_x, camp_y + 2, "?")
-
-        ruin_x, ruin_y = 13, 9
-        clear_area(ruin_x, ruin_y, 5, 3, ".")
-        for dx, dy in [(-3,0), (3,0), (0,-2), (0,2), (-2,-1), (2,-1), (-2,1), (2,1)]:
-            place_if_safe(ruin_x + dx, ruin_y + dy, "J")
-        place_if_safe(ruin_x, ruin_y, "P")
-        place_if_safe(ruin_x + 1, ruin_y, "?")
-
-        berry_x, berry_y = width - 14, 9
-        clear_area(berry_x, berry_y, 6, 3, ".")
-        for _ in range(20):
-            place_if_safe(rng.randint(berry_x - 5, berry_x + 5), rng.randint(berry_y - 2, berry_y + 2), rng.choice([";", ";", ".", "^"]))
-        for _ in range(7):
-            place_if_safe(rng.randint(berry_x - 5, berry_x + 5), rng.randint(berry_y - 2, berry_y + 2), "Y")
-        place_if_safe(berry_x, berry_y, "?")
-
-        mush_x, mush_y = 18, height - 14
-        clear_area(mush_x, mush_y, 5, 3, ".")
-        for _ in range(18):
-            place_if_safe(rng.randint(mush_x - 4, mush_x + 4), rng.randint(mush_y - 2, mush_y + 2), rng.choice(["l", "l", ".", "^"]))
-        for _ in range(5):
-            place_if_safe(rng.randint(mush_x - 4, mush_x + 4), rng.randint(mush_y - 2, mush_y + 2), "u")
-        place_if_safe(mush_x, mush_y, "?")
-
         bridges = [(x, y) for y, row in enumerate(grid) for x, ch in enumerate(row) if ch == "="]
         if bridges:
             ox, oy = bridges[len(bridges) // 2]
-            overlook_x = max(2, min(width - 3, ox + 5))
-            overlook_y = max(2, min(height - 3, oy))
+            overlook_x = max(10, min(width - 11, ox + 8))
+            overlook_y = max(7, min(height - 8, oy))
         else:
             overlook_x, overlook_y = width // 2, height // 2
-        clear_area(overlook_x, overlook_y, 3, 2, ".")
-        place_if_safe(overlook_x, overlook_y, "K")
-        place_if_safe(overlook_x + 1, overlook_y, "?")
-
-        for hx, hy in [(width - 9, height - 12), (9, height - 8)]:
-            clear_area(hx, hy, 3, 2, ".")
-            for xx in range(hx - 2, hx + 3):
-                place_if_safe(xx, hy - 1, "#")
-                place_if_safe(xx, hy + 1, "#")
-            for yy in range(hy - 1, hy + 2):
-                place_if_safe(hx - 2, yy, "#")
-                place_if_safe(hx + 2, yy, "#")
-            place_if_safe(hx, hy + 1, "Q")
-            place_if_safe(hx, hy, ".")
-            place_if_safe(hx - 1, hy, ".")
-            place_if_safe(hx + 1, hy, ".")
-            place_if_safe(hx - 1, hy + 2, "H")
-            place_if_safe(hx + 1, hy + 2, "B")
-            # Always leave at least one approach tile open.
-            if hy + 2 < height - 1 and grid[hy + 2][hx] not in ["~", "=", "S"]:
-                grid[hy + 2][hx] = "."
-            if hx + 1 < width - 1 and grid[hy][hx + 1] not in ["~", "=", "S"]:
-                grid[hy][hx + 1] = "."
+        sites = [
+            (width // 2 + 10, height - 9, "ranger_camp"),
+            (13, 9, "stone_ruin"),
+            (38, 7, "spring_garden"),
+            (27, 19, "fungal_garden"),
+            (overlook_x, overlook_y, "overlook"),
+            (width - 11, height - 11, "trail_shelter"),
+        ]
+        for x, y, kind in sites:
+            self.stamp_wilderness_landmark_site(grid, x, y, kind, rng)
 
     def ensure_wilderness_poi_accessibility(self):
         """Ensure generated/backfilled wilderness POIs have at least one adjacent walkable approach."""
@@ -5798,31 +5896,189 @@ class FarmGame(
         if not h or not w:
             return
 
-        def clear_for_marker(cx: int, cy: int, rx: int = 2, ry: int = 1):
-            for yy in range(max(1, cy - ry), min(h - 1, cy + ry + 1)):
-                for xx in range(max(1, cx - rx), min(w - 1, cx + rx + 1)):
-                    if grid[yy][xx] not in ["S", "=", "~", WILDERNESS_CLAIM_SYMBOL, "V", "X"]:
-                        grid[yy][xx] = "."
-
-        def place_marker(ch: str, x: int, y: int):
-            if 1 <= x < w - 1 and 1 <= y < h - 1 and grid[y][x] not in ["S", "=", "~", WILDERNESS_CLAIM_SYMBOL, "V", "X"]:
-                grid[y][x] = ch
-
         existing = {ch for row in grid for ch in row}
         if "K" not in existing:
             x, y = min(w - 8, w // 2 + 8), max(6, h // 2 - 2)
-            clear_for_marker(x, y, 3, 2)
-            place_marker("K", x, y)
-            place_marker("?", x + 1, y)
+            self.stamp_wilderness_landmark_site(grid, x, y, "overlook", random.Random(int(self.state.wilderness_seed) + 9301))
         if "R" not in existing:
             x, y = min(w - 8, w // 2 + 10), h - 9
-            clear_for_marker(x, y, 3, 2)
-            place_marker("R", x, y)
-            place_marker("H", x - 1, y + 1)
+            self.stamp_wilderness_landmark_site(grid, x, y, "ranger_camp", random.Random(int(self.state.wilderness_seed) + 9302))
         if "Q" not in existing:
             x, y = w - 9, h - 11
-            clear_for_marker(x, y, 2, 2)
-            place_marker("Q", x, y)
+            self.stamp_wilderness_landmark_site(grid, x, y, "trail_shelter", random.Random(int(self.state.wilderness_seed) + 9303))
+
+    def origin_world_gateway_positions(self) -> Dict[str, Tuple[int, int]]:
+        """Stable entrances linking the authored home maps to the continuous world."""
+        return {"town": (27, 29), "farm": (66, 18), "mine": (48, 14)}
+
+    def origin_world_sign_positions(self) -> Dict[str, Tuple[int, int]]:
+        return {
+            "town_approach": (29, 34),
+            "crossroads": (50, 35),
+            "mine_approach": (49, 16),
+            "farm_approach": (65, 21),
+        }
+
+    def origin_world_sign_kind(self, chunk_x: int, chunk_y: int, x: int, y: int) -> str:
+        if (int(chunk_x), int(chunk_y)) != (0, 0):
+            return ""
+        point = (int(x), int(y))
+        return next((kind for kind, position in self.origin_world_sign_positions().items() if position == point), "")
+
+    def origin_world_sign_at(self, x: int, y: int) -> str:
+        if not self.on_wilderness():
+            return ""
+        return self.origin_world_sign_kind(
+            self.state.wilderness_chunk_x, self.state.wilderness_chunk_y, x, y
+        )
+
+    def origin_world_home_road_at(self, x: int, y: int) -> bool:
+        """Recognize the hand-authored road as real network infrastructure."""
+        town_x, town_y = self.origin_world_gateway_positions()["town"]
+        farm_x, farm_y = self.origin_world_gateway_positions()["farm"]
+        mine_x, mine_y = self.origin_world_gateway_positions()["mine"]
+        px, py = int(x), int(y)
+        return bool(
+            (px == town_x and town_y <= py <= 36)
+            or (py == 36 and town_x <= px <= farm_x)
+            or (px == farm_x and farm_y <= py <= 36)
+            or (px == mine_x and mine_y <= py <= 36)
+        )
+
+    def origin_world_sign_lines(self, sign_kind: str) -> List[str]:
+        season_note = (
+            "Winter: inland ice may provide temporary foot crossings."
+            if self.state.season == "Winter"
+            else "Open water and seasonal terrain may alter side routes."
+        )
+        headings = {
+            "town_approach": ("TOWN APPROACH", "The lower spur reaches Elsewhere's civic streets."),
+            "crossroads": ("HOME ROAD CROSSROADS", "The maintained home road joins all three local destinations."),
+            "mine_approach": ("MINE APPROACH", "The stone building ahead is the permanent regional mine entrance."),
+            "farm_approach": ("FARM APPROACH", "The fenced working farm lies at the end of this maintained lane."),
+        }
+        title, description = headings.get(str(sign_kind), ("HOME ROAD SIGN", "A maintained route marker."))
+        return [
+            title, "", description, "",
+            "Town: lower road, then the western spur.",
+            "Farm: lower road, then the eastern spur.",
+            "Mine: take the northern stone-building branch.",
+            "Regional routes: continue beyond the home district.",
+            "", season_note,
+        ]
+
+    def read_origin_world_sign(self, sign_kind: str) -> None:
+        lines = self.origin_world_sign_lines(sign_kind)
+        self.vertical_panel_view(lines[0].title(), lines, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
+        self.set_message("Read the home-road wayfinding sign.")
+
+    def origin_world_gateway_kind(self, chunk_x: int, chunk_y: int, x: int, y: int) -> str:
+        if (int(chunk_x), int(chunk_y)) != (0, 0):
+            return ""
+        point = (int(x), int(y))
+        for gateway, position in self.origin_world_gateway_positions().items():
+            if point == position:
+                return gateway
+        return ""
+
+    def origin_world_gateway_at(self, x: int, y: int) -> str:
+        if not self.on_wilderness():
+            return ""
+        return self.origin_world_gateway_kind(
+            self.state.wilderness_chunk_x, self.state.wilderness_chunk_y, x, y
+        )
+
+    def apply_origin_world_hub(self, grid: List[List[str]]) -> None:
+        """Reserve a compact physical home district inside the origin world chunk."""
+        if not grid or len(grid) < 36 or len(grid[0]) < 82:
+            return
+
+        def fill(x0: int, y0: int, x1: int, y1: int, tile: str) -> None:
+            for yy in range(max(1, y0), min(len(grid) - 1, y1 + 1)):
+                for xx in range(max(1, x0), min(len(grid[0]) - 1, x1 + 1)):
+                    grid[yy][xx] = tile
+
+        def border(x0: int, y0: int, x1: int, y1: int, tile: str = "#") -> None:
+            for xx in range(x0, x1 + 1):
+                grid[y0][xx] = tile
+                grid[y1][xx] = tile
+            for yy in range(y0, y1 + 1):
+                grid[yy][x0] = tile
+                grid[yy][x1] = tile
+
+        fill(8, 23, 38, 35, ";")
+        for yy in range(25, 35):
+            for xx in range(12, 35):
+                if yy in {28, 29, 30} or xx in {20, 21, 27, 28}:
+                    grid[yy][xx] = ":"
+        for x0, y0, x1, y1 in ((11, 24, 18, 27), (23, 24, 31, 27), (11, 31, 18, 34), (30, 31, 36, 34)):
+            fill(x0, y0, x1, y1, "#")
+        town_x, town_y = self.origin_world_gateway_positions()["town"]
+        grid[town_y][town_x] = "S"
+        grid[town_y - 1][town_x] = ":"
+        for yy in range(town_y + 1, len(grid)):
+            grid[yy][town_x] = ":"
+
+        fill(57, 4, 81, 19, ";")
+        border(58, 5, 80, 18)
+        fill(60, 6, 67, 9, "#")
+        grid[9][63] = ":"
+        fill(60, 12, 68, 17, ",")
+        fill(72, 12, 77, 17, "~")
+        for xx in range(63, 81):
+            grid[11][xx] = ":"
+        for yy in range(11, 18):
+            grid[yy][66] = ":"
+        farm_x, farm_y = self.origin_world_gateway_positions()["farm"]
+        grid[farm_y][farm_x] = "F"
+
+        # A real mine building now stands between town and farm. Its door uses
+        # the existing cave silhouette, but origin-gateway dispatch sends it to
+        # the authored mine progression rather than a procedural cave.
+        fill(42, 5, 54, 14, ";")
+        border(43, 6, 53, 14)
+        fill(44, 7, 52, 13, "#")
+        mine_x, mine_y = self.origin_world_gateway_positions()["mine"]
+        grid[mine_y][mine_x] = "V"
+
+        # One continuous home road visibly links all three destinations while
+        # routing around the town blocks instead of cutting through them.
+        for yy in range(town_y, 37):
+            grid[yy][town_x] = ":"
+        for xx in range(town_x, farm_x + 1):
+            grid[36][xx] = ":"
+        for yy in range(farm_y, 37):
+            grid[yy][farm_x] = ":"
+        for yy in range(mine_y, 37):
+            grid[yy][mine_x] = ":"
+        for sign_x, sign_y in self.origin_world_sign_positions().values():
+            grid[sign_y][sign_x] = "?"
+        grid[town_y][town_x] = "S"
+        grid[farm_y][farm_x] = "F"
+        grid[mine_y][mine_x] = "V"
+
+    def enter_origin_world_gateway(self, gateway: str) -> None:
+        if gateway == "mine":
+            self.transition_to_mine(return_location="WildernessOrigin")
+            return
+        if gateway == "farm":
+            self.state.location = "Farm"
+            self.state.player_x = max(2, self.farm_width() - 3)
+            self.state.player_y = min(10, self.farm_height() - 2)
+            self.state.facing = "LEFT"
+            self.update_farm_animal_actors(force=True)
+            self.autosave_with_message("You follow the home lane onto your farm.")
+            return
+        self.return_from_wilderness_to_town(emergency=False)
+
+    def transition_from_farm_to_origin_world(self) -> None:
+        self.state.location = "Wilderness"
+        self.set_wilderness_chunk(0, 0, entry_side="center")
+        gate_x, gate_y = self.origin_world_gateway_positions()["farm"]
+        self.state.player_x = gate_x
+        self.state.player_y = min(self.active_map_height() - 1, gate_y + 1)
+        self.state.facing = "UP"
+        self.autosave_with_message("You leave the farm by the east lane and rejoin the open world.")
 
     def wilderness_chunk_key(self, chunk_x: Optional[int] = None, chunk_y: Optional[int] = None) -> str:
         cx = self.state.wilderness_chunk_x if chunk_x is None else int(chunk_x)
@@ -6906,43 +7162,59 @@ class FarmGame(
         if not h or not w:
             return
 
-        mid_x = w // 2
-        mid_y = h // 2
         rng = random.Random(self.wilderness_chunk_seed(chunk_x, chunk_y) + 10300)
+        protected_markers = {
+            (x, y): tile
+            for y, row in enumerate(grid)
+            for x, tile in enumerate(row)
+            if tile in {"V", "X", WILDERNESS_OUTPOST_SYMBOL, FIELD_SITE_SYMBOL, WILDERNESS_CLAIM_SYMBOL, "!"}
+        }
 
-        # Clear all four edge gate bands.
-        for x in range(max(1, mid_x - 4), min(w - 1, mid_x + 5)):
-            for y in [0, 1, 2, h - 3, h - 2, h - 1]:
-                if grid[y][x] not in ["S"]:
-                    grid[y][x] = ":" if y in [0, h - 1] else "."
-        for y in range(max(1, mid_y - 4), min(h - 1, mid_y + 5)):
-            for x in [0, 1, 2, w - 3, w - 2, w - 1]:
-                grid[y][x] = ":" if x in [0, w - 1] else "."
+        # Legacy saves contain identical 9x3 gate bands on every side. Restore
+        # those narrow areas from global terrain so old chunks gain real seams.
+        mid_x, mid_y = w // 2, h // 2
+        legacy_points = set()
+        edge_points = (
+            [(x, 0) for x in range(w)] + [(x, h - 1) for x in range(w)]
+            + [(0, y) for y in range(1, h - 1)] + [(w - 1, y) for y in range(1, h - 1)]
+        )
+        for x, y in edge_points:
+            if grid[y][x] == "#":
+                wx, wy = self.wilderness_world_coords(chunk_x, chunk_y, x, y)
+                grid[y][x] = "~" if self.wilderness_world_water_tile(wx, wy) else self.wilderness_world_biome_tile(wx, wy)
+        for x in range(max(0, mid_x - 4), min(w, mid_x + 5)):
+            for y in (0, 1, 2, h - 3, h - 2, h - 1):
+                legacy_points.add((x, y))
+        for y in range(max(0, mid_y - 4), min(h, mid_y + 5)):
+            for x in (0, 1, 2, w - 3, w - 2, w - 1):
+                legacy_points.add((x, y))
+        for x, y in legacy_points:
+            wx, wy = self.wilderness_world_coords(chunk_x, chunk_y, x, y)
+            grid[y][x] = "~" if self.wilderness_world_water_tile(wx, wy) else self.wilderness_world_biome_tile(wx, wy)
 
-        # Origin keeps the south town exit marker in the center.
-        if chunk_x == 0 and chunk_y == 0:
-            for x in range(mid_x - 2, mid_x + 3):
-                if 0 <= x < w:
-                    grid[h - 1][x] = "S"
-                    grid[h - 2][x] = ":"
-                    grid[h - 3][x] = ":"
-
-        # Restore visible border gate cells.
-        for x in range(max(1, mid_x - 4), min(w - 1, mid_x + 5)):
-            if grid[0][x] != "S":
-                grid[0][x] = ":"
-            if grid[h - 1][x] != "S":
-                grid[h - 1][x] = ":"
-        for y in range(max(1, mid_y - 4), min(h - 1, mid_y + 5)):
-            grid[y][0] = ":"
-            grid[y][w - 1] = ":"
-        if chunk_x == 0 and chunk_y == 0:
-            for x in range(mid_x - 2, mid_x + 3):
-                grid[h - 1][x] = "S"
+        # Replace the obsolete center-to-center road lattice in older persistent
+        # chunks before drawing the destination-backed network.
+        self.remove_obsolete_wilderness_regional_roads(grid, chunk_x, chunk_y)
 
         # Bridges if existing trails cross water, without stamping a new network.
         self.wilderness_bridge_near_trails(grid, rng, fallback=True)
-        self.clear_wilderness_chunk_entry_lanes(grid)
+        self.apply_wilderness_regional_roads(grid, chunk_x, chunk_y)
+        network_targets = [
+            (x, y) for y, row in enumerate(grid) for x, tile in enumerate(row)
+            if tile in {":", "="} and self.wilderness_world_on_regional_road(
+                *self.wilderness_world_coords(chunk_x, chunk_y, x, y), chunk_x, chunk_y
+            )
+        ]
+        for marker_y, row in enumerate(grid):
+            for marker_x, tile in enumerate(row):
+                if tile not in {WILDERNESS_OUTPOST_SYMBOL, WILDERNESS_STRUCTURE_SYMBOL, WILDERNESS_FISHING_SETTLEMENT_SYMBOL}:
+                    continue
+                approaches = [
+                    point for point in ((marker_x + 1, marker_y), (marker_x - 1, marker_y), (marker_x, marker_y + 1), (marker_x, marker_y - 1))
+                    if 0 <= point[1] < h and 0 <= point[0] < w and grid[point[1]][point[0]] != "#"
+                ]
+                if approaches:
+                    self.connect_wilderness_site_to_regional_road(grid, approaches[0], network_targets)
 
         # Existing saved chunks from older versions may not have caves.
         # Add one non-destructively if missing.
@@ -6951,6 +7223,22 @@ class FarmGame(
             and not any("V" in row for row in grid)
         ):
             self.place_wilderness_caves_in_chunk(grid, chunk_x, chunk_y)
+        for (x, y), tile in protected_markers.items():
+            if 0 <= y < h and 0 <= x < w:
+                grid[y][x] = tile
+        self.upgrade_wilderness_building_exteriors(grid, chunk_x, chunk_y)
+        self.upgrade_wilderness_landmark_sites(grid, chunk_x, chunk_y)
+        if chunk_x == 0 and chunk_y == 0:
+            self.apply_origin_world_hub(grid)
+            origin_symbols = {tile for row in grid for tile in row}
+            if not {"R", "P", "Q", "K"}.issubset(origin_symbols) or sum(row.count("?") for row in grid) < 2:
+                self.decorate_wilderness_points_of_interest(
+                    grid, random.Random(int(self.state.wilderness_seed) + 119302)
+                )
+            self.ensure_origin_wilderness_poi_markers(grid)
+            # The authored home district is the authoritative final layer.
+            # POI repair must never replace its town or farm gateways.
+            self.apply_origin_world_hub(grid)
 
     def repair_all_wilderness_chunk_exits(self):
         """Compatibility helper.
@@ -7007,7 +7295,7 @@ class FarmGame(
             self.wilderness_maps[key] = self.make_wilderness_chunk(self.state.wilderness_chunk_x, self.state.wilderness_chunk_y)
 
         self.wilderness_map = self.wilderness_maps[key]
-        self.state.wilderness_chunks_visited = max(int(getattr(self.state, "wilderness_chunks_visited", 1)), len(self.wilderness_maps))
+        self.state.wilderness_chunks_visited = max(int(getattr(self.state, "wilderness_chunks_visited", 1)), self.wilderness_visited_map_count())
 
     def ensure_wilderness_chunk_runtime_caches(self):
         """Per-session markers for expensive one-time chunk normalization."""
@@ -7018,6 +7306,7 @@ class FarmGame(
             "wilderness_static_checked_chunks",
             "wilderness_balanced_chunks",
             "wilderness_procedural_town_checked_chunks",
+            "wilderness_ocean_checked_chunks",
         ]:
             value = getattr(self, attr, None)
             if not isinstance(value, set):
@@ -7038,6 +7327,345 @@ class FarmGame(
             return False
         checked = getattr(self, "wilderness_static_checked_chunks", set())
         return isinstance(checked, set) and key in checked
+
+    def ensure_wilderness_stream_state(self) -> None:
+        if not isinstance(getattr(self, "_wilderness_stream_preloaded_chunks", None), set):
+            self._wilderness_stream_preloaded_chunks = set()
+        if not isinstance(getattr(self, "_wilderness_stream_dirty_actor_chunks", None), set):
+            self._wilderness_stream_dirty_actor_chunks = set()
+        if not isinstance(getattr(self, "_wilderness_stream_tick_cursor", None), int):
+            self._wilderness_stream_tick_cursor = 0
+
+    def wilderness_stream_window_chunks(self) -> List[Tuple[int, int]]:
+        cx, cy = int(self.state.wilderness_chunk_x), int(self.state.wilderness_chunk_y)
+        return [(cx + dx, cy + dy) for dy in (-1, 0, 1) for dx in (-1, 0, 1)]
+
+    def wilderness_stream_viewport_chunks(
+        self,
+        focus_x: Optional[int] = None,
+        focus_y: Optional[int] = None,
+        margin: int = 2,
+    ) -> List[Tuple[int, int]]:
+        """Return every backend chunk touched by the visible seamless viewport."""
+        focus_x = int(self.state.player_x if focus_x is None else focus_x)
+        focus_y = int(self.state.player_y if focus_y is None else focus_y)
+        margin = max(0, int(margin))
+        left = focus_x - VIEW_WIDTH // 2 - margin
+        right = focus_x + (VIEW_WIDTH - VIEW_WIDTH // 2 - 1) + margin
+        top = focus_y - VIEW_HEIGHT // 2 - margin
+        bottom = focus_y + (VIEW_HEIGHT - VIEW_HEIGHT // 2 - 1) + margin
+        min_chunk_x, min_chunk_y, _lx, _ly = self.wilderness_stream_resolve(left, top)
+        max_chunk_x, max_chunk_y, _rx, _ry = self.wilderness_stream_resolve(right, bottom)
+        allowed = set(self.wilderness_stream_window_chunks())
+        return [
+            (chunk_x, chunk_y)
+            for chunk_y in range(min_chunk_y, max_chunk_y + 1)
+            for chunk_x in range(min_chunk_x, max_chunk_x + 1)
+            if (chunk_x, chunk_y) in allowed
+        ]
+
+    def prepare_wilderness_visible_chunks(
+        self,
+        focus_x: Optional[int] = None,
+        focus_y: Optional[int] = None,
+        margin: int = 2,
+    ) -> int:
+        """Fully prepare terrain before it can enter the player's viewport."""
+        if not self.on_wilderness():
+            return 0
+        self.ensure_wilderness_chunks()
+        self.ensure_wilderness_stream_state()
+        if not isinstance(getattr(self, "repaired_wilderness_chunks", None), set):
+            self.repaired_wilderness_chunks = set()
+        current = (int(self.state.wilderness_chunk_x), int(self.state.wilderness_chunk_y))
+        prepared = 0
+        for chunk_x, chunk_y in self.wilderness_stream_viewport_chunks(focus_x, focus_y, margin):
+            if (chunk_x, chunk_y) == current:
+                continue
+            key = self.wilderness_chunk_key(chunk_x, chunk_y)
+            if key not in self.wilderness_maps:
+                self._wilderness_stream_preloaded_chunks.add(key)
+                self.get_wilderness_chunk_map(chunk_x, chunk_y)
+                prepared += 1
+            grid = self.wilderness_maps.get(key)
+            if grid is not None and key not in getattr(self, "repaired_wilderness_chunks", set()):
+                self.repair_wilderness_chunk_exits(grid, chunk_x, chunk_y)
+                self.repaired_wilderness_chunks.add(key)
+        return prepared
+
+    def prepare_wilderness_predictive_chunk(
+        self,
+        focus_x: Optional[int] = None,
+        focus_y: Optional[int] = None,
+        now: Optional[float] = None,
+    ) -> int:
+        """Warm at most one likely next chunk without creating a burst of stalls."""
+        if not self.on_wilderness():
+            return 0
+        self.ensure_wilderness_stream_state()
+        if not isinstance(getattr(self, "repaired_wilderness_chunks", None), set):
+            self.repaired_wilderness_chunks = set()
+        current_x = int(self.state.wilderness_chunk_x)
+        current_y = int(self.state.wilderness_chunk_y)
+        visible = set(self.wilderness_stream_viewport_chunks(focus_x, focus_y, margin=0))
+        lookahead = self.wilderness_stream_viewport_chunks(focus_x, focus_y, margin=18)
+        candidates = []
+        facing = str(getattr(self.state, "facing", "DOWN"))
+        facing_delta = {
+            "LEFT": (-1, 0),
+            "RIGHT": (1, 0),
+            "UP": (0, -1),
+            "DOWN": (0, 1),
+        }.get(facing, (0, 1))
+        for chunk_x, chunk_y in lookahead:
+            if (chunk_x, chunk_y) == (current_x, current_y) or (chunk_x, chunk_y) in visible:
+                continue
+            key = self.wilderness_chunk_key(chunk_x, chunk_y)
+            if key in self.wilderness_maps:
+                continue
+            dx, dy = chunk_x - current_x, chunk_y - current_y
+            direction_rank = 0 if (dx, dy) == facing_delta else (1 if abs(dx) + abs(dy) == 1 else 2)
+            candidates.append((direction_rank, abs(dx) + abs(dy), chunk_y, chunk_x))
+        if not candidates:
+            return 0
+
+        clock_override = now is not None
+        now = time.monotonic() if now is None else float(now)
+        last_time = float(getattr(self, "_wilderness_stream_last_prefetch_time", -9999.0))
+        last_facing = str(getattr(self, "_wilderness_stream_last_prefetch_facing", ""))
+        if facing == last_facing and now - last_time < 0.75:
+            return 0
+
+        _rank, _distance, chunk_y, chunk_x = min(candidates)
+        key = self.wilderness_chunk_key(chunk_x, chunk_y)
+        self._wilderness_stream_preloaded_chunks.add(key)
+        grid = self.get_wilderness_chunk_map(chunk_x, chunk_y)
+        if key not in getattr(self, "repaired_wilderness_chunks", set()):
+            self.repair_wilderness_chunk_exits(grid, chunk_x, chunk_y)
+            self.repaired_wilderness_chunks.add(key)
+        self._wilderness_stream_last_prefetch_time = now if clock_override else time.monotonic()
+        self._wilderness_stream_last_prefetch_facing = facing
+        return 1
+
+    def prepare_wilderness_stream_window(self, limit: int = 1) -> int:
+        """Incrementally preload neighboring persistent chunks without discovering them."""
+        if not self.on_wilderness():
+            return 0
+        self.ensure_wilderness_chunks()
+        self.ensure_wilderness_stream_state()
+        current = (int(self.state.wilderness_chunk_x), int(self.state.wilderness_chunk_y))
+        window_keys = {self.wilderness_chunk_key(*point) for point in self.wilderness_stream_window_chunks()}
+        for stale_key in list(self._wilderness_stream_preloaded_chunks):
+            if stale_key in window_keys:
+                continue
+            self._wilderness_stream_preloaded_chunks.discard(stale_key)
+            self.wilderness_maps.pop(stale_key, None)
+            if stale_key not in self._wilderness_stream_dirty_actor_chunks:
+                getattr(self, "wilderness_animals", {}).pop(stale_key, None)
+            travelers = getattr(self, "_wilderness_travelers", None)
+            if isinstance(travelers, dict):
+                prefix = f"{stale_key}:"
+                for traveler_key in [key for key in travelers if str(key).startswith(prefix)]:
+                    travelers.pop(traveler_key, None)
+            for cache_name in ("wilderness_static_checked_chunks", "wilderness_balanced_chunks", "wilderness_procedural_town_checked_chunks", "repaired_wilderness_chunks"):
+                cache = getattr(self, cache_name, None)
+                if isinstance(cache, set):
+                    cache.discard(stale_key)
+        if int(limit) <= 0:
+            return 0
+        candidates = sorted(
+            (point for point in self.wilderness_stream_window_chunks() if point != current),
+            key=lambda point: (abs(point[0] - current[0]) + abs(point[1] - current[1]), point[1], point[0]),
+        )
+        loaded = 0
+        for cx, cy in candidates:
+            key = self.wilderness_chunk_key(cx, cy)
+            if key in self.wilderness_maps:
+                if key not in getattr(self, "repaired_wilderness_chunks", set()):
+                    self.repair_wilderness_chunk_exits(self.wilderness_maps[key], cx, cy)
+                    self.repaired_wilderness_chunks.add(key)
+                    loaded += 1
+                    if loaded >= max(0, int(limit)):
+                        break
+                continue
+            self._wilderness_stream_preloaded_chunks.add(key)
+            grid = self.get_wilderness_chunk_map(cx, cy)
+            self.repair_wilderness_chunk_exits(grid, cx, cy)
+            self.repaired_wilderness_chunks.add(key)
+            loaded += 1
+            if loaded >= max(0, int(limit)):
+                break
+        return loaded
+
+    def wilderness_stream_map(self, chunk_x: int, chunk_y: int) -> Optional[List[List[str]]]:
+        return getattr(self, "wilderness_maps", {}).get(self.wilderness_chunk_key(chunk_x, chunk_y))
+
+    def wilderness_stream_resolve(self, relative_x: int, relative_y: int) -> Tuple[int, int, int, int]:
+        """Resolve coordinates relative to the current chunk into chunk/local coordinates."""
+        width, height = 86, 38
+        dx, local_x = divmod(int(relative_x), width)
+        dy, local_y = divmod(int(relative_y), height)
+        return int(self.state.wilderness_chunk_x) + dx, int(self.state.wilderness_chunk_y) + dy, local_x, local_y
+
+    def wilderness_stream_preview_tile(self, chunk_x: int, chunk_y: int, x: int, y: int) -> str:
+        grid = self.wilderness_stream_map(chunk_x, chunk_y)
+        if grid and 0 <= int(y) < len(grid) and 0 <= int(x) < len(grid[0]):
+            return str(grid[int(y)][int(x)])
+        wx, wy = self.wilderness_world_coords(chunk_x, chunk_y, x, y)
+        return "~" if self.wilderness_world_water_tile(wx, wy) else self.wilderness_world_biome_tile(wx, wy)
+
+    def wilderness_stream_actor_records(self, chunk_x: int, chunk_y: int) -> List[Tuple[str, Dict[str, object]]]:
+        """Movable wilderness actors for one loaded chunk; combat actors remain authoritative-only."""
+        records: List[Tuple[str, Dict[str, object]]] = []
+        records.extend(("traveler", record) for record in self.get_wilderness_travelers_for_chunk(chunk_x, chunk_y))
+        records.extend(("animal", record) for record in self.get_wilderness_animals(chunk_x, chunk_y))
+        return records
+
+    def wilderness_stream_actor_occupied(
+        self,
+        chunk_x: int,
+        chunk_y: int,
+        x: int,
+        y: int,
+        exclude_id: str = "",
+    ) -> bool:
+        if (int(chunk_x), int(chunk_y)) == (int(self.state.wilderness_chunk_x), int(self.state.wilderness_chunk_y)):
+            if (int(x), int(y)) == (int(self.state.player_x), int(self.state.player_y)):
+                return True
+        for _kind, record in self.wilderness_stream_actor_records(chunk_x, chunk_y):
+            if str(record.get("id", "")) == str(exclude_id):
+                continue
+            if int(record.get("x", -1)) == int(x) and int(record.get("y", -1)) == int(y):
+                return True
+        for record in self.get_wilderness_stronghold_enemies(chunk_x, chunk_y, create=False):
+            if not record.get("defeated") and int(record.get("x", -1)) == int(x) and int(record.get("y", -1)) == int(y):
+                return True
+        for record in self.get_bounty_targets_for_chunk(chunk_x, chunk_y, create=False):
+            if not record.get("defeated") and int(record.get("x", record.get("target_x", -1))) == int(x) and int(record.get("y", record.get("target_y", -1))) == int(y):
+                return True
+        for record in self.get_wilderness_random_combat_enemies(chunk_x, chunk_y, create=False):
+            if not record.get("defeated") and int(record.get("x", -1)) == int(x) and int(record.get("y", -1)) == int(y):
+                return True
+        return False
+
+    def wilderness_stream_actor_passable(self, chunk_x: int, chunk_y: int, x: int, y: int) -> bool:
+        grid = self.wilderness_stream_map(chunk_x, chunk_y)
+        if not grid or not (0 <= int(y) < len(grid) and 0 <= int(x) < len(grid[0])):
+            return False
+        blocked = {
+            "#", "~", "S", "V", "X", "!", "T", "o", "*", "?", "R", "J", "P", "K", "Q", "Y", "u", "W", "N", "F", "O", "L", "e", "p", "M", "G", "Z",
+            WILDERNESS_OUTPOST_SYMBOL, WILDERNESS_STRUCTURE_SYMBOL, WILDERNESS_LANDSCAPE_SYMBOL,
+            WILDERNESS_DOCK_SYMBOL, WILDERNESS_FISHING_SETTLEMENT_SYMBOL, WILDERNESS_REFUGE_SYMBOL,
+            WILDERNESS_STAFFED_SITE_SYMBOL, WILDERNESS_EXCURSION_SYMBOL,
+        }
+        tile = str(grid[int(y)][int(x)])
+        position = (int(x), int(y))
+        event = self.wilderness_event_visual_lookup(chunk_x, chunk_y, grid).get(position, {})
+        seasonal = self.wilderness_seasonal_surface_lookup(chunk_x, chunk_y, grid).get(position, {})
+        if not event and seasonal.get("blocking"):
+            return False
+        if tile == "~" and self.wilderness_water_is_frozen_at(x, y, chunk_x, chunk_y):
+            return True
+        return tile not in blocked
+
+    def try_move_wilderness_stream_actor(
+        self,
+        kind: str,
+        record: Dict[str, object],
+        chunk_x: int,
+        chunk_y: int,
+        options: List[Tuple[int, int]],
+    ) -> Tuple[bool, int, int]:
+        """Move one actor, transferring it between loaded chunks when it crosses an edge."""
+        source_x, source_y = int(chunk_x), int(chunk_y)
+        actor_id = str(record.get("id", ""))
+        x, y = int(record.get("x", 0)), int(record.get("y", 0))
+        window = set(self.wilderness_stream_window_chunks())
+        for dx, dy in options:
+            destination_x, destination_y, local_x, local_y = self.wilderness_stream_resolve_from_chunk(
+                source_x, source_y, x + int(dx), y + int(dy)
+            )
+            if kind == "traveler" and record.get("recurring") and (destination_x, destination_y) != (source_x, source_y):
+                continue
+            if (destination_x, destination_y) not in window or self.wilderness_stream_map(destination_x, destination_y) is None:
+                continue
+            if not self.wilderness_stream_actor_passable(destination_x, destination_y, local_x, local_y):
+                continue
+            if (destination_x, destination_y) == (int(self.state.wilderness_chunk_x), int(self.state.wilderness_chunk_y)):
+                if kind == "animal" and not self.animal_passable_tile(local_x, local_y):
+                    continue
+                if self.wilderness_expedition_camp_visual_at(local_x, local_y) or self.wilderness_event_blocking_at(local_x, local_y) or self.wilderness_seasonal_surface_blocking_at(local_x, local_y):
+                    continue
+            if self.wilderness_stream_actor_occupied(destination_x, destination_y, local_x, local_y, actor_id):
+                continue
+            record["x"], record["y"] = local_x, local_y
+            if (destination_x, destination_y) != (source_x, source_y):
+                if kind == "animal":
+                    source = self.get_wilderness_animals(source_x, source_y)
+                    destination = self.get_wilderness_animals(destination_x, destination_y)
+                else:
+                    source = self.get_wilderness_travelers_for_chunk(source_x, source_y)
+                    destination = self.get_wilderness_travelers_for_chunk(destination_x, destination_y)
+                if record in source:
+                    source.remove(record)
+                destination[:] = [other for other in destination if str(other.get("id", "")) != actor_id]
+                destination.append(record)
+                record["activity"] = "crossing into a neighboring wilderness tract"
+            if kind == "animal":
+                self._wilderness_stream_dirty_actor_chunks.update({
+                    self.wilderness_chunk_key(source_x, source_y),
+                    self.wilderness_chunk_key(destination_x, destination_y),
+                })
+            return True, destination_x, destination_y
+        return False, source_x, source_y
+
+    def wilderness_stream_resolve_from_chunk(
+        self, chunk_x: int, chunk_y: int, relative_x: int, relative_y: int
+    ) -> Tuple[int, int, int, int]:
+        width, height = 86, 38
+        dx, local_x = divmod(int(relative_x), width)
+        dy, local_y = divmod(int(relative_y), height)
+        return int(chunk_x) + dx, int(chunk_y) + dy, local_x, local_y
+
+    def update_wilderness_stream_actors(self, limit: int = 1) -> int:
+        """Tick a bounded rotating slice of loaded neighboring wildlife and travelers."""
+        if not self.on_wilderness() or int(limit) <= 0:
+            return 0
+        self.ensure_wilderness_stream_state()
+        current = (int(self.state.wilderness_chunk_x), int(self.state.wilderness_chunk_y))
+        candidates = [
+            point for point in self.wilderness_stream_window_chunks()
+            if point != current and self.wilderness_stream_map(*point) is not None
+        ]
+        if not candidates:
+            return 0
+        candidates.sort(key=lambda point: (point[1], point[0]))
+        start = self._wilderness_stream_tick_cursor % len(candidates)
+        selected = [candidates[(start + offset) % len(candidates)] for offset in range(min(int(limit), len(candidates)))]
+        self._wilderness_stream_tick_cursor = (start + len(selected)) % len(candidates)
+        tick_seed = int(self.state.wilderness_seed) ^ (self._wilderness_stream_tick_cursor * 2654435761)
+        for chunk_x, chunk_y in selected:
+            rng = random.Random(tick_seed ^ (chunk_x * 83492791) ^ (chunk_y * 19349663))
+            for kind, record in list(self.wilderness_stream_actor_records(chunk_x, chunk_y)):
+                if kind == "traveler":
+                    if record.get("recurring") or rng.random() > 0.34:
+                        continue
+                    options = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+                else:
+                    species = str(record.get("species", "Animal"))
+                    move_chance = 0.45 if species in ["Rabbit", "Squirrel", "Duck", "Frog", "Songbird"] else 0.28
+                    if rng.random() > move_chance:
+                        continue
+                    options = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+                rng.shuffle(options)
+                if kind == "traveler" and record.get("road_route"):
+                    options = self.wilderness_traveler_route_options(record, chunk_x, chunk_y, options)
+                self.try_move_wilderness_stream_actor(kind, record, chunk_x, chunk_y, options)
+        return len(selected)
+
+    def wilderness_visited_map_count(self) -> int:
+        self.ensure_wilderness_stream_state()
+        return sum(1 for key in getattr(self, "wilderness_maps", {}) if key not in self._wilderness_stream_preloaded_chunks)
 
     def wilderness_world_coords(self, chunk_x: int, chunk_y: int, x: int, y: int) -> Tuple[int, int]:
         return chunk_x * 86 + x, chunk_y * 38 + y
@@ -7071,14 +7699,81 @@ class FarmGame(
         b = v01 * (1 - fx) + v11 * fx
         return a * (1 - fy) + b * fy
 
+    def wilderness_world_oceanity(self, wx: int, wy: int) -> float:
+        return self.wilderness_value_noise(int(wx) - 5200, int(wy) + 4300, 620.0, 87)
+
+    def wilderness_world_is_ocean_province(self, wx: int, wy: int) -> bool:
+        return (
+            max(abs(int(wx)), abs(int(wy))) >= 2400
+            and self.wilderness_world_oceanity(wx, wy) > 0.62
+        )
+
+    def wilderness_world_island_mass(self, wx: int, wy: int) -> float:
+        broad = self.wilderness_value_noise(int(wx) + 700, int(wy) - 900, 120.0, 88)
+        detail = self.wilderness_value_noise(int(wx) - 1300, int(wy) + 500, 42.0, 89)
+        return broad * 0.82 + detail * 0.18
+
+    def wilderness_world_ocean_tile(self, wx: int, wy: int) -> bool:
+        if not self.wilderness_world_is_ocean_province(wx, wy):
+            return False
+        # Low island-mass values form coherent islands. Most of an ocean
+        # province remains connected water instead of scattered inland ponds.
+        return self.wilderness_world_island_mass(wx, wy) > 0.30
+
+    def wilderness_world_island_surface(self, wx: int, wy: int) -> str:
+        temperature = self.wilderness_value_noise(int(wx) - 2100, int(wy) + 1700, 420.0, 55)
+        aridity = self.wilderness_value_noise(int(wx) + 2700, int(wy) - 1900, 360.0, 66)
+        elevation = self.wilderness_value_noise(int(wx) + 900, int(wy) - 400, 190.0, 22)
+        if elevation > 0.74:
+            return "x"
+        if temperature > 0.61 and aridity > 0.48:
+            return chr(96)  # desert isle
+        if temperature > 0.52:
+            return ";"  # tropical green isle
+        return "["      # windward salt strand
+
+    def wilderness_world_reef_at(self, wx: int, wy: int) -> bool:
+        if not self.wilderness_world_ocean_tile(wx, wy):
+            return False
+        mass = self.wilderness_world_island_mass(wx, wy)
+        temperature = self.wilderness_value_noise(int(wx) - 2100, int(wy) + 1700, 420.0, 55)
+        reef_detail = self.wilderness_value_noise(int(wx) + 250, int(wy) - 330, 28.0, 90)
+        return temperature > 0.50 and 0.30 < mass < 0.39 and reef_detail > 0.43
+
+    def wilderness_world_current(self, wx: int, wy: int) -> Dict[str, object]:
+        if not self.wilderness_world_ocean_tile(wx, wy):
+            return {}
+        flow = self.wilderness_value_noise(int(wx) + 9100, int(wy) - 7400, 310.0, 91)
+        turn = self.wilderness_value_noise(int(wx) - 3600, int(wy) + 6200, 240.0, 92)
+        if flow < 0.25:
+            dx, dy, name, glyph = -1, 0, "west", "<"
+        elif flow < 0.50:
+            dx, dy, name, glyph = 0, -1, "north", "^"
+        elif flow < 0.75:
+            dx, dy, name, glyph = 1, 0, "east", ">"
+        else:
+            dx, dy, name, glyph = 0, 1, "south", "v"
+        strength = 2 if turn > 0.66 else 1
+        return {"dx": dx, "dy": dy, "name": name, "glyph": glyph, "strength": strength}
+
     def wilderness_world_biome_tile(self, wx: int, wy: int) -> str:
         """Choose biome from continuous world coordinates, so adjacent chunks match."""
         moisture = self.wilderness_value_noise(wx, wy, 160.0, 11)
         elevation = self.wilderness_value_noise(wx + 900, wy - 400, 190.0, 22)
         forest = self.wilderness_value_noise(wx - 300, wy + 700, 140.0, 33)
         fungal = self.wilderness_value_noise(wx + 1200, wy + 1200, 120.0, 44)
+        temperature = self.wilderness_value_noise(wx - 2100, wy + 1700, 420.0, 55)
+        aridity = self.wilderness_value_noise(wx + 2700, wy - 1900, 360.0, 66)
+        oceanity = self.wilderness_world_oceanity(wx, wy)
 
         # Terrain style from global fields.
+        climate_frontier = max(abs(int(wx)), abs(int(wy))) >= 2400
+        if climate_frontier and oceanity > 0.62:
+            return "["  # saltwind coast / archipelago province
+        if climate_frontier and temperature < 0.24 and elevation > 0.48:
+            return '"'  # frozen tundra/snowfield province
+        if climate_frontier and temperature > 0.62 and moisture < 0.36 and aridity > 0.57:
+            return "`"  # desert/badland province
         if elevation > 0.76:
             return "x"  # rocky ridge/highland
         if moisture > 0.74 and elevation < 0.54:
@@ -7089,46 +7784,599 @@ class FarmGame(
             return "%"  # deep woods
         return ";"      # sun meadow
 
-    def wilderness_world_river_center(self, world_y: int) -> int:
-        """Global vertical river centerline by world Y. This lines up across north/south chunks."""
-        seed_offset = (int(self.state.wilderness_seed) % 97) - 48
+    def wilderness_world_river_center(self, world_y: int, sector: int = 0) -> int:
+        """Centerline for one finite world river channel."""
+        sector = int(sector)
+        seed_offset = (int(self.state.wilderness_seed) % 97) - 48 if sector == 0 else int((self.wilderness_hash01(sector, 0, 7131) - 0.5) * 300)
+        base_x = 43 + sector * 1400 + seed_offset
         center = (
-            43
-            + seed_offset
-            + 18 * math.sin((world_y + self.state.wilderness_seed) / 55.0)
-            + 9 * math.sin((world_y * 1.73 + 83) / 97.0)
+            base_x
+            + 34 * math.sin((world_y + self.state.wilderness_seed + sector * 193) / 170.0)
+            + 15 * math.sin((world_y * 1.31 + 83 + sector * 71) / 310.0)
         )
         return int(round(center))
 
-    def wilderness_world_tributary_center(self, world_x: int) -> int:
-        """Global horizontal tributary by world X. This lines up across east/west chunks."""
-        seed_offset = (int(self.state.wilderness_seed) % 53) - 26
-        center = (
-            19
-            + seed_offset
-            + 10 * math.sin((world_x + 177) / 70.0)
-            + 6 * math.sin((world_x * 1.41 + self.state.wilderness_seed) / 130.0)
-        )
-        return int(round(center))
+    def wilderness_world_river_profile(self, sector: int) -> Dict[str, object]:
+        """Describe a source-to-mouth river without generating any chunks."""
+        sector = int(sector)
+        cache_key = (int(self.state.wilderness_seed), sector)
+        cache = getattr(self, "_wilderness_river_profile_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._wilderness_river_profile_cache = cache
+        if cache_key in cache:
+            return dict(cache[cache_key])
+        direction = 1 if sector == 0 or self.wilderness_hash01(sector, 0, 7132) >= 0.5 else -1
+        nominal_source = (-2100 if direction > 0 else 2100) + int((self.wilderness_hash01(sector, 0, 7133) - 0.5) * 700)
+        source_y = nominal_source
+        # Prefer an elevated source near the nominal watershed.
+        for offset in range(0, 1001, 40):
+            for candidate_y in (nominal_source - offset, nominal_source + offset):
+                center_x = self.wilderness_world_river_center(candidate_y, sector)
+                elevation = self.wilderness_value_noise(center_x + 900, candidate_y - 400, 190.0, 22)
+                if elevation > 0.68:
+                    source_y = candidate_y
+                    break
+            else:
+                continue
+            break
+        max_length = 3200 + int(self.wilderness_hash01(sector, 0, 7134) * 2600)
+        mouth_y = source_y + direction * max_length
+        reaches_sea = False
+        for distance in range(700, max_length + 1, 30):
+            candidate_y = source_y + direction * distance
+            center_x = self.wilderness_world_river_center(candidate_y, sector)
+            oceanity = self.wilderness_value_noise(center_x - 5200, candidate_y + 4300, 620.0, 87)
+            if max(abs(center_x), abs(candidate_y)) >= 2600 and oceanity > 0.66:
+                mouth_y, reaches_sea = candidate_y, True
+                break
+        length = (int(mouth_y) - int(source_y)) * direction
+        tributaries = []
+        for index in (0, 1):
+            fraction = 0.30 + index * 0.25 + self.wilderness_hash01(sector, index, 7135) * 0.12
+            join_y = int(source_y) + direction * int(length * fraction)
+            join_x = self.wilderness_world_river_center(join_y, sector)
+            side = -1 if self.wilderness_hash01(sector, index, 7136) < 0.5 else 1
+            tributary_length = 180 + int(self.wilderness_hash01(sector, index, 7137) * 230)
+            tributaries.append((join_x + side * tributary_length, join_x, join_y, tributary_length))
+        profile = {
+            "sector": sector,
+            "source_y": int(source_y),
+            "mouth_y": int(mouth_y),
+            "direction": direction,
+            "reaches_sea": reaches_sea,
+            "tributaries": tributaries,
+        }
+        cache[cache_key] = profile
+        return dict(profile)
 
     def wilderness_world_water_tile(self, wx: int, wy: int) -> bool:
-        """Continuous rivers/lakes from world coordinates."""
-        river_center = self.wilderness_world_river_center(wy)
-        river_width = 1 + (1 if self.wilderness_value_noise(wx, wy, 80.0, 55) > 0.76 else 0)
-        if abs(wx - river_center) <= river_width:
-            return True
+        """Continuous finite rivers, tributaries, lakes, and seas."""
+        nearest_sector = int(round((int(wx) - 43) / 1400.0))
+        for sector in range(nearest_sector - 1, nearest_sector + 2):
+            river = self.wilderness_world_river_profile(sector)
+            direction = int(river["direction"])
+            progress = (int(wy) - int(river["source_y"])) * direction
+            length = (int(river["mouth_y"]) - int(river["source_y"])) * direction
+            center = self.wilderness_world_river_center(wy, sector)
+            if 0 <= progress <= length:
+                river_width = 1 + (1 if progress > length * 0.55 else 0) + (1 if progress > length * 0.88 else 0)
+                if abs(int(wx) - center) <= river_width:
+                    return True
+                if river["reaches_sea"] and progress > length * 0.82:
+                    delta_progress = (progress - length * 0.82) / max(1.0, length * 0.18)
+                    spread = max(2, int(delta_progress * 18))
+                    if any(abs(int(wx) - (center + branch * spread)) <= 1 for branch in (-1, 1)):
+                        return True
+                # Two finite tributaries begin away from the channel and merge
+                # downstream. Their curves are global, so chunk edges cannot cut them.
+                for start_x, join_x, join_y, tributary_length in river["tributaries"]:
+                    low_x, high_x = sorted((start_x, join_x))
+                    if low_x <= int(wx) <= high_x:
+                        remaining = abs(int(wx) - join_x) / max(1, tributary_length)
+                        tributary_y = join_y - direction * int(remaining * 90) + int(8 * math.sin((int(wx) + sector * 47) / 43.0))
+                        if abs(int(wy) - tributary_y) <= 1:
+                            return True
+            # Small source pools and widening mouths make starts and endings legible.
+            source_x = self.wilderness_world_river_center(int(river["source_y"]), sector)
+            if (int(wx) - source_x) ** 2 + (int(wy) - int(river["source_y"])) ** 2 <= 36:
+                return True
+            mouth_x = self.wilderness_world_river_center(int(river["mouth_y"]), sector)
+            mouth_radius = 13 if river["reaches_sea"] else 9
+            if (int(wx) - mouth_x) ** 2 + (int(wy) - int(river["mouth_y"])) ** 2 <= mouth_radius ** 2:
+                return True
 
-        # Horizontal tributaries appear in bands. Because the formula is global,
-        # tributaries continue across east/west chunk borders.
-        trib_center = self.wilderness_world_tributary_center(wx)
-        trib_band = self.wilderness_value_noise(wx, wy, 260.0, 66)
-        if trib_band > 0.68 and abs(wy - trib_center) <= 1:
+        # Far-frontier continental noise creates coherent coastal seas and
+        # archipelagos while preserving the deterministic core world.
+        if self.wilderness_world_ocean_tile(wx, wy):
             return True
 
         # Occasional lakes/ponds from basin noise.
         lake = self.wilderness_value_noise(wx + 4000, wy - 4000, 95.0, 77)
         lake_detail = self.wilderness_value_noise(wx, wy, 35.0, 78)
         return lake > 0.86 and lake_detail > 0.58
+
+    def wilderness_chunk_hydrology_features(self, chunk_x: int, chunk_y: int) -> List[str]:
+        """Named large-scale water features whose defining point lies in a chunk."""
+        cx, cy = int(chunk_x), int(chunk_y)
+        min_wx, min_wy = self.wilderness_world_coords(cx, cy, 0, 0)
+        max_wx, max_wy = self.wilderness_world_coords(cx, cy, 85, 37)
+        nearest_sector = int(round(((min_wx + max_wx) // 2 - 43) / 1400.0))
+        features = []
+        for sector in range(nearest_sector - 1, nearest_sector + 2):
+            river = self.wilderness_world_river_profile(sector)
+            source_y = int(river["source_y"])
+            source_x = self.wilderness_world_river_center(source_y, sector)
+            if min_wx <= source_x <= max_wx and min_wy <= source_y <= max_wy:
+                features.append("River source / upland spring")
+            mouth_y = int(river["mouth_y"])
+            mouth_x = self.wilderness_world_river_center(mouth_y, sector)
+            if min_wx <= mouth_x <= max_wx and min_wy <= mouth_y <= max_wy:
+                features.append("Coastal river delta" if river["reaches_sea"] else "Inland terminal basin")
+        return features
+
+    def wilderness_legacy_region_route_segments(self, chunk_x: int, chunk_y: int) -> List[Tuple[Tuple[int, int], Tuple[int, int]]]:
+        """The pre-network center-to-center roads, retained only for save cleanup."""
+        profile = self.wilderness_region_profile(chunk_x, chunk_y)
+        key = (int(self.state.wilderness_seed), str(profile["key"]))
+        cache = getattr(self, "_wilderness_legacy_route_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._wilderness_legacy_route_cache = cache
+        if key in cache:
+            return list(cache[key])
+        members = self.wilderness_region_chunks(chunk_x, chunk_y)
+        center = (int(profile["center_x"]), int(profile["center_y"]))
+        world_center = lambda point: self.wilderness_world_coords(point[0], point[1], 43, 19)
+        segments = []
+        local_nodes = {self.wilderness_region_outpost_chunk(*center), self.wilderness_region_structure_chunk(*center)}
+        local_nodes.update(point for point in members if self.wilderness_chunk_has_procedural_settlement(*point))
+        for node in sorted(local_nodes):
+            if node != center:
+                segments.append((world_center(center), world_center(node)))
+        member_set = set(members)
+        neighbors = set()
+        for member_x, member_y in members:
+            for point in ((member_x + 1, member_y), (member_x - 1, member_y), (member_x, member_y + 1), (member_x, member_y - 1)):
+                if point not in member_set:
+                    anchor = self.wilderness_region_coords(*point)
+                    if anchor != (int(profile["rx"]), int(profile["ry"])):
+                        neighbors.add(anchor)
+        for anchor in sorted(neighbors):
+            neighbor = self.wilderness_region_profile(*anchor)
+            neighbor_center = (int(neighbor["center_x"]), int(neighbor["center_y"]))
+            segments.append((world_center(center), world_center(neighbor_center)))
+        cache[key] = segments
+        return list(segments)
+
+    def remove_obsolete_wilderness_regional_roads(self, grid: List[List[str]], chunk_x: int, chunk_y: int) -> int:
+        """Erase purposeless legacy lines from ordinary saved wilderness chunks."""
+        if not grid or (int(chunk_x), int(chunk_y)) == (0, 0):
+            return 0
+        if self.wilderness_chunk_has_procedural_settlement(chunk_x, chunk_y) or self.owned_wilderness_claim(chunk_x, chunk_y):
+            return 0
+        stronghold = self.wilderness_stronghold_record(chunk_x, chunk_y, create=False)
+        if stronghold.get("cleared"):
+            return 0
+        legacy = self.wilderness_legacy_region_route_segments(chunk_x, chunk_y)
+        current = self.wilderness_region_route_segments(chunk_x, chunk_y)
+
+        def near_segment(px: int, py: int, segment: Tuple[Tuple[int, int], Tuple[int, int]]) -> bool:
+            (ax, ay), (bx, by) = segment
+            dx, dy = bx - ax, by - ay
+            if not dx and not dy:
+                return (px - ax) ** 2 + (py - ay) ** 2 <= 0.80
+            amount = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / float(dx * dx + dy * dy)))
+            qx, qy = ax + amount * dx, ay + amount * dy
+            return (px - qx) ** 2 + (py - qy) ** 2 <= 0.80
+
+        changed = 0
+        for y, row in enumerate(grid):
+            for x, tile in enumerate(row):
+                if tile not in {":", "="}:
+                    continue
+                world_x, world_y = self.wilderness_world_coords(chunk_x, chunk_y, x, y)
+                if not any(near_segment(world_x, world_y, segment) for segment in legacy):
+                    continue
+                if any(near_segment(world_x, world_y, segment) for segment in current):
+                    continue
+                grid[y][x] = "~" if self.wilderness_world_water_tile(world_x, world_y) else self.wilderness_world_biome_tile(world_x, world_y)
+                changed += 1
+        return changed
+
+    def invalidate_wilderness_road_network(self) -> None:
+        """Forget derived road data after a dynamic destination changes."""
+        for attr in (
+            "_wilderness_region_route_cache",
+            "_wilderness_road_network_cache",
+            "_wilderness_road_chunk_cache",
+            "_wilderness_road_destination_cache",
+            "_wilderness_road_stub_cache",
+        ):
+            value = getattr(self, attr, None)
+            if isinstance(value, dict):
+                value.clear()
+
+    def wilderness_road_state_signature(self) -> Tuple[str, ...]:
+        """Small signature for player-created or reclaimed road destinations."""
+        destinations = []
+        for key, record in (getattr(self.state, "wilderness_stronghold_state", {}) or {}).items():
+            if isinstance(record, dict) and record.get("cleared"):
+                destinations.append(f"stronghold:{key}:{record.get('founded_settlement_name', '')}")
+        for key, plan in (getattr(self.state, "wilderness_settlements", {}) or {}).items():
+            if isinstance(plan, dict) and str(plan.get("source", "")) == "reclaimed_stronghold":
+                destinations.append(f"settlement:{key}:{plan.get('name', '')}")
+        return tuple(sorted(destinations))
+
+    def wilderness_road_lattice_anchor(self, lattice_x: int, lattice_y: int) -> Tuple[int, int]:
+        """Recreate one organic-region anchor without enumerating its chunks."""
+        size = 5
+        anchor_x = int(lattice_x) * size + int(self.wilderness_hash01(lattice_x, lattice_y, 87901) * size)
+        anchor_y = int(lattice_y) * size + int(self.wilderness_hash01(lattice_x, lattice_y, 87902) * size)
+        return anchor_x, anchor_y
+
+    def wilderness_road_node(
+        self,
+        node_id: str,
+        kind: str,
+        name: str,
+        chunk: Tuple[int, int],
+        anchor: Tuple[int, int],
+        primary: bool = True,
+    ) -> Dict[str, object]:
+        chunk_x, chunk_y = int(chunk[0]), int(chunk[1])
+        anchor_x, anchor_y = int(anchor[0]), int(anchor[1])
+        return {
+            "id": str(node_id), "kind": str(kind), "name": str(name),
+            "chunk_x": chunk_x, "chunk_y": chunk_y,
+            "world_x": self.wilderness_world_coords(chunk_x, chunk_y, 43, 19)[0],
+            "world_y": self.wilderness_world_coords(chunk_x, chunk_y, 43, 19)[1],
+            "anchor_x": anchor_x, "anchor_y": anchor_y,
+            "lattice_x": anchor_x // 5, "lattice_y": anchor_y // 5,
+            "primary": bool(primary),
+        }
+
+    def wilderness_road_primary_nodes_for_anchor(self, anchor_x: int, anchor_y: int) -> List[Dict[str, object]]:
+        """Return settlements and ports that justify a long-distance road."""
+        anchor = (int(anchor_x), int(anchor_y))
+        seed = int(self.state.wilderness_seed)
+        cache = getattr(self, "_wilderness_road_primary_node_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._wilderness_road_primary_node_cache = cache
+        cache_key = (seed, anchor)
+        if cache_key not in cache:
+            nodes = []
+            origin_anchor = self.wilderness_region_coords(0, 0)
+            if anchor == origin_anchor:
+                nodes.append(self.wilderness_road_node("main-town", "main_town", "Elsewhere", (0, 0), anchor))
+
+            saved_town = None
+            for plan in (getattr(self.state, "wilderness_settlements", {}) or {}).values():
+                if not isinstance(plan, dict) or str(plan.get("source", "")) != "procedural_wilderness":
+                    continue
+                point = (int(plan.get("chunk_x", 0)), int(plan.get("chunk_y", 0)))
+                if self.wilderness_region_coords(*point) == anchor:
+                    saved_town = (point, plan)
+                    break
+            generated_town = self.wilderness_hash01(anchor[0], anchor[1], 33000) < 0.17
+            if saved_town or generated_town:
+                point = saved_town[0] if saved_town else self.procedural_town_site_for_region(*anchor)
+                name = str(saved_town[1].get("name", "")) if saved_town else self.procedural_town_name(*point)
+                geography = self.procedural_town_geography(*point)
+                kind = "port_city" if geography.get("water_access") == "waterfront" else "town"
+                nodes.append(self.wilderness_road_node(f"town:{point[0]},{point[1]}", kind, name, point, anchor))
+
+            port_point = self.wilderness_region_port_chunk(*anchor)
+            if port_point and all((int(node["chunk_x"]), int(node["chunk_y"])) != tuple(port_point) for node in nodes):
+                port_record = self.wilderness_fishing_settlement_record(*port_point, create=False)
+                port_name = str(port_record.get("name", "")) if port_record else self.wilderness_fishing_settlement_name(*port_point)
+                nodes.append(self.wilderness_road_node(f"port:{port_point[0]},{port_point[1]}", "port", port_name, port_point, anchor))
+            cache[cache_key] = nodes
+
+        nodes = [dict(node) for node in cache[cache_key]]
+        for key, record in (getattr(self.state, "wilderness_stronghold_state", {}) or {}).items():
+            if not isinstance(record, dict) or not record.get("cleared"):
+                continue
+            try:
+                point = tuple(int(part) for part in str(key).split(",", 1))
+            except (TypeError, ValueError):
+                continue
+            if self.wilderness_region_coords(*point) != anchor:
+                continue
+            founded_name = str(record.get("founded_settlement_name", "")).strip()
+            nodes.append(self.wilderness_road_node(
+                f"stronghold:{point[0]},{point[1]}",
+                "founded_town" if founded_name else "reclaimed_stronghold",
+                founded_name or str(record.get("name", "Reclaimed Stronghold")),
+                point, anchor,
+            ))
+        return nodes
+
+    def wilderness_road_region_nodes(self, anchor_x: int, anchor_y: int) -> List[Dict[str, object]]:
+        """Add useful local services only when a region has a real road hub."""
+        anchor = (int(anchor_x), int(anchor_y))
+        nodes = self.wilderness_road_primary_nodes_for_anchor(*anchor)
+        if not nodes:
+            return []
+        occupied = {(int(node["chunk_x"]), int(node["chunk_y"])) for node in nodes}
+        outpost = self.wilderness_region_outpost_chunk(*anchor)
+        if outpost not in occupied:
+            nodes.append(self.wilderness_road_node(
+                f"outpost:{outpost[0]},{outpost[1]}", "outpost",
+                self.wilderness_outpost_name(*outpost), outpost, anchor, primary=False,
+            ))
+            occupied.add(outpost)
+        structure = self.wilderness_region_structure_chunk(*anchor)
+        if structure not in occupied:
+            structure_type = self.wilderness_structure_type(*structure)
+            structure_name = str(self.WILDERNESS_STRUCTURE_TYPES[structure_type]["name"])
+            nodes.append(self.wilderness_road_node(
+                f"structure:{structure[0]},{structure[1]}", "road_service",
+                structure_name, structure, anchor, primary=False,
+            ))
+        return nodes
+
+    def wilderness_road_hub_stub_for_anchor(self, anchor_x: int, anchor_y: int) -> Optional[Dict[str, object]]:
+        """Cheap transit-junction lookup used while assembling the wider graph."""
+        anchor = (int(anchor_x), int(anchor_y))
+        signature = self.wilderness_road_state_signature()
+        key = (int(self.state.wilderness_seed), anchor, signature)
+        cache = getattr(self, "_wilderness_road_stub_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._wilderness_road_stub_cache = cache
+        if key in cache:
+            return dict(cache[key]) if cache[key] else None
+        has_destination = anchor == self.wilderness_region_coords(0, 0)
+        has_destination = has_destination or self.wilderness_hash01(anchor[0], anchor[1], 33000) < 0.17
+        for plan in (getattr(self.state, "wilderness_settlements", {}) or {}).values():
+            if not isinstance(plan, dict):
+                continue
+            point = (int(plan.get("chunk_x", 0)), int(plan.get("chunk_y", 0)))
+            if self.wilderness_region_coords(*point) == anchor:
+                has_destination = True
+                break
+        if not has_destination:
+            for raw_key, record in (getattr(self.state, "wilderness_stronghold_state", {}) or {}).items():
+                if not isinstance(record, dict) or not record.get("cleared"):
+                    continue
+                try:
+                    point = tuple(int(part) for part in str(raw_key).split(",", 1))
+                except (TypeError, ValueError):
+                    continue
+                if self.wilderness_region_coords(*point) == anchor:
+                    has_destination = True
+                    break
+        if not has_destination:
+            world_x, world_y = self.wilderness_world_coords(anchor[0], anchor[1], 43, 19)
+            has_destination = self.wilderness_world_biome_tile(world_x, world_y) == "["
+        if not has_destination:
+            cache[key] = None
+            return None
+        stub = self.wilderness_road_node(
+            f"junction:{anchor[0]},{anchor[1]}", "road_junction", "Regional Crossroads",
+            anchor, anchor, primary=False,
+        )
+        cache[key] = stub
+        return dict(stub)
+
+    def wilderness_road_network_edges(self, chunk_x: int, chunk_y: int) -> List[Dict[str, object]]:
+        """Meaningful destination edges capable of crossing the requested region."""
+        anchor_x, anchor_y = self.wilderness_region_coords(chunk_x, chunk_y)
+        lattice_x, lattice_y = anchor_x // 5, anchor_y // 5
+        cache_key = (int(self.state.wilderness_seed), anchor_x, anchor_y, self.wilderness_road_state_signature())
+        network_cache = getattr(self, "_wilderness_road_network_cache", None)
+        if not isinstance(network_cache, dict):
+            network_cache = {}
+            self._wilderness_road_network_cache = network_cache
+        if cache_key in network_cache:
+            return [dict(edge) for edge in network_cache[cache_key]]
+
+        hubs = {}
+        anchors = {}
+        for sy in range(lattice_y - 4, lattice_y + 5):
+            for sx in range(lattice_x - 4, lattice_x + 5):
+                anchor = self.wilderness_road_lattice_anchor(sx, sy)
+                anchors[(sx, sy)] = anchor
+                hub = self.wilderness_road_hub_stub_for_anchor(*anchor)
+                if hub:
+                    hubs[(sx, sy)] = hub
+        edges = {}
+        for sy in range(lattice_y - 2, lattice_y + 3):
+            for sx in range(lattice_x - 2, lattice_x + 3):
+                anchor = anchors[(sx, sy)]
+                region_nodes = self.wilderness_road_region_nodes(*anchor)
+                primary = [node for node in region_nodes if node.get("primary")]
+                if not primary:
+                    continue
+                hub = hubs[(sx, sy)]
+                for node in region_nodes:
+                    edge_id = tuple(sorted((str(hub["id"]), str(node["id"]))))
+                    edges[edge_id] = {"id": "|".join(edge_id), "start": dict(hub), "end": dict(node), "kind": "local_spur"}
+                candidates = []
+                for (neighbor_sx, neighbor_sy), neighbor in hubs.items():
+                    if (neighbor_sx, neighbor_sy) == (sx, sy):
+                        continue
+                    if abs(neighbor_sx - sx) > 2 or abs(neighbor_sy - sy) > 2:
+                        continue
+                    distance = (int(neighbor["world_x"]) - int(hub["world_x"])) ** 2 + (int(neighbor["world_y"]) - int(hub["world_y"])) ** 2
+                    candidates.append((distance, str(neighbor["id"]), neighbor))
+                candidates.sort(key=lambda value: (value[0], value[1]))
+                neighbors = []
+                for predicate in (
+                    lambda node: int(node["lattice_x"]) > sx,
+                    lambda node: int(node["lattice_y"]) > sy,
+                    lambda node: True,
+                ):
+                    match = next((node for _distance, _node_id, node in candidates if predicate(node) and str(node["id"]) not in {str(old["id"]) for old in neighbors}), None)
+                    if match:
+                        neighbors.append(match)
+                for neighbor in neighbors:
+                    edge_id = tuple(sorted((str(hub["id"]), str(neighbor["id"]))))
+                    edges[edge_id] = {"id": "|".join(edge_id), "start": dict(hub), "end": dict(neighbor), "kind": "regional_route"}
+        network_cache[cache_key] = list(edges.values())
+        return [dict(edge) for edge in network_cache[cache_key]]
+
+    def wilderness_region_route_segments(self, chunk_x: int, chunk_y: int) -> List[Tuple[Tuple[int, int], Tuple[int, int]]]:
+        """Cardinal world roads whose endpoints are actual destinations."""
+        profile = self.wilderness_region_profile(chunk_x, chunk_y)
+        signature = self.wilderness_road_state_signature()
+        key = (int(self.state.wilderness_seed), str(profile["key"]), signature)
+        cache = getattr(self, "_wilderness_region_route_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._wilderness_region_route_cache = cache
+        if key in cache:
+            return list(cache[key])
+        segments = []
+        for edge in self.wilderness_road_network_edges(chunk_x, chunk_y):
+            start_node, end_node = edge["start"], edge["end"]
+            start = (int(start_node["world_x"]), int(start_node["world_y"]))
+            end = (int(end_node["world_x"]), int(end_node["world_y"]))
+            if start[0] == end[0] or start[1] == end[1]:
+                segments.append((start, end))
+                continue
+            horizontal_first = self.wilderness_hash01(
+                int(start_node["anchor_x"]) + int(end_node["anchor_x"]),
+                int(start_node["anchor_y"]) + int(end_node["anchor_y"]), 77661,
+            ) < 0.5
+            bend = (end[0], start[1]) if horizontal_first else (start[0], end[1])
+            segments.extend(((start, bend), (bend, end)))
+        members = self.wilderness_region_chunks(chunk_x, chunk_y)
+        min_chunk_x = min(point[0] for point in members) - 1
+        max_chunk_x = max(point[0] for point in members) + 1
+        min_chunk_y = min(point[1] for point in members) - 1
+        max_chunk_y = max(point[1] for point in members) + 1
+        left, top = self.wilderness_world_coords(min_chunk_x, min_chunk_y, 0, 0)
+        right, bottom = self.wilderness_world_coords(max_chunk_x, max_chunk_y, 85, 37)
+        segments = [
+            (start, end) for start, end in segments
+            if max(start[0], end[0]) >= left and min(start[0], end[0]) <= right
+            and max(start[1], end[1]) >= top and min(start[1], end[1]) <= bottom
+        ]
+        cache[key] = segments
+        return list(segments)
+
+    def wilderness_road_destinations_for_chunk(self, chunk_x: int, chunk_y: int) -> List[Dict[str, object]]:
+        """Named destinations on the road network near a chunk."""
+        profile = self.wilderness_region_profile(chunk_x, chunk_y)
+        key = (int(self.state.wilderness_seed), str(profile["key"]), self.wilderness_road_state_signature())
+        cache = getattr(self, "_wilderness_road_destination_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._wilderness_road_destination_cache = cache
+        if key not in cache:
+            destinations = {}
+            for edge in self.wilderness_road_network_edges(chunk_x, chunk_y):
+                for node in (edge["start"], edge["end"]):
+                    if str(node.get("kind", "")) != "road_junction":
+                        destinations[str(node["id"])] = dict(node)
+            origin_profile = self.wilderness_region_profile(0, 0)
+            if str(profile["key"]) == str(origin_profile["key"]):
+                origin_anchor = self.wilderness_region_coords(0, 0)
+                home_nodes = {
+                    "main-town": ("main_town", "Elsewhere", "town"),
+                    "home-farm": ("farm", "Home Farm", "farm"),
+                    "home-mine": ("mine", "Home Mine", "mine"),
+                }
+                gateways = self.origin_world_gateway_positions()
+                for node_id, (kind, name, gateway_key) in home_nodes.items():
+                    local_x, local_y = gateways[gateway_key]
+                    node = self.wilderness_road_node(
+                        node_id, kind, name, (0, 0), origin_anchor, primary=False,
+                    )
+                    node["world_x"], node["world_y"] = self.wilderness_world_coords(0, 0, local_x, local_y)
+                    destinations[node_id] = node
+            cache[key] = list(destinations.values())
+        return [dict(node) for node in cache[key]]
+
+    def wilderness_world_on_regional_road(self, world_x: int, world_y: int, chunk_x: int, chunk_y: int) -> bool:
+        """Whether a world tile belongs to the purposeful regional network."""
+        px, py = int(world_x), int(world_y)
+        if 0 <= px < 86 and 0 <= py < 38 and self.origin_world_home_road_at(px, py):
+            return True
+        for start, end in self.wilderness_region_route_segments(chunk_x, chunk_y):
+            if start[0] == end[0] and px == start[0] and min(start[1], end[1]) <= py <= max(start[1], end[1]):
+                return True
+            if start[1] == end[1] and py == start[1] and min(start[0], end[0]) <= px <= max(start[0], end[0]):
+                return True
+        return False
+
+    def apply_wilderness_regional_roads(self, grid: List[List[str]], chunk_x: int, chunk_y: int) -> int:
+        """Draw only the portion of continuous regional roads crossing this chunk."""
+        if not grid:
+            return 0
+        h, w = len(grid), len(grid[0])
+        min_wx, min_wy = self.wilderness_world_coords(chunk_x, chunk_y, 0, 0)
+        max_wx, max_wy = self.wilderness_world_coords(chunk_x, chunk_y, w - 1, h - 1)
+        segments = []
+        for start, end in self.wilderness_region_route_segments(chunk_x, chunk_y):
+            if max(start[0], end[0]) < min_wx - 2 or min(start[0], end[0]) > max_wx + 2:
+                continue
+            if max(start[1], end[1]) < min_wy - 2 or min(start[1], end[1]) > max_wy + 2:
+                continue
+            segments.append((start, end))
+        if not segments:
+            return 0
+
+        def distance_sq(px: int, py: int, start: Tuple[int, int], end: Tuple[int, int]) -> float:
+            ax, ay = start
+            bx, by = end
+            dx, dy = bx - ax, by - ay
+            if not dx and not dy:
+                return float((px - ax) ** 2 + (py - ay) ** 2)
+            amount = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / float(dx * dx + dy * dy)))
+            qx, qy = ax + amount * dx, ay + amount * dy
+            return (px - qx) ** 2 + (py - qy) ** 2
+
+        changed = 0
+        protected = {"S", "V", "X", "!", WILDERNESS_CLAIM_SYMBOL, WILDERNESS_OUTPOST_SYMBOL, WILDERNESS_STRUCTURE_SYMBOL, FIELD_SITE_SYMBOL}
+        for y in range(h):
+            for x in range(w):
+                wx, wy = self.wilderness_world_coords(chunk_x, chunk_y, x, y)
+                if not any(distance_sq(wx, wy, start, end) <= 0.80 for start, end in segments):
+                    continue
+                if grid[y][x] in protected:
+                    continue
+                if grid[y][x] == "~":
+                    grid[y][x] = "="
+                else:
+                    grid[y][x] = ":"
+                changed += 1
+        return changed
+
+    def wilderness_chunk_has_regional_road(self, chunk_x: int, chunk_y: int) -> bool:
+        """Whether a world road segment intersects this persistent chunk."""
+        cx, cy = int(chunk_x), int(chunk_y)
+        signature = (int(self.state.wilderness_seed), cx, cy)
+        cache = getattr(self, "_wilderness_road_chunk_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._wilderness_road_chunk_cache = cache
+        if signature in cache:
+            return bool(cache[signature])
+        left, top = self.wilderness_world_coords(cx, cy, 0, 0)
+        right, bottom = self.wilderness_world_coords(cx, cy, 85, 37)
+
+        def intersects(start: Tuple[int, int], end: Tuple[int, int]) -> bool:
+            x0, y0 = start
+            x1, y1 = end
+            dx, dy = x1 - x0, y1 - y0
+            low, high = 0.0, 1.0
+            for p, q in ((-dx, x0 - left), (dx, right - x0), (-dy, y0 - top), (dy, bottom - y0)):
+                if p == 0:
+                    if q < 0: return False
+                    continue
+                ratio = q / p
+                if p < 0: low = max(low, ratio)
+                else: high = min(high, ratio)
+                if low > high: return False
+            return True
+
+        result = any(intersects(start, end) for start, end in self.wilderness_region_route_segments(cx, cy))
+        cache[signature] = result
+        return result
 
     def wilderness_world_resource_symbol(self, wx: int, wy: int, biome: str) -> Optional[str]:
         """Sparse clustered resources from global fields. Stable across chunk generation."""
@@ -7177,39 +8425,40 @@ class FarmGame(
         rng = random.Random(self.wilderness_chunk_seed(chunk_x, chunk_y))
         grid = [["." for _ in range(width)] for _ in range(height)]
 
-        # Outer border initially; gates open later.
-        for x in range(width):
-            grid[0][x] = "#"
-            grid[height - 1][x] = "#"
-        for y in range(height):
-            grid[y][0] = "#"
-            grid[y][width - 1] = "#"
-
         # Terrain from global fields.
-        for y in range(1, height - 1):
-            for x in range(1, width - 1):
+        for y in range(height):
+            for x in range(width):
                 wx, wy = self.wilderness_world_coords(chunk_x, chunk_y, x, y)
                 if self.wilderness_world_water_tile(wx, wy):
                     grid[y][x] = "~"
                 else:
                     biome = self.wilderness_world_biome_tile(wx, wy)
-                    grid[y][x] = biome
-                    resource = self.wilderness_world_resource_symbol(wx, wy, biome)
+                    surface = (
+                        self.wilderness_world_island_surface(wx, wy)
+                        if self.wilderness_world_is_ocean_province(wx, wy)
+                        else biome
+                    )
+                    grid[y][x] = surface
+                    resource = self.wilderness_world_resource_symbol(wx, wy, surface) if 0 < x < width - 1 and 0 < y < height - 1 else None
                     if resource:
                         grid[y][x] = resource
+                    elif self.wilderness_world_is_ocean_province(wx, wy):
+                        island_detail = self.wilderness_hash01(wx, wy, 93)
+                        if surface == ";" and island_detail > 0.972:
+                            grid[y][x] = "T"  # sparse palms on tropical isles
+                        elif surface == chr(96) and island_detail > 0.986:
+                            grid[y][x] = "o"
+
+        self.ensure_wilderness_destination_island(grid, chunk_x, chunk_y)
 
         # Make generated terrain read more naturally before roads carve through it:
         # banks around water, clustered groves/ridges/meadows, and small hollows.
+        self.apply_wilderness_subhabitat(grid, chunk_x, chunk_y)
         self.wilderness_dress_shorelines(grid, chunk_x, chunk_y, rng)
         self.wilderness_add_biome_landforms(grid, chunk_x, chunk_y, rng)
-
-        # Origin town exit.
-        gate_x = width // 2
-        if chunk_x == 0 and chunk_y == 0:
-            for x in range(gate_x - 2, gate_x + 3):
-                grid[height - 1][x] = "S"
-                grid[height - 2][x] = ":"
-                grid[height - 3][x] = ":"
+        self.apply_wilderness_major_landscape(grid, chunk_x, chunk_y)
+        self.apply_wilderness_regional_roads(grid, chunk_x, chunk_y)
+        self.place_wilderness_fishing_settlement(grid, chunk_x, chunk_y)
 
         # Trails and bridges are local conveniences. Their exact shape varies by
         # chunk so the wilderness reads as terrain instead of a repeated road grid.
@@ -7233,6 +8482,11 @@ class FarmGame(
 
         # Add biome-specific interactable wilderness features.
         self.place_wilderness_features_in_chunk(grid, chunk_x, chunk_y)
+        self.place_wilderness_field_site(grid, chunk_x, chunk_y)
+        self.place_wilderness_outpost(grid, chunk_x, chunk_y)
+        self.place_wilderness_structure(grid, chunk_x, chunk_y)
+        self.place_wilderness_dock(grid, chunk_x, chunk_y)
+        self.apply_wilderness_island_site_compound(grid, chunk_x, chunk_y)
         self.limit_wilderness_valuable_spawns(grid, chunk_x, chunk_y)
         self.ensure_wilderness_interactable_accessibility(grid)
 
@@ -7249,7 +8503,12 @@ class FarmGame(
         self.clear_wilderness_chunk_entry_lanes(grid)
         if chunk_x == 0 and chunk_y == 0:
             self.ensure_origin_wilderness_poi_markers(grid)
+            self.apply_origin_world_hub(grid)
+            self.ensure_origin_wilderness_poi_markers(grid)
         self.ensure_wilderness_interactable_accessibility(grid)
+        if chunk_x == 0 and chunk_y == 0:
+            self.apply_origin_world_hub(grid)
+        self.ensure_wilderness_docks_touch_water(grid, chunk_x, chunk_y)
 
         return grid
 
@@ -7318,6 +8577,8 @@ class FarmGame(
     def wilderness_feature_drops(self, symbol: str) -> Dict[str, int]:
         rng = random.Random(time.time_ns() ^ self.state.player_x * 31 ^ self.state.player_y * 17)
         if symbol == "O":  # wild orchard
+            if self.state.season == "Winter":
+                return {"Wood": 1} if rng.random() < 0.35 else {}
             drops = {"Wild Apple": rng.randint(1, 2)}
             if rng.random() < 0.25:
                 drops["Wood"] = 1
@@ -7331,22 +8592,26 @@ class FarmGame(
             return drops
         if symbol == "e":  # bird nest
             drops = {"Feather": rng.randint(1, 2)}
-            if rng.random() < 0.65:
+            if self.state.season != "Winter" and rng.random() < 0.65:
                 drops["Bird Egg"] = 1
             return drops
         if symbol == "p":  # reed bed
             drops = {"Marsh Reed": rng.randint(1, 3)}
-            if rng.random() < 0.30:
+            if self.state.season != "Winter" and rng.random() < 0.30:
                 drops["Watercress"] = 1
             if rng.random() < 0.18:
                 drops["Clay"] = 1
             return drops
         if symbol == "G":  # wild root/garlic patch
+            if self.state.season == "Winter":
+                return {"Winter Root": 1} if rng.random() < 0.45 else {}
             drops = {"Wild Garlic": rng.randint(1, 2)}
             if rng.random() < 0.50:
                 drops["Wild Carrot"] = 1
             return drops
         if symbol == "Z":  # mushroom log
+            if self.state.season == "Winter" and rng.random() < 0.65:
+                return {}
             drops = {"Mushrooms": rng.randint(1, 2)}
             if rng.random() < 0.35:
                 drops["Strange Spores"] = 1
@@ -7395,6 +8660,9 @@ class FarmGame(
             grid = self.wilderness_generate_continuous_chunk(chunk_x, chunk_y)
             self.clear_wilderness_chunk_entry_lanes(grid)
             grid = self.ensure_procedural_town_applied(grid, chunk_x, chunk_y)
+            self.apply_wilderness_region_project_to_grid(grid, chunk_x, chunk_y)
+            self.apply_wilderness_vitality_consequences_to_grid(grid, chunk_x, chunk_y)
+            self.ensure_wilderness_docks_touch_water(grid, chunk_x, chunk_y)
             return grid
         except Exception as exc:
             append_debug_log(f"make_wilderness_chunk FAILED for {chunk_x},{chunk_y}: {type(exc).__name__}: {exc}")
@@ -7407,11 +8675,13 @@ class FarmGame(
         width, height = 86, 38
         grid = [["." for _ in range(width)] for _ in range(height)]
         for x in range(width):
-            grid[0][x] = "#"
-            grid[height - 1][x] = "#"
+            for y in (0, height - 1):
+                wx, wy = self.wilderness_world_coords(chunk_x, chunk_y, x, y)
+                grid[y][x] = "~" if self.wilderness_world_water_tile(wx, wy) else self.wilderness_world_biome_tile(wx, wy)
         for y in range(height):
-            grid[y][0] = "#"
-            grid[y][width - 1] = "#"
+            for x in (0, width - 1):
+                wx, wy = self.wilderness_world_coords(chunk_x, chunk_y, x, y)
+                grid[y][x] = "~" if self.wilderness_world_water_tile(wx, wy) else self.wilderness_world_biome_tile(wx, wy)
 
         mid_x = width // 2
         mid_y = height // 2
@@ -7442,28 +8712,13 @@ class FarmGame(
         self.clear_wilderness_chunk_entry_lanes(grid)
 
         if int(chunk_x) == 0 and int(chunk_y) == 0:
-            for x in range(mid_x - 2, mid_x + 3):
-                grid[height - 1][x] = "S"
-                grid[height - 2][x] = ":"
-                grid[height - 3][x] = ":"
+            self.apply_origin_world_hub(grid)
         return grid
 
     def clear_wilderness_chunk_entry_lanes(self, grid: List[List[str]]):
-        h = len(grid)
-        w = len(grid[0]) if h else 0
-        if not h or not w:
-            return
-        clear_tiles = [".", ";", "%", "l", "r", "x", ":"]
-        mid_x = w // 2
-        mid_y = h // 2
-        for x in range(max(1, mid_x - 4), min(w - 1, mid_x + 5)):
-            for y in [0, 1, 2, h - 3, h - 2, h - 1]:
-                if 0 <= y < h and grid[y][x] not in ["~", "=", "S", "V", "X", WILDERNESS_CLAIM_SYMBOL]:
-                    grid[y][x] = ":" if y in [0, h - 1] else "."
-        for y in range(max(1, mid_y - 4), min(h - 1, mid_y + 5)):
-            for x in [0, 1, 2, w - 3, w - 2, w - 1]:
-                if 0 <= x < w and grid[y][x] not in ["~", "=", "S", "V", "X", WILDERNESS_CLAIM_SYMBOL]:
-                    grid[y][x] = ":" if x in [0, w - 1] else "."
+        # Compatibility no-op. Global terrain and roads now determine edge
+        # crossings; repeated artificial gate bands caused visible chunk seams.
+        return
 
     def get_wilderness_chunk_map(self, chunk_x: Optional[int] = None, chunk_y: Optional[int] = None) -> List[List[str]]:
         self.ensure_wilderness_chunks()
@@ -7483,6 +8738,12 @@ class FarmGame(
             self.wilderness_procedural_town_checked_chunks.add(key)
 
         grid = self.wilderness_maps[key]
+        if key not in self.wilderness_ocean_checked_chunks:
+            if not self.owned_wilderness_claim(cx, cy):
+                self.apply_wilderness_ocean_coherence(grid, cx, cy)
+                self.ensure_wilderness_destination_island(grid, cx, cy)
+            self.ensure_wilderness_docks_touch_water(grid, cx, cy)
+            self.wilderness_ocean_checked_chunks.add(key)
         if key not in self.wilderness_static_checked_chunks:
             claimable = self.is_claimable_wilderness_chunk(cx, cy)
             owned_claim = self.owned_wilderness_claim(cx, cy)
@@ -7505,11 +8766,28 @@ class FarmGame(
                 self.place_wilderness_dungeons_in_chunk(grid, cx, cy)
             if not owned_claim and self.wilderness_chunk_has_stronghold(cx, cy) and not any("!" in row for row in grid):
                 self.place_wilderness_stronghold_in_chunk(grid, cx, cy)
+            if not owned_claim and not self.procedural_town_plan(cx, cy) and not any(FIELD_SITE_SYMBOL in row for row in grid):
+                self.place_wilderness_field_site(grid, cx, cy)
+            if not owned_claim and not self.procedural_town_plan(cx, cy) and not any(WILDERNESS_OUTPOST_SYMBOL in row for row in grid):
+                self.place_wilderness_outpost(grid, cx, cy)
+            if not owned_claim and not self.procedural_town_plan(cx, cy) and not self.wilderness_structure_marker_positions(grid):
+                self.place_wilderness_structure(grid, cx, cy)
+            if not owned_claim and not self.procedural_town_plan(cx, cy) and not any(WILDERNESS_LANDSCAPE_SYMBOL in row for row in grid):
+                self.apply_wilderness_major_landscape(grid, cx, cy)
+                self.place_wilderness_fishing_settlement(grid, cx, cy)
+                self.wilderness_improve_traversability(grid, random.Random(self.wilderness_chunk_seed(cx, cy) + 89013))
+            if not owned_claim and not self.procedural_town_plan(cx, cy) and not any(WILDERNESS_FISHING_SETTLEMENT_SYMBOL in row for row in grid):
+                self.place_wilderness_fishing_settlement(grid, cx, cy)
+            if not owned_claim and not self.procedural_town_plan(cx, cy) and not any(WILDERNESS_DOCK_SYMBOL in row for row in grid):
+                self.place_wilderness_dock(grid, cx, cy)
+            self.apply_wilderness_region_project_to_grid(grid, cx, cy)
+            self.apply_wilderness_vitality_consequences_to_grid(grid, cx, cy)
+            self.ensure_wilderness_docks_touch_water(grid, cx, cy)
             self.wilderness_static_checked_chunks.add(key)
 
         if cx == self.state.wilderness_chunk_x and cy == self.state.wilderness_chunk_y:
             self.wilderness_map = self.wilderness_maps[key]
-        self.state.wilderness_chunks_visited = max(int(getattr(self.state, "wilderness_chunks_visited", 1)), len(self.wilderness_maps))
+        self.state.wilderness_chunks_visited = max(int(getattr(self.state, "wilderness_chunks_visited", 1)), self.wilderness_visited_map_count())
         return self.wilderness_maps[key]
 
     def set_wilderness_chunk(self, chunk_x: int, chunk_y: int, entry_side: str = "center"):
@@ -7520,6 +8798,8 @@ class FarmGame(
 
         self.state.wilderness_chunk_x = cx
         self.state.wilderness_chunk_y = cy
+        self.ensure_wilderness_stream_state()
+        self._wilderness_stream_preloaded_chunks.discard(key)
 
         t0 = time.perf_counter()
         self.wilderness_map = self.get_wilderness_chunk_map(cx, cy)
@@ -7557,11 +8837,28 @@ class FarmGame(
             self.state.player_y = max(2, min(h - 3, h // 2))
             self.state.facing = "DOWN"
 
-        # Clear the landing tile and a small patch around it if needed.
-        for yy in range(max(1, self.state.player_y - 1), min(h - 1, self.state.player_y + 2)):
-            for xx in range(max(1, self.state.player_x - 1), min(w - 1, self.state.player_x + 2)):
-                if self.wilderness_map[yy][xx] not in ["~", "=", "S", "V", "X", WILDERNESS_CLAIM_SYMBOL]:
-                    self.wilderness_map[yy][xx] = "."
+        if self.state.wilderness_boating and entry_side in {"west", "east", "north", "south"}:
+            water_candidates = []
+            for wy, row in enumerate(self.wilderness_map):
+                for wx, value in enumerate(row):
+                    if value not in {"~", "="}:
+                        continue
+                    near_entry = (entry_side == "west" and wx >= w - 8) or (entry_side == "east" and wx <= 7) or (entry_side == "north" and wy >= h - 8) or (entry_side == "south" and wy <= 7)
+                    if near_entry:
+                        water_candidates.append((wx, wy))
+            if water_candidates:
+                water_candidates.sort(key=lambda point: abs(point[0] - self.state.player_x) + abs(point[1] - self.state.player_y))
+                self.state.player_x, self.state.player_y = water_candidates[0]
+            else:
+                self.state.wilderness_boating = False
+
+        # Center/legacy arrivals get a safe landing patch. Edge crossings retain
+        # their exact generated terrain so loading a chunk cannot expose a seam.
+        if entry_side == "center":
+            for yy in range(max(1, self.state.player_y - 1), min(h - 1, self.state.player_y + 2)):
+                for xx in range(max(1, self.state.player_x - 1), min(w - 1, self.state.player_x + 2)):
+                    if self.wilderness_map[yy][xx] not in ["~", "=", "S", "F", "V", "X", WILDERNESS_CLAIM_SYMBOL]:
+                        self.wilderness_map[yy][xx] = "."
         if self.wilderness_chunk_has_stronghold(cx, cy):
             record = self.wilderness_stronghold_record(cx, cy, create=False)
             if record and record.get("cleared"):
@@ -7573,12 +8870,16 @@ class FarmGame(
         self.get_wilderness_animals(cx, cy)
         self.get_wilderness_stronghold_enemies(cx, cy)
         self.get_bounty_targets_for_chunk(cx, cy)
+        self.get_wilderness_random_combat_enemies(cx, cy)
         self.discover_procedural_town(cx, cy)
+        self._wilderness_chunk_was_newly_discovered = self.discover_wilderness_chunk(cx, cy)
         append_debug_log(f"set_wilderness_chunk: done key={key} elapsed={time.perf_counter() - t0:.3f}s size={w}x{h}")
 
-    def transition_wilderness_chunk(self, dx: int, dy: int):
+    def transition_wilderness_chunk(self, dx: int, dy: int, interaction_target: bool = False) -> bool:
         old_x = self.state.wilderness_chunk_x
         old_y = self.state.wilderness_chunk_y
+        old_player_x = int(self.state.player_x)
+        old_player_y = int(self.state.player_y)
         new_x = old_x + dx
         new_y = old_y + dy
         if dx < 0:
@@ -7589,7 +8890,58 @@ class FarmGame(
             side = "north"
         else:
             side = "south"
+        self.ensure_wilderness_stream_state()
+        destination_key = self.wilderness_chunk_key(new_x, new_y)
+        if destination_key not in getattr(self, "wilderness_maps", {}):
+            self._wilderness_stream_preloaded_chunks.add(destination_key)
+        destination_grid = self.get_wilderness_chunk_map(new_x, new_y)
+        if destination_key not in getattr(self, "repaired_wilderness_chunks", set()):
+            self.repair_wilderness_chunk_exits(destination_grid, new_x, new_y)
+            self.repaired_wilderness_chunks.add(destination_key)
+        destination_h = len(destination_grid)
+        destination_w = len(destination_grid[0]) if destination_h else 0
+        target_x = 0 if dx > 0 else (destination_w - 1 if dx < 0 else max(0, min(destination_w - 1, old_player_x)))
+        target_y = 0 if dy > 0 else (destination_h - 1 if dy < 0 else max(0, min(destination_h - 1, old_player_y)))
+        target_tile = destination_grid[target_y][target_x] if destination_h and destination_w else "#"
+        target_open_water = (
+            target_tile == "~"
+            and not self.wilderness_water_is_frozen_at(target_x, target_y, new_x, new_y)
+        )
+        if target_open_water:
+            crossing_allowed = self.wilderness_watercraft_available()
+            if crossing_allowed:
+                self.state.wilderness_boating = True
+        elif target_tile == "=":
+            crossing_allowed = True
+        else:
+            crossing_allowed = self.wilderness_stream_actor_passable(new_x, new_y, target_x, target_y)
+            if crossing_allowed:
+                self.state.wilderness_boating = False
+        if not crossing_allowed and not interaction_target:
+            self.set_message(
+                "The terrain continues across the boundary, but it is impassable here. "
+                "Craft an Explorer Raft for open water or follow the shoreline."
+            )
+            return False
+        if self.wilderness_field_combat_active() and not interaction_target:
+            self.state.mine_combat_flees += 1
+            self.end_wilderness_field_combat(
+                "You cross into the neighboring region and leave the immediate fight behind."
+            )
         self.set_wilderness_chunk(new_x, new_y, entry_side=side)
+        # Preserve the crossing coordinate so chunk loading feels like an
+        # invisible streaming boundary instead of teleporting to a central gate.
+        grid = self.active_map()
+        h = len(grid)
+        w = len(grid[0]) if h else 0
+        if dx:
+            self.state.player_x = (1 if dx > 0 else max(0, w - 2)) if interaction_target else (0 if dx > 0 else max(0, w - 1))
+            preferred = max(0, min(h - 1, old_player_y))
+            self.state.player_y = preferred
+        elif dy:
+            self.state.player_y = (1 if dy > 0 else max(0, h - 2)) if interaction_target else (0 if dy > 0 else max(0, h - 1))
+            preferred = max(0, min(w - 1, old_player_x))
+            self.state.player_x = preferred
         discovered_name = str(getattr(self, "_procedural_town_just_discovered_name", "") or "")
         if discovered_name:
             self._procedural_town_just_discovered_name = ""
@@ -7597,7 +8949,13 @@ class FarmGame(
                 f"Beyond the wilderness trail, you discover the rare town of {discovered_name}."
             )
         else:
-            self.autosave_with_message(f"You push deeper into the wilderness: chunk ({new_x},{new_y}). Press R to return to town.")
+            region = self.wilderness_region_profile(new_x, new_y)
+            discovery = " New ground charted." if getattr(self, "_wilderness_chunk_was_newly_discovered", False) else ""
+            self.autosave_with_message(
+                f"You enter {region['name']}: chunk ({new_x},{new_y}), {self.wilderness_region_condition(new_x, new_y)}."
+                f"{discovery} Press R for emergency return."
+            )
+        return True
 
     def cave_key_for_entrance(self, chunk_x: int, chunk_y: int, x: int, y: int) -> str:
         return f"{int(chunk_x)},{int(chunk_y)}:{int(x)},{int(y)}"
@@ -7934,9 +9292,55 @@ class FarmGame(
         distance = abs(cx) + abs(cy)
         return max(1, min(5, 1 + distance // 4))
 
+    def dungeon_is_mega(self, dungeon_key: str) -> bool:
+        """Return whether a site is one of the rare long-form dungeons.
+
+        The roll is chunk-based so the overworld can identify a mega-dungeon
+        before its exact entrance tile has been generated. Legacy discovered
+        records are deliberately kept ordinary; otherwise an old final floor
+        could turn into an impassable mid-dungeon floor after an update.
+        """
+        self.ensure_wilderness_dungeons()
+        key = str(dungeon_key or "0,0:0,0")
+        existing = self.state.wilderness_dungeon_state.get(key)
+        if isinstance(existing, dict):
+            kind = str(existing.get("kind", "") or "").lower()
+            if kind in {"ordinary", "mega"}:
+                return kind == "mega"
+            if bool(existing.get("discovered", False)):
+                return False
+        cx, cy, _ex, _ey = self.dungeon_context_from_key(key)
+        return self.wilderness_hash01(cx, cy, 15881) > 0.84
+
+    def dungeon_checkpoint_floors(self, dungeon_key: str) -> List[int]:
+        if not self.dungeon_is_mega(dungeon_key):
+            return []
+        max_floor = self.dungeon_max_floor_for_key(dungeon_key)
+        return [floor for floor in range(4, max_floor, 3)]
+
+    def dungeon_is_guardian_floor(self, dungeon_key: str, floor: int) -> bool:
+        floor = max(1, int(floor or 1))
+        return (
+            self.dungeon_is_mega(dungeon_key)
+            and floor < self.dungeon_max_floor_for_key(dungeon_key)
+            and floor % 3 == 0
+        )
+
+    def dungeon_is_refuge_floor(self, dungeon_key: str, floor: int) -> bool:
+        return max(1, int(floor or 1)) in self.dungeon_checkpoint_floors(dungeon_key)
+
     def dungeon_max_floor_for_key(self, dungeon_key: str) -> int:
         tier = self.dungeon_tier_for_key(dungeon_key)
         cx, cy, ex, ey = self.dungeon_context_from_key(dungeon_key)
+        existing = getattr(self.state, "wilderness_dungeon_state", {}).get(str(dungeon_key))
+        if isinstance(existing, dict) and bool(existing.get("discovered", False)) and not existing.get("kind"):
+            try:
+                return max(1, min(3, int(existing.get("max_floor", 1) or 1)))
+            except (TypeError, ValueError):
+                return 1
+        if self.dungeon_is_mega(dungeon_key):
+            long_roll = self.wilderness_hash01(cx * 1301 + 71, cy * 1297 - 37, 15893)
+            return 10 + min(5, int(long_roll * 6.0))
         roll = self.wilderness_hash01(cx * 997 + ex, cy * 991 + ey, 15221)
         if tier >= 4 and roll > 0.62:
             return 3
@@ -7976,15 +9380,65 @@ class FarmGame(
             return "quarry"
         return "overgrown"
 
+    def dungeon_floor_theme(self, dungeon_key: str, floor: int) -> str:
+        """Give mega-dungeons coherent but visibly changing three-floor strata."""
+        base_theme = self.dungeon_theme_for_key(dungeon_key)
+        if not self.dungeon_is_mega(dungeon_key):
+            return base_theme
+        themes = ["overgrown", "root", "sunken", "quarry", "crystal"]
+        base_index = themes.index(base_theme) if base_theme in themes else 0
+        stratum = max(0, (max(1, int(floor or 1)) - 1) // 3)
+        step = 2 if (base_index % 2) else 1
+        return themes[(base_index + stratum * step) % len(themes)]
+
+    def dungeon_floor_role(self, dungeon_key: str, floor: int) -> str:
+        floor = max(1, int(floor or 1))
+        if floor >= self.dungeon_max_floor_for_key(dungeon_key):
+            return "heart"
+        if self.dungeon_is_refuge_floor(dungeon_key, floor):
+            return "refuge"
+        if self.dungeon_is_guardian_floor(dungeon_key, floor):
+            return "guardian"
+        if floor == 1:
+            return "threshold"
+        return "descent"
+
+    def dungeon_stratum_name(self, dungeon_key: str, floor: int) -> str:
+        theme = self.dungeon_floor_theme(dungeon_key, floor)
+        role = self.dungeon_floor_role(dungeon_key, floor)
+        theme_names = {
+            "overgrown": "Briar Galleries",
+            "root": "Rootbound Warrens",
+            "sunken": "Drowned Archive",
+            "quarry": "Mason's Deeps",
+            "crystal": "Prismatic Vaults",
+        }
+        if role == "refuge":
+            return "Expedition Refuge"
+        if role == "heart":
+            return "Buried Heart"
+        if role == "guardian":
+            return f"{theme_names.get(theme, 'Deep Galleries')} Gate"
+        return theme_names.get(theme, "Deep Galleries")
+
     def dungeon_name_for_key(self, dungeon_key: str) -> str:
         theme = self.dungeon_theme_for_key(dungeon_key)
-        return {
+        ordinary_name = {
             "overgrown": "Overgrown Ruins",
             "quarry": "Old Quarry Vault",
             "root": "Rootbound Hall",
             "sunken": "Sunken Cellar",
             "crystal": "Crystal Reliquary",
         }.get(theme, "Wilderness Dungeon")
+        if not self.dungeon_is_mega(dungeon_key):
+            return ordinary_name
+        return {
+            "overgrown": "The Verdant Undercity",
+            "quarry": "The Endless Masonry",
+            "root": "The Worldroot Labyrinth",
+            "sunken": "The Drowned Citadel",
+            "crystal": "The Prismatic Abyss",
+        }.get(theme, f"Deep {ordinary_name}")
 
     def dungeon_record(self, dungeon_key: Optional[str] = None, create: bool = True) -> Dict[str, object]:
         self.ensure_wilderness_dungeons()
@@ -8002,6 +9456,10 @@ class FarmGame(
         record.setdefault("triggered_traps", [])
         record.setdefault("used_shrines", [])
         record.setdefault("read_inscriptions", [])
+        record.setdefault("kind", "mega" if self.dungeon_is_mega(key) else "ordinary")
+        record.setdefault("deepest_floor", 1)
+        record.setdefault("checkpoint_floor", 1)
+        record.setdefault("defeated_guardians", [])
         record["max_floor"] = self.dungeon_max_floor_for_key(key)
         if not isinstance(record.get("opened_chests"), list):
             record["opened_chests"] = []
@@ -8011,6 +9469,18 @@ class FarmGame(
             record["used_shrines"] = []
         if not isinstance(record.get("read_inscriptions"), list):
             record["read_inscriptions"] = []
+        if not isinstance(record.get("defeated_guardians"), list):
+            record["defeated_guardians"] = []
+        try:
+            record["deepest_floor"] = max(1, min(int(record["max_floor"]), int(record.get("deepest_floor", 1) or 1)))
+        except (TypeError, ValueError):
+            record["deepest_floor"] = 1
+        valid_checkpoints = {1} | set(self.dungeon_checkpoint_floors(key))
+        try:
+            checkpoint = int(record.get("checkpoint_floor", 1) or 1)
+        except (TypeError, ValueError):
+            checkpoint = 1
+        record["checkpoint_floor"] = checkpoint if checkpoint in valid_checkpoints else 1
         return record
 
     def place_wilderness_dungeons_in_chunk(self, grid: List[List[str]], chunk_x: int, chunk_y: int):
@@ -8078,10 +9548,12 @@ class FarmGame(
         with rooms, narrow corridors, doors, treasure, and a final chamber.
         """
         width, height = 70, 30
-        theme = self.dungeon_theme_for_key(dungeon_key)
+        theme = self.dungeon_floor_theme(dungeon_key, floor)
         seed = int(self.state.wilderness_seed) + 151000
         floor = max(1, int(floor or 1))
         max_floor = self.dungeon_max_floor_for_key(dungeon_key)
+        mega = self.dungeon_is_mega(dungeon_key)
+        floor_role = self.dungeon_floor_role(dungeon_key, floor)
         for ch in f"{dungeon_key}:floor:{floor}:{theme}":
             seed = (seed * 131 + ord(ch)) & 0x7fffffff
         rng = random.Random(seed)
@@ -8091,6 +9563,13 @@ class FarmGame(
         start_room = (width // 2 - 5, height - 8, 11, 5)
         rooms.append(start_room)
         target_rooms = 9 + min(4, self.dungeon_tier_for_key(dungeon_key)) + min(2, floor - 1)
+        if mega:
+            stratum = (floor - 1) // 3
+            target_rooms = 9 + ((stratum + floor) % 4)
+            if floor_role in {"guardian", "heart"}:
+                target_rooms += 3
+            elif floor_role == "refuge":
+                target_rooms = 8
 
         def room_center(room: Tuple[int, int, int, int]) -> Tuple[int, int]:
             x, y, w, h = room
@@ -8160,7 +9639,7 @@ class FarmGame(
             unconnected.remove(b)
 
         # A few extra loops make the layout less linear, closer to a small roguelike map.
-        extra_links = min(3, max(1, len(rooms) // 4))
+        extra_links = min(4 if mega else 3, max(1, len(rooms) // (3 if mega and floor % 2 == 0 else 4)))
         for _ in range(extra_links):
             a, b = rng.sample(rooms, 2)
             corridor_paths.append(carve_path(room_center(a), room_center(b)))
@@ -8201,6 +9680,16 @@ class FarmGame(
         elif grid[by][bx] == ".":
             grid[by][bx] = "P"
 
+        guardian_position: Optional[Tuple[int, int]] = None
+        guardian_room: Optional[Tuple[int, int, int, int]] = None
+        if floor_role == "guardian" and floor < max_floor:
+            guardian_rooms = [room for room in far_rooms if room != boss_room]
+            guardian_room = guardian_rooms[0] if guardian_rooms else boss_room
+            gx, gy = room_center(guardian_room)
+            if grid[gy][gx] == ".":
+                grid[gy][gx] = "P"
+                guardian_position = (gx, gy)
+
         # Optional custom room templates decorate ordinary room interiors only.
         # They never replace the procedural topology, start room, boss room,
         # corridors, or fallback generation.
@@ -8216,7 +9705,7 @@ class FarmGame(
             )
             template_rooms = [
                 room for room in rooms
-                if room not in {start_room, boss_room}
+                if room not in {start_room, boss_room, guardian_room}
             ]
             rng.shuffle(template_rooms)
             rng.shuffle(custom_templates)
@@ -8230,9 +9719,13 @@ class FarmGame(
             pass
 
         reserved = {(start_x, start_y), (bx, by)}
+        if guardian_position:
+            reserved.add(guardian_position)
         chest_rooms = far_rooms[1:] if len(far_rooms) > 1 else rooms[1:]
         rng.shuffle(chest_rooms)
         chest_count = min(4, 2 + self.dungeon_tier_for_key(dungeon_key))
+        if mega:
+            chest_count = 2 if floor_role in {"guardian", "heart"} else 1
         placed_chests = 0
         for room in chest_rooms:
             if placed_chests >= chest_count:
@@ -8285,9 +9778,12 @@ class FarmGame(
         if not feature_rooms:
             feature_rooms = list(rooms[1:] or rooms)
         tier = self.dungeon_tier_for_key(dungeon_key)
-        place_room_feature("S", feature_rooms, 1)
-        place_room_feature("?", feature_rooms, 1 + (1 if tier >= 2 else 0))
-        place_room_feature("!", feature_rooms + [boss_room], min(5, 2 + tier))
+        shrine_count = 2 if floor_role == "refuge" else 1
+        inscription_count = 1 if mega else 1 + (1 if tier >= 2 else 0)
+        trap_count = 0 if floor_role == "refuge" else min(6 if mega else 5, 2 + tier + (1 if floor_role in {"guardian", "heart"} else 0))
+        place_room_feature("S", feature_rooms, shrine_count)
+        place_room_feature("?", feature_rooms, inscription_count)
+        place_room_feature("!", feature_rooms + [boss_room], trap_count)
 
         # Theme marks are visual only; they keep dungeons from looking like mines.
         flavor_by_theme = {
@@ -8311,6 +9807,9 @@ class FarmGame(
 
         grid[start_y][start_x] = "<"
         grid[by][bx] = ">" if floor < max_floor else "P"
+        if guardian_position:
+            gx, gy = guardian_position
+            grid[gy][gx] = "P"
         return grid
 
     def get_wilderness_dungeon_map(self, dungeon_key: Optional[str] = None, floor: Optional[int] = None) -> List[List[str]]:
@@ -8338,13 +9837,20 @@ class FarmGame(
         self.state.cave_return_x = x
         self.state.cave_return_y = min(self.active_map_height() - 2, y + 1)
         self.state.current_dungeon_key = key
-        self.state.current_dungeon_floor = 1
         record = self.dungeon_record(key)
         if not bool(record.get("discovered", False)):
             record["discovered"] = True
             self.state.wilderness_dungeons_discovered += 1
-        dungeon = self.get_wilderness_dungeon_map(key, 1)
-        self.get_wilderness_dungeon_enemies(key, 1)
+        start_floor = 1
+        if self.dungeon_is_mega(key) and not bool(record.get("cleared", False)):
+            try:
+                start_floor = max(1, int(record.get("checkpoint_floor", 1) or 1))
+            except (TypeError, ValueError):
+                start_floor = 1
+        self.state.current_dungeon_floor = start_floor
+        self._dungeon_checkpoint_entry_floor = start_floor if start_floor > 1 else 0
+        dungeon = self.get_wilderness_dungeon_map(key, start_floor)
+        self.get_wilderness_dungeon_enemies(key, start_floor)
         self.state.location = "WildernessDungeon"
         exits = [(xx, yy) for yy, row in enumerate(dungeon) for xx, ch in enumerate(row) if ch in {"<", "U"}]
         if exits:
@@ -8355,11 +9861,30 @@ class FarmGame(
             self.state.player_x = len(dungeon[0]) // 2
             self.state.player_y = len(dungeon) - 3
         self.state.facing = "UP"
+        self.reform_travel_follower_formation()
+        self.dungeon_reveal_nearby_traps(radius=1, guaranteed=False)
         name = self.dungeon_name_for_key(key)
-        depth_hint = " Find > to descend." if self.dungeon_max_floor_for_key(key) > 1 else ""
-        self.autosave_with_message(f"You enter {name}. Find < to leave.{depth_hint} Clear the red guardian to secure the ruins.")
+        max_floor = self.dungeon_max_floor_for_key(key)
+        depth_hint = " Find > to descend." if max_floor > 1 else ""
+        if self.dungeon_is_mega(key):
+            if start_floor > 1:
+                depth_hint = (
+                    f" Your secured expedition route resumes at floor {start_floor}/{max_floor}, "
+                    f"{self.dungeon_stratum_name(key, start_floor)}. Find < to leave or > to continue."
+                )
+            else:
+                depth_hint = (
+                    f" This is a {max_floor}-floor mega-dungeon with guardians every third floor "
+                    "and refuge checkpoints beyond them. Find > to descend."
+                )
+        self.autosave_with_message(
+            f"You enter {name}. Dungeon combat stays on this map: bump enemies to attack, "
+            f"F aims ranged weapons, V opens your learned skills, P uses a quick potion, and ./5 waits. "
+            f"Find < to leave.{depth_hint} Clear the red guardian to secure the ruins."
+        )
 
     def return_from_wilderness_dungeon(self, message: str = "You step back out into the wilderness."):
+        self.reset_dungeon_companions_after_exit()
         self.ensure_wilderness_chunks()
         self.state.location = "Wilderness"
         self.set_wilderness_chunk(self.state.cave_return_chunk_x, self.state.cave_return_chunk_y, entry_side="center")
@@ -8367,11 +9892,15 @@ class FarmGame(
         self.state.player_y = max(1, min(self.active_map_height() - 2, self.state.cave_return_y))
         self.state.facing = "DOWN"
         self.state.current_dungeon_floor = 1
+        self._dungeon_checkpoint_entry_floor = 0
+        self.reform_travel_follower_formation()
         if message:
             self.autosave_with_message(message)
 
     def ascend_wilderness_dungeon(self):
-        if int(getattr(self.state, "current_dungeon_floor", 1) or 1) <= 1:
+        current_floor = int(getattr(self.state, "current_dungeon_floor", 1) or 1)
+        checkpoint_entry = int(getattr(self, "_dungeon_checkpoint_entry_floor", 0) or 0)
+        if current_floor <= 1 or (checkpoint_entry > 1 and current_floor == checkpoint_entry):
             self.return_from_wilderness_dungeon("You step back out of the ruins.")
             return
         key = self.state.current_dungeon_key
@@ -8385,6 +9914,7 @@ class FarmGame(
         self.state.player_x = exit_x
         self.state.player_y = min(len(dungeon) - 2, exit_y + 1)
         self.state.facing = "DOWN"
+        self.reform_travel_follower_formation()
         self.set_message(f"You climb to dungeon floor {self.state.current_dungeon_floor}.")
 
     def descend_wilderness_dungeon(self):
@@ -8394,7 +9924,19 @@ class FarmGame(
         if current_floor >= max_floor:
             self.set_message("The stairs do not continue any deeper.")
             return
+        if self.dungeon_is_guardian_floor(key, current_floor):
+            guardian_alive = any(
+                bool(enemy.get("guardian", False)) and not bool(enemy.get("defeated", False))
+                for enemy in self.get_wilderness_dungeon_enemies(key, current_floor, create=True)
+            )
+            if guardian_alive:
+                self.set_message("The stratum guardian's seal bars the stairs. Defeat it before descending.")
+                return
         self.state.current_dungeon_floor = current_floor + 1
+        record = self.dungeon_record(key)
+        record["deepest_floor"] = max(int(record.get("deepest_floor", 1) or 1), self.state.current_dungeon_floor)
+        if self.dungeon_is_refuge_floor(key, self.state.current_dungeon_floor):
+            record["checkpoint_floor"] = self.state.current_dungeon_floor
         dungeon = self.get_wilderness_dungeon_map(key, self.state.current_dungeon_floor)
         self.get_wilderness_dungeon_enemies(key, self.state.current_dungeon_floor)
         exits = [(xx, yy) for yy, row in enumerate(dungeon) for xx, ch in enumerate(row) if ch in {"<", "U"}]
@@ -8402,7 +9944,15 @@ class FarmGame(
         self.state.player_x = exit_x
         self.state.player_y = min(len(dungeon) - 2, exit_y + 1)
         self.state.facing = "UP"
-        self.set_message(f"You descend to dungeon floor {self.state.current_dungeon_floor}.")
+        self.reform_travel_follower_formation()
+        if self.dungeon_is_refuge_floor(key, self.state.current_dungeon_floor):
+            self.autosave_with_message(
+                f"You secure the refuge on floor {self.state.current_dungeon_floor}. Future expeditions can resume here."
+            )
+        else:
+            role = self.dungeon_stratum_name(key, self.state.current_dungeon_floor) if self.dungeon_is_mega(key) else ""
+            suffix = f" — {role}." if role else "."
+            self.set_message(f"You descend to dungeon floor {self.state.current_dungeon_floor}{suffix}")
 
     def dungeon_enemy_passable_tile(
         self,
@@ -8423,6 +9973,19 @@ class FarmGame(
         if self.on_wilderness_dungeon() and key == self.state.current_dungeon_key and floor_num == self.state.current_dungeon_floor and x == self.state.player_x and y == self.state.player_y:
             return False
         if grid[y][x] not in [".", "+", "'", '"', ":", "~", ";", "!", "S", "?"]:
+            return False
+        if (
+            key == str(getattr(self.state, "current_dungeon_key", ""))
+            and floor_num == int(getattr(self.state, "current_dungeon_floor", 1) or 1)
+            and self.dungeon_door_closed(x, y)
+        ):
+            return False
+        if (
+            self.on_wilderness_dungeon()
+            and key == self.state.current_dungeon_key
+            and floor_num == self.state.current_dungeon_floor
+            and self.travel_follower_at(x, y)
+        ):
             return False
         for enemy in self.get_wilderness_dungeon_enemies(key, floor_num, create=False):
             if ignore_enemy_id and str(enemy.get("id", "")) == ignore_enemy_id:
@@ -8461,7 +10024,7 @@ class FarmGame(
         species = str(enemy.get("species", "Slime"))
         if not self.dungeon_enemy_passable_tile(x, y, dungeon_key, floor, ignore_enemy_id=str(enemy.get("id", ""))):
             x, y = self.nearest_wilderness_dungeon_enemy_spawn_tile(dungeon_key, floor, x, y)
-        return {
+        cleaned = {
             "id": str(enemy.get("id", f"dungeon:{dungeon_key}:F{floor}:{index}:{species}")),
             "species": species,
             "dungeon_key": dungeon_key,
@@ -8472,7 +10035,42 @@ class FarmGame(
             "alert": bool(enemy.get("alert", False)),
             "defeated": bool(enemy.get("defeated", False)),
             "boss": bool(enemy.get("boss", False)),
+            "final_boss": bool(enemy.get("final_boss", False)),
+            "guardian": bool(enemy.get("guardian", False)),
         }
+        for field in ("max_hp", "hp", "attack", "defense", "attack_range"):
+            if field in enemy:
+                try:
+                    cleaned[field] = max(0, int(enemy.get(field, 0)))
+                except (TypeError, ValueError):
+                    pass
+        for field in ("behavior", "target_kind", "target_id"):
+            if field in enemy:
+                cleaned[field] = str(enemy.get(field, ""))
+        for field in ("dodge",):
+            if field in enemy:
+                try:
+                    cleaned[field] = max(0.0, min(0.75, float(enemy.get(field, 0.0))))
+                except (TypeError, ValueError):
+                    pass
+        cleaned["slow"] = bool(enemy.get("slow", False))
+        cleaned["statuses"] = dict(enemy.get("statuses", {}) or {}) if isinstance(enemy.get("statuses", {}), dict) else {}
+        cleaned["intent"] = dict(enemy.get("intent", {}) or {}) if isinstance(enemy.get("intent", {}), dict) else {}
+        for field in ("heard_x", "heard_y"):
+            value = enemy.get(field)
+            if value is None:
+                cleaned[field] = None
+            else:
+                try:
+                    cleaned[field] = int(value)
+                except (TypeError, ValueError):
+                    cleaned[field] = None
+        try:
+            cleaned["search_turns"] = max(0, int(enemy.get("search_turns", 0)))
+        except (TypeError, ValueError):
+            cleaned["search_turns"] = 0
+        cleaned["alert_reason"] = str(enemy.get("alert_reason", "") or "")
+        return cleaned
 
     def normalize_wilderness_dungeon_enemies(self):
         self.ensure_wilderness_dungeons()
@@ -8492,9 +10090,16 @@ class FarmGame(
             cleaned[floor_key] = clean_floor
         self.wilderness_dungeon_enemies = cleaned
 
-    def wilderness_dungeon_enemy_name(self, dungeon_key: str, depth: int, rng: random.Random, boss: bool = False) -> str:
+    def wilderness_dungeon_enemy_name(
+        self,
+        dungeon_key: str,
+        depth: int,
+        rng: random.Random,
+        boss: bool = False,
+        floor: Optional[int] = None,
+    ) -> str:
         """Pick ruin-native enemies without adding them to ordinary mine spawns."""
-        theme = self.dungeon_theme_for_key(dungeon_key)
+        theme = self.dungeon_floor_theme(dungeon_key, int(floor or 1))
         tier = self.dungeon_tier_for_key(dungeon_key)
         pool: List[str] = ["Dustling"] * 5 + ["Ruin Bat"] * 4 + ["Moss Haunt"] * 3
         if theme in ["crystal", "sunken"] or depth >= 14:
@@ -8519,6 +10124,8 @@ class FarmGame(
         if bool(record.get("cleared", False)):
             return []
         floor = max(1, min(self.dungeon_max_floor_for_key(dungeon_key), int(floor or 1)))
+        if self.dungeon_is_refuge_floor(dungeon_key, floor):
+            return []
         depth = self.dungeon_combat_depth(dungeon_key, floor)
         rng = random.Random(int(self.state.wilderness_seed) + depth * 811 + floor * 15157 + sum(ord(ch) for ch in dungeon_key))
         grid = self.get_wilderness_dungeon_map(dungeon_key, floor)
@@ -8546,7 +10153,7 @@ class FarmGame(
         rng.shuffle(candidates)
 
         tier = self.dungeon_tier_for_key(dungeon_key)
-        regular_target = min(7, 3 + tier)
+        regular_target = min(8, 3 + tier + (1 if self.dungeon_is_mega(dungeon_key) and floor >= 7 else 0))
 
         enemies: List[Dict[str, object]] = []
         used = set()
@@ -8555,7 +10162,7 @@ class FarmGame(
                 break
             if any(abs(x - ux) + abs(y - uy) < 6 for ux, uy in used):
                 continue
-            species = self.wilderness_dungeon_enemy_name(dungeon_key, depth, rng)
+            species = self.wilderness_dungeon_enemy_name(dungeon_key, depth, rng, floor=floor)
             enemies.append({
                 "id": f"dungeon:{dungeon_key}:F{floor}:{len(enemies)}:{species}",
                 "species": species,
@@ -8570,8 +10177,12 @@ class FarmGame(
             })
             used.add((x, y))
 
+        max_floor = self.dungeon_max_floor_for_key(dungeon_key)
+        final_floor = floor >= max_floor
+        guardian_floor = self.dungeon_is_guardian_floor(dungeon_key, floor)
+        needs_boss = final_floor or guardian_floor
         boss_markers = [(x, y) for y, row in enumerate(grid) for x, ch in enumerate(row) if ch == "P"]
-        if floor >= self.dungeon_max_floor_for_key(dungeon_key) and boss_markers:
+        if needs_boss and boss_markers:
             marker_x, marker_y = boss_markers[0]
             boss_candidates = []
             for yy in range(max(1, marker_y - 4), min(h - 1, marker_y + 5)):
@@ -8583,12 +10194,18 @@ class FarmGame(
                 bx, by = boss_candidates[0]
             else:
                 bx, by = self.nearest_wilderness_dungeon_enemy_spawn_tile(dungeon_key, floor, marker_x, marker_y)
-        elif floor >= self.dungeon_max_floor_for_key(dungeon_key):
+        elif needs_boss:
             boss_candidates = [(x, y) for x, y in candidates if (x, y) not in used]
             boss_candidates.sort(key=lambda pos: abs(pos[0] - (w // 2)) + abs(pos[1] - (h - 3)), reverse=True)
             bx, by = boss_candidates[0] if boss_candidates else self.nearest_wilderness_dungeon_enemy_spawn_tile(dungeon_key, floor, w // 2, 4)
-        if floor >= self.dungeon_max_floor_for_key(dungeon_key):
-            boss_base = self.wilderness_dungeon_enemy_name(dungeon_key, min(MINE_MAX_FLOOR, depth + 8), rng, boss=True)
+        if needs_boss:
+            boss_base = self.wilderness_dungeon_enemy_name(
+                dungeon_key,
+                min(MINE_MAX_FLOOR, depth + (8 if final_floor else 4)),
+                rng,
+                boss=True,
+                floor=floor,
+            )
             boss_species = f"Elite {boss_base}"
             enemies.append({
                 "id": f"dungeon:{dungeon_key}:F{floor}:boss:{boss_base}",
@@ -8601,6 +10218,8 @@ class FarmGame(
                 "alert": True,
                 "defeated": False,
                 "boss": True,
+                "final_boss": bool(final_floor),
+                "guardian": bool(guardian_floor),
             })
         return enemies
 
@@ -8625,7 +10244,10 @@ class FarmGame(
             return []
         if create and map_key not in self.wilderness_dungeon_enemies:
             self.wilderness_dungeon_enemies[map_key] = self.generate_wilderness_dungeon_enemies(key, floor_num)
-        return self.wilderness_dungeon_enemies.get(map_key, [])
+        enemies = self.wilderness_dungeon_enemies.get(map_key, [])
+        for enemy in enemies:
+            self.ensure_dungeon_roguelike_enemy(enemy)
+        return enemies
 
     def wilderness_dungeon_enemy_at(self, x: int, y: int, dungeon_key: Optional[str] = None, floor: Optional[int] = None) -> Optional[Dict[str, object]]:
         key = dungeon_key or self.state.current_dungeon_key
@@ -8742,6 +10364,19 @@ class FarmGame(
     def wilderness_dungeon_boss_reward(self, dungeon_key: str, floor: int) -> Tuple[int, Dict[str, int]]:
         depth = self.dungeon_combat_depth(dungeon_key, floor)
         tier = self.dungeon_tier_for_key(dungeon_key)
+        max_floor = self.dungeon_max_floor_for_key(dungeon_key)
+        if self.dungeon_is_mega(dungeon_key) and floor < max_floor:
+            theme = self.dungeon_floor_theme(dungeon_key, floor)
+            items: Dict[str, int] = {"Relic Fragment": 1, "Ruin Scrap": 2 + floor // 3}
+            if theme == "crystal":
+                items["Crystal Shard"] = 1
+            elif theme == "quarry":
+                items["Stone Sigil"] = 1
+            elif theme == "root":
+                items["Cave Herbs"] = 1
+            elif theme == "sunken":
+                items["Old Coin"] = 2
+            return 70 + tier * 30 + floor * 15, items
         money = 120 + tier * 60 + floor * 25
         theme = self.dungeon_theme_for_key(dungeon_key)
         items: Dict[str, int] = {
@@ -8767,6 +10402,11 @@ class FarmGame(
         elif theme == "root":
             items["Cave Herbs"] = items.get("Cave Herbs", 0) + 2
             items["Dust Silk"] = items.get("Dust Silk", 0) + 1
+        if self.dungeon_is_mega(dungeon_key):
+            money += 250 + max_floor * 25
+            items["Relic Fragment"] = items.get("Relic Fragment", 0) + 2
+            items["Ancient Cog"] = items.get("Ancient Cog", 0) + 1
+            items["Ancient Seed"] = items.get("Ancient Seed", 0) + 1
         return money, items
 
     def apply_wilderness_dungeon_battle_result(self, enemy: Dict[str, object], result: object):
@@ -8800,11 +10440,18 @@ class FarmGame(
             clear_lines: List[str] = []
             if enemy.get("boss"):
                 record = self.dungeon_record(dungeon_key)
-                record["boss_defeated"] = True
-                record["cleared"] = True
-                for clear_floor in range(1, self.dungeon_max_floor_for_key(dungeon_key) + 1):
-                    self.wilderness_dungeon_enemies[self.dungeon_enemy_floor_key(dungeon_key, clear_floor)] = []
-                clear_lines.append(f"{self.dungeon_name_for_key(dungeon_key)} is cleared. Its entrance is now safe.")
+                final_boss = bool(enemy.get("final_boss", floor >= self.dungeon_max_floor_for_key(dungeon_key)))
+                if final_boss:
+                    record["boss_defeated"] = True
+                    record["cleared"] = True
+                    for clear_floor in range(1, self.dungeon_max_floor_for_key(dungeon_key) + 1):
+                        self.wilderness_dungeon_enemies[self.dungeon_enemy_floor_key(dungeon_key, clear_floor)] = []
+                    clear_lines.append(f"{self.dungeon_name_for_key(dungeon_key)} is cleared. Its entrance is now safe.")
+                else:
+                    guardians = {int(value) for value in record.get("defeated_guardians", []) if str(value).isdigit()}
+                    guardians.add(floor)
+                    record["defeated_guardians"] = sorted(guardians)
+                    clear_lines.append(f"The stratum guardian falls. The route to floor {floor + 1} is secure.")
             elif not self.get_wilderness_dungeon_enemies(dungeon_key, floor, create=False):
                 clear_lines.append("The rooms nearby are quiet for now.")
 
@@ -8867,6 +10514,12 @@ class FarmGame(
         self.autosave_with_message(f"{summary}. It is still prowling these ruins.{party_text}")
 
     def start_wilderness_dungeon_combat_encounter(self, enemy: Dict[str, object], reason: str = "nearby"):
+        # Wilderness dungeons now resolve combat directly on their persistent
+        # exploration map. Tactical battles remain available for missions,
+        # strongholds, bounties, and mine encounters.
+        if self.on_wilderness_dungeon():
+            self.dungeon_player_melee_attack(enemy)
+            return
         species = str(enemy.get("species", "enemy"))
         dungeon_key = str(enemy.get("dungeon_key", self.state.current_dungeon_key))
         dungeon_floor = max(1, int(enemy.get("dungeon_floor", self.state.current_dungeon_floor) or 1))
@@ -8913,7 +10566,7 @@ class FarmGame(
         depth = self.dungeon_combat_depth(dungeon_key, floor)
         rng = random.Random(int(self.state.wilderness_seed) + depth * 311 + x * 37 + y * 53 + sum(ord(ch) for ch in dungeon_key))
         money = rng.randint(18, 38) + depth * 3
-        theme = self.dungeon_theme_for_key(dungeon_key)
+        theme = self.dungeon_floor_theme(dungeon_key, floor)
         items: Dict[str, int] = {
             "Old Coin": rng.randint(1, 3),
             "Ruin Scrap": rng.randint(1, 2),
@@ -8984,6 +10637,7 @@ class FarmGame(
         damage = 0 if current_hp <= 1 else min(current_hp - 1, max(2, min(10, 2 + tier * 2)))
         if damage > 0:
             self.state.combat_current_hp = max(1, current_hp - damage)
+            self.record_player_damage()
             message = f"A hidden floor plate snaps. You lose {damage} HP ({self.state.combat_current_hp}/{max_hp})."
         else:
             message = "A hidden floor plate snaps, but you are too guarded to be seriously hurt."
@@ -9007,10 +10661,20 @@ class FarmGame(
         profile = farmstead_combat_profile(self.state)
         current_hp = max(1, int(profile.get("current_hp", 1) or 1))
         max_hp = max(1, int(profile.get("max_hp", current_hp) or current_hp))
-        if current_hp < max_hp:
+        current_focus = max(0, int(profile.get("focus", 0) or 0))
+        max_focus = max(0, int(profile.get("max_focus", current_focus) or current_focus))
+        if current_hp < max_hp or current_focus < max_focus:
             heal = min(max_hp - current_hp, max(8, max_hp // 3))
             self.state.combat_current_hp = current_hp + heal
-            message = f"The cracked shrine steadies you. Restored {heal} HP ({self.state.combat_current_hp}/{max_hp})."
+            focus_gain = min(max_focus - current_focus, max(2, max_focus // 3)) if max_focus else 0
+            self.state.combat_focus = current_focus + focus_gain
+            restored = [f"{heal} HP"] if heal else []
+            if focus_gain:
+                restored.append(f"{focus_gain} MP")
+            message = (
+                f"The cracked shrine steadies you. Restored {', '.join(restored)} "
+                f"(HP {self.state.combat_current_hp}/{max_hp}, MP {self.state.combat_focus}/{max_focus})."
+            )
         else:
             items = {"Cave Herbs": 1}
             add_inventory_items(self.state.inventory, items)
@@ -9029,7 +10693,7 @@ class FarmGame(
             self.set_message("You have already copied this inscription.")
             return
 
-        theme = self.dungeon_theme_for_key(str(key))
+        theme = self.dungeon_floor_theme(str(key), floor)
         rng = random.Random(int(self.state.wilderness_seed) + floor * 1009 + x * 97 + y * 131 + sum(ord(ch) for ch in str(key)))
         loot_options: List[Dict[str, int]] = [
             {"Old Coin": 1},
@@ -9069,6 +10733,11 @@ class FarmGame(
         if enemy:
             self.start_wilderness_dungeon_combat_encounter(enemy, reason="interact")
             return
+        loot_record = self.world_container_at(x, y) if self.dungeon_floor_loot_at(x, y) else None
+        if loot_record:
+            self.show_world_container(loot_record)
+            self.advance_dungeon_roguelike_turn("collect loot")
+            return
         tile = self.active_map()[y][x] if self.in_active_bounds(x, y) else "#"
         if tile in {"<", "U"}:
             self.ascend_wilderness_dungeon()
@@ -9077,19 +10746,35 @@ class FarmGame(
             self.descend_wilderness_dungeon()
             return
         if tile == "$":
-            self.open_wilderness_dungeon_chest(x, y)
+            chest = self.world_container_at(x, y)
+            if chest:
+                self.show_world_container(chest)
+            self._dungeon_turn_messages = [str(self.state.message)]
+            self.advance_dungeon_roguelike_turn("open chest")
             return
         if tile == "+":
-            self.set_message("A battered doorway connects the rooms.")
+            self.dungeon_use_door(x, y)
             return
         if tile == "S":
             self.use_wilderness_dungeon_shrine(x, y)
+            self._dungeon_turn_messages = [str(self.state.message)]
+            self.advance_dungeon_roguelike_turn("use shrine")
             return
         if tile == "?":
             self.read_wilderness_dungeon_inscription(x, y)
+            self._dungeon_turn_messages = [str(self.state.message)]
+            self.advance_dungeon_roguelike_turn("read inscription")
             return
         if tile == "!":
-            self.trigger_wilderness_dungeon_trap(x, y)
+            if self.dungeon_trap_revealed(x, y):
+                self.dungeon_disarm_trap(x, y)
+            else:
+                key = self.dungeon_feature_key(x, y)
+                revealed = self.dungeon_roguelike_record().setdefault("revealed_traps", [])
+                if key not in revealed:
+                    revealed.append(key)
+                self._dungeon_turn_messages = ["A careful inspection reveals an armed floor plate."]
+                self.advance_dungeon_roguelike_turn("search trap")
             return
         if tile == "P":
             record = self.dungeon_record()
@@ -9114,7 +10799,7 @@ class FarmGame(
         self.state.overworld_cursor_chunk_x = self.state.wilderness_chunk_x
         self.state.overworld_cursor_chunk_y = self.state.wilderness_chunk_y
         self.state.location = "WildernessOverworld"
-        self.set_message("Overworld travel: WASD move chunks, U/Z/Enter enter chunk, Esc cancel, R return to town.")
+        self.set_message("Overworld travel: WASD/numpad move chunks, U/Z/Enter enter chunk, Esc cancel, R return to town.")
 
     def cancel_wilderness_overworld(self):
         self.state.location = "Wilderness"
@@ -9135,6 +10820,8 @@ class FarmGame(
         settlement = self.procedural_town_plan(chunk_x, chunk_y)
         if settlement and bool(settlement.get("discovered", False)):
             return True
+        if self.wilderness_region_project_complete(chunk_x, chunk_y):
+            return True
         record = self.wilderness_stronghold_record(chunk_x, chunk_y, create=False)
         return bool(record.get("cleared", False))
 
@@ -9154,13 +10841,33 @@ class FarmGame(
         if waypoint_discount:
             stamina_cost = max(0, (stamina_cost + 1) // 2)
             minutes_cost = max(0, (minutes_cost + 1) // 2)
+        if self.overworld_regional_road_discount(cx, cy):
+            stamina_cost = max(0, (stamina_cost * 3 + 3) // 4)
+            minutes_cost = max(0, (minutes_cost * 3 + 3) // 4)
         return stamina_cost, minutes_cost, waypoint_discount
+
+    def overworld_regional_road_discount(self, target_x: Optional[int] = None, target_y: Optional[int] = None) -> bool:
+        cx = int(self.state.overworld_cursor_chunk_x if target_x is None else target_x)
+        cy = int(self.state.overworld_cursor_chunk_y if target_y is None else target_y)
+        sx, sy = int(self.state.overworld_return_chunk_x), int(self.state.overworld_return_chunk_y)
+        if (cx, cy) == (sx, sy):
+            return False
+        return (
+            self.wilderness_chunk_known(sx, sy) and self.wilderness_chunk_known(cx, cy)
+            and self.wilderness_chunk_has_regional_road(sx, sy)
+            and self.wilderness_chunk_has_regional_road(cx, cy)
+        )
 
     def overworld_enter_selected_chunk(self):
         cx = int(self.state.overworld_cursor_chunk_x)
         cy = int(self.state.overworld_cursor_chunk_y)
         distance = self.overworld_travel_distance()
         stamina_cost, minutes_cost, waypoint_discount = self.overworld_travel_costs(cx, cy)
+        road_discount = self.overworld_regional_road_discount(cx, cy)
+
+        if not self.wilderness_chunk_known(cx, cy):
+            self.set_message("That region is still unknown. Explore there on foot or acquire a regional chart first.")
+            return
 
         if self.state.stamina < stamina_cost:
             self.set_message(f"You need {stamina_cost} stamina to travel there. Current stamina: {self.state.stamina}.")
@@ -9183,7 +10890,10 @@ class FarmGame(
             self.state.player_y = max(1, min(self.active_map_height() - 2, self.state.overworld_return_y))
             self.set_message(f"Chunk load failed; returned to previous wilderness position. Report: {CRASH_REPORT_PATH.name}")
             return
-        discount_text = " Reclaimed waypoints made the trip easier." if waypoint_discount else ""
+        discounts = []
+        if waypoint_discount: discounts.append("safe waypoint")
+        if road_discount: discounts.append("regional roads")
+        discount_text = f" Route benefit: {' + '.join(discounts)}." if discounts else ""
         cost_text = f" Cost: {stamina_cost} stamina, {minutes_cost} minutes.{discount_text}" if distance else ""
         discovered_name = str(getattr(self, "_procedural_town_just_discovered_name", "") or "")
         if discovered_name:
@@ -9200,7 +10910,11 @@ class FarmGame(
         self.state.overworld_cursor_chunk_x += int(dx)
         self.state.overworld_cursor_chunk_y += int(dy)
         stamina_cost, minutes_cost, waypoint_discount = self.overworld_travel_costs()
-        discount_text = " Reclaimed waypoint discount active." if waypoint_discount else ""
+        road_discount = self.overworld_regional_road_discount()
+        discounts = []
+        if waypoint_discount: discounts.append("safe waypoint")
+        if road_discount: discounts.append("regional road")
+        discount_text = f" Route benefit: {' + '.join(discounts)}." if discounts else ""
         self.set_message(
             f"Overworld cursor: ({self.state.overworld_cursor_chunk_x},{self.state.overworld_cursor_chunk_y}). "
             f"Enter cost: {stamina_cost} stamina, {minutes_cost} minutes.{discount_text}"
@@ -9208,10 +10922,14 @@ class FarmGame(
 
     def overworld_chunk_preview_symbol(self, cx: int, cy: int) -> str:
         key = f"{cx},{cy}"
+        if not self.wilderness_chunk_known(cx, cy):
+            return "_"
         if key in (self.state.owned_wilderness_claims or {}):
             return WILDERNESS_CLAIM_SYMBOL
         if self.active_bounty_for_chunk(cx, cy):
             return "!"
+        if self.active_wilderness_expedition_for_chunk(cx, cy):
+            return "?"
         settlement = self.procedural_town_plan(cx, cy)
         if settlement and bool(settlement.get("discovered", False)):
             return PROCEDURAL_TOWN_OVERWORLD_SYMBOL
@@ -9231,6 +10949,17 @@ class FarmGame(
         generated = getattr(self, "wilderness_maps", {}).get(key)
         if generated and any("V" in row for row in generated):
             return "V"
+        if self.procedural_town_hinterland_profile(cx, cy):
+            return "h"
+        hydrology = self.wilderness_chunk_hydrology_features(cx, cy)
+        if "Coastal river delta" in hydrology:
+            return "d"
+        if "River source / upland spring" in hydrology:
+            return "s"
+        if "Inland terminal basin" in hydrology:
+            return "b"
+        if self.wilderness_chunk_has_regional_road(cx, cy):
+            return ":"
         if key in getattr(self, "wilderness_maps", {}):
             return "*"
         # Preview broad terrain without generating the full chunk.
@@ -9246,15 +10975,22 @@ class FarmGame(
             "T": C.SHOP,
             "*": C.CROP_READY,
             "!": C.HOSTILE,
+            "?": C.CROP_READY,
             "X": C.STONE,
             "V": C.WATER,
             "~": C.WATER,
+            "d": C.WATER,
+            "s": C.WATER,
+            "b": C.WATER,
+            "h": C.CROP_READY,
+            ":": C.DIM,
             ";": C.SPRING_GRASS,
             "%": C.GRASS,
             "l": C.SNOW,
             "r": C.WATER,
             "x": C.STONE,
             ".": C.DIM,
+            "_": C.DIM,
             WILDERNESS_CLAIM_SYMBOL: C.BIN,
             WILDERNESS_SURVEY_PREVIEW_SYMBOL: C.DIM,
             PROCEDURAL_TOWN_OVERWORLD_SYMBOL: C.SHOP,
@@ -9269,20 +11005,69 @@ class FarmGame(
             return colorize(symbol, C.CROP_READY if record.get("cleared") else C.HOSTILE)
         return self.color_overworld_symbol(symbol)
 
+    def overworld_chunk_cartography_kind(self, cx: int, cy: int, symbol: str) -> str:
+        """Describe a preview symbol for display without changing map data."""
+        if symbol == "_":
+            return "unknown"
+        if symbol == WILDERNESS_CLAIM_SYMBOL:
+            return "claim"
+        if symbol == "!":
+            if self.active_bounty_for_chunk(cx, cy):
+                return "danger"
+            record = self.wilderness_stronghold_record(cx, cy, create=False)
+            return "reclaimed" if record.get("cleared") else "danger"
+        if symbol == "?":
+            return "objective"
+        if symbol == PROCEDURAL_TOWN_OVERWORLD_SYMBOL:
+            return "town"
+        if symbol == "X":
+            return "dungeon"
+        if symbol == WILDERNESS_SURVEY_PREVIEW_SYMBOL:
+            return "survey" if self.is_claimable_wilderness_chunk(cx, cy) else "delta"
+        kinds = {
+            "T": "home", "V": "cave", "h": "hinterland", "s": "source",
+            "b": "basin", ":": "road", "*": "visited", "~": "water",
+            ";": "meadow", "%": "woods", "l": "fungal", "r": "wetland",
+            "x": "ridge", "`": "desert", '"': "tundra", "[": "coast",
+        }
+        kind = kinds.get(symbol, "terrain")
+        if kind in {"hinterland", "source", "delta", "basin", "road", "visited", "water", "coast", "terrain"}:
+            port = self.wilderness_region_port_chunk(cx, cy)
+            if port == (int(cx), int(cy)):
+                return "port"
+        return kind
+
+    def overworld_chunk_cartography_style(self, cx: int, cy: int, symbol: str) -> Tuple[str, str]:
+        return cartography_symbol_style(
+            symbol,
+            self.overworld_chunk_cartography_kind(cx, cy, symbol),
+            detailed=bool(getattr(self.state, "detailed_glyphs_enabled", True)),
+            high_contrast=bool(getattr(self.state, "high_contrast_enabled", False)),
+        )
+
     def overworld_chunk_detail_lines(self, cx: int, cy: int) -> List[str]:
         key = self.wilderness_chunk_key(cx, cy)
         distance = self.overworld_travel_distance()
         stamina_cost, minutes_cost, waypoint_discount = self.overworld_travel_costs(cx, cy)
+        road_discount = self.overworld_regional_road_discount(cx, cy)
         title = f"Selected ({cx},{cy})"
+        if not self.wilderness_chunk_known(cx, cy):
+            return [title + " - Unknown region", "Travel locked: explore physically or use a Regional Chart"]
         details: List[str] = []
+        region = self.wilderness_region_profile(cx, cy)
+        _mastery_count, mastery = self.wilderness_region_mastery(cx, cy)
+        details.append(f"{region['name']} ({mastery})")
         if cx == 0 and cy == 0:
-            details.append("Town trail / origin wilderness")
+            details.append("Home region: main town, farm, and origin wilderness")
         if key in (self.state.owned_wilderness_claims or {}):
             claim = self.state.owned_wilderness_claims[key]
             details.append(f"Owned claim: {claim.get('name', key)}")
         bounty = self.active_bounty_for_chunk(cx, cy)
         if bounty:
             details.append(f"Bounty target: {bounty.get('target_name', 'Wanted Target')}")
+        expedition = self.active_wilderness_expedition_for_chunk(cx, cy)
+        if expedition:
+            details.append(f"Expedition target: {expedition.get('name', 'Regional Expedition')}")
         settlement = self.procedural_town_plan(cx, cy)
         if settlement and bool(settlement.get("discovered", False)):
             details.append(f"Wilderness town: {settlement.get('name', key)}")
@@ -9299,12 +11084,23 @@ class FarmGame(
             name = stronghold_record.get("name") if stronghold_record else self.wilderness_stronghold_name(cx, cy)
             details.append(f"Hostile stronghold: {name}")
         if self.wilderness_chunk_has_dungeon_site(cx, cy):
-            details.append(f"Dungeon site: {self.dungeon_name_for_key(f'{cx},{cy}:0,0')}")
+            preview_key = f"{cx},{cy}:0,0"
+            dungeon_kind = "Mega-dungeon" if self.dungeon_is_mega(preview_key) else "Dungeon site"
+            details.append(
+                f"{dungeon_kind}: {self.dungeon_name_for_key(preview_key)} "
+                f"({self.dungeon_max_floor_for_key(preview_key)} floors)"
+            )
         generated = getattr(self, "wilderness_maps", {}).get(key)
         if generated and any("V" in row for row in generated):
             details.append("Known cave entrance")
         if key in getattr(self, "wilderness_maps", {}):
             details.append("Visited chunk")
+        hinterland = self.procedural_town_hinterland_profile(cx, cy)
+        if hinterland:
+            details.append(f"{hinterland.get('name')} supplying {hinterland.get('town_name')}")
+        details.extend(self.wilderness_chunk_hydrology_features(cx, cy))
+        if self.wilderness_chunk_has_regional_road(cx, cy):
+            details.append("Connected to the regional road network")
         if not details:
             wx = cx * 86 + 43
             wy = cy * 38 + 19
@@ -9313,6 +11109,8 @@ class FarmGame(
         cost = f"Travel: {distance} chunk(s), {stamina_cost} STA, {minutes_cost} min"
         if waypoint_discount:
             cost += " (waypoint discount)"
+        if road_discount:
+            cost += " (road discount)"
         return [title + " - " + "; ".join(details[:3]), cost]
 
     def overworld_lines(self) -> List[str]:
@@ -9320,77 +11118,104 @@ class FarmGame(
         radius_y = 5
         cx = int(self.state.overworld_cursor_chunk_x)
         cy = int(self.state.overworld_cursor_chunk_y)
+        detailed = bool(getattr(self.state, "detailed_glyphs_enabled", True))
         lines: List[str] = []
-        lines.append(" " * 2 + colorize(fit_text("WILDERNESS OVERWORLD MAP", VIEW_WIDTH - 4).center(VIEW_WIDTH - 4), C.BOLD))
-        distance = self.overworld_travel_distance()
+        title = "WILDERNESS OVERWORLD MAP"
+        lines.append(colorize(title.center(VIEW_WIDTH), C.UI_TITLE))
         stamina_cost, minutes_cost, waypoint_discount = self.overworld_travel_costs(cx, cy)
-        discount_text = " | waypoint discount" if waypoint_discount else ""
-        info = f"Cursor chunk: ({cx},{cy}) | Generated chunks: {len(getattr(self, 'wilderness_maps', {}))} | Enter cost: {stamina_cost} STA / {minutes_cost} min{discount_text}"
-        lines.append(" " * 2 + colorize(fit_text(info, VIEW_WIDTH - 4), C.DIM))
-        lines.append("")
+        road_discount = self.overworld_regional_road_discount(cx, cy)
+        known = self.wilderness_chunk_known(cx, cy)
+        region = self.wilderness_region_profile(cx, cy) if known else None
+        region_name = str(region.get("name", "Unknown")) if region else "Unknown region"
+        benefits = []
+        if waypoint_discount:
+            benefits.append("waypoint")
+        if road_discount:
+            benefits.append("road")
+        benefit_text = f" | Route: {' + '.join(benefits)}" if benefits else ""
+        info = f"Cursor ({cx},{cy}) | {region_name} | {stamina_cost} STA / {minutes_cost} min{benefit_text}"
+        lines.append(colorize(fit_text(info, VIEW_WIDTH).center(VIEW_WIDTH), C.UI_MUTED))
 
-        map_width = radius_x * 2 + 1
-        left_pad = " " * max(0, (VIEW_WIDTH - map_width) // 2)
+        map_inner_width = (radius_x * 2 + 1) * 3
+        map_outer_width = map_inner_width + 2
+        left_pad = " " * max(0, (VIEW_WIDTH - map_outer_width) // 2)
+        horizontal, vertical = ("─", "│") if detailed else ("-", "|")
+        top_left, top_right, bottom_left, bottom_right = (("┌", "┐", "└", "┘") if detailed else ("+", "+", "+", "+"))
+        lines.append(left_pad + colorize(top_left + horizontal * map_inner_width + top_right, C.UI_BORDER))
+
+        selected_region_members = set(self.wilderness_region_chunks(cx, cy)) if known else set()
+        return_chunk = (
+            int(self.state.overworld_return_chunk_x),
+            int(self.state.overworld_return_chunk_y),
+        )
         for y in range(cy - radius_y, cy + radius_y + 1):
             row_parts = []
             for x in range(cx - radius_x, cx + radius_x + 1):
-                if x == cx and y == cy:
-                    symbol = "@"
+                symbol = self.overworld_chunk_preview_symbol(x, y)
+                glyph, glyph_color = self.overworld_chunk_cartography_style(x, y, symbol)
+                colored_glyph = colorize(glyph, glyph_color)
+                if (x, y) == (cx, cy):
+                    selected_glyph = colorize("@", C.PLAYER) if (x, y) == return_chunk else colored_glyph
+                    cell = colorize("[", C.UI_SELECTED) + selected_glyph + colorize("]", C.UI_SELECTED)
+                elif (x, y) == return_chunk:
+                    cell = " " + colorize("@", C.PLAYER) + " "
+                elif (x, y) in selected_region_members and self.wilderness_chunk_known(x, y):
+                    marker = colorize("·", C.UI_BORDER)
+                    cell = marker + colored_glyph + marker
                 else:
-                    symbol = self.overworld_chunk_preview_symbol(x, y)
-                row_parts.append(self.overworld_chunk_colored_symbol(x, y, symbol))
-            lines.append(left_pad + "".join(row_parts))
+                    cell = " " + colored_glyph + " "
+                row_parts.append(cell)
+            lines.append(left_pad + colorize(vertical, C.UI_BORDER) + "".join(row_parts) + colorize(vertical, C.UI_BORDER))
+        lines.append(left_pad + colorize(bottom_left + horizontal * map_inner_width + bottom_right, C.UI_BORDER))
 
-        lines.append("")
         for detail_line in self.overworld_chunk_detail_lines(cx, cy):
-            lines.append(" " * 2 + colorize(fit_text(detail_line, VIEW_WIDTH - 4), C.DIM))
-        legend_parts = [
-            (colorize("@", C.PLAYER), "cursor"),
-            (colorize("T", C.SHOP), "town"),
-            (colorize(PROCEDURAL_TOWN_OVERWORLD_SYMBOL, C.SHOP), "wilderness town"),
-            (colorize("*", C.CROP_READY), "visited"),
-            (colorize(WILDERNESS_CLAIM_SYMBOL, C.BIN), "owned claim"),
-            (colorize(WILDERNESS_SURVEY_PREVIEW_SYMBOL, C.DIM), "survey"),
-            (colorize("!", C.HOSTILE), "bounty/stronghold"),
-            (colorize("!", C.CROP_READY), "reclaimed"),
-            (colorize("X", C.STONE), "dungeon"),
-            (colorize("V", C.WATER), "known cave"),
-            (colorize("~", C.WATER), "water"),
-            (colorize(";", C.SPRING_GRASS), "meadow"),
-            (colorize("%", C.GRASS), "woods"),
-            (colorize("l", C.SNOW), "mushrooms"),
-            (colorize("r", C.WATER), "wetland"),
-            (colorize("x", C.STONE), "ridge"),
-        ]
-        legend_rows: List[str] = []
-        current = ""
-        for sym, label in legend_parts:
-            part = f"{sym} {label}"
-            candidate = part if not current else f"{current} | {part}"
-            if current and visible_text_len(candidate) > VIEW_WIDTH:
-                legend_rows.append(current)
-                current = part
-            else:
-                current = candidate
-        if current:
-            legend_rows.append(current)
-        lines.extend(legend_rows)
-        controls = "WASD move cursor | U/Z/Enter enter | Esc/C/Q/Tab cancel | R return to town"
-        lines.append(colorize(fit_text(controls, VIEW_WIDTH), C.DIM))
+            lines.append(colorize(fit_text(detail_line, VIEW_WIDTH), C.UI_MUTED))
+
+        def legend_entry(raw: str, kind: str, label: str) -> str:
+            glyph, glyph_color = cartography_symbol_style(
+                raw, kind, detailed=detailed,
+                high_contrast=bool(getattr(self.state, "high_contrast_enabled", False)),
+            )
+            return colorize(glyph, glyph_color) + " " + label
+
+        region_key = " ".join([
+            legend_entry("D", "claim", "Claim"),
+            legend_entry("d", "survey", "Survey"),
+            legend_entry("s", "source", "Source"),
+            legend_entry("d", "delta", "Delta"),
+            legend_entry("b", "basin", "Basin"),
+            colorize("·x·", C.UI_BORDER) + " Area",
+        ]) if known else "Unknown land: explore on foot or use a Regional Chart"
+        legend_one = "  ".join([
+            colorize("[@]", C.UI_SELECTED) + " SELECT",
+            colorize("@", C.PLAYER) + " HERE",
+            legend_entry("T", "home", "HOME"),
+            legend_entry("t", "town", "TOWN"),
+            legend_entry("!", "danger", "DANGER"),
+            legend_entry("X", "dungeon", "DNGN"),
+        ])
+        legend_two = "  ".join([
+            legend_entry(":", "road", "ROAD"),
+            legend_entry("~", "water", "WATER"),
+            legend_entry("P", "port", "PORT"),
+            legend_entry("*", "visited", "SEEN"),
+            legend_entry("_", "unknown", "UNKNOWN"),
+            legend_entry("?", "objective", "GOAL"),
+        ])
+        lines.append(fit_text(region_key, VIEW_WIDTH))
+        lines.append(fit_text(legend_one, VIEW_WIDTH))
+        lines.append(fit_text(legend_two, VIEW_WIDTH))
+        controls = "WASD/Numpad Move | Enter Travel | Esc Close | R Town"
+        lines.append(colorize(fit_text(controls, VIEW_WIDTH).center(VIEW_WIDTH), C.UI_MUTED))
         while len(lines) < VIEW_HEIGHT:
             lines.append("")
         return [pad_visual(line, VIEW_WIDTH) for line in lines[:VIEW_HEIGHT]]
 
 
     def handle_overworld_key(self, key: str):
-        if key in ["w", "UP"]:
-            self.overworld_move_cursor(0, -1)
-        elif key in ["s", "DOWN"]:
-            self.overworld_move_cursor(0, 1)
-        elif key in ["a", "LEFT"]:
-            self.overworld_move_cursor(-1, 0)
-        elif key in ["d", "RIGHT"]:
-            self.overworld_move_cursor(1, 0)
+        movement = movement_delta_for_key(key)
+        if movement:
+            self.overworld_move_cursor(*movement)
         elif key in ["u", "z", "e", "\r", "\n", " "]:
             self.overworld_enter_selected_chunk()
         elif key == "r":
@@ -9398,7 +11223,7 @@ class FarmGame(
         elif key in ["\x1b", "c", "q", "\t"]:
             self.cancel_wilderness_overworld()
         else:
-            self.set_message("Overworld map: WASD move cursor, U/Z/Enter enter, Esc/C/Q/Tab cancel, R return to town.")
+            self.set_message("Overworld map: WASD/numpad move cursor, U/Z/Enter enter, Esc/C/Q/Tab cancel, R return to town.")
 
     def active_map(self) -> List[List[str]]:
         if self.state.location == "Town":
@@ -9413,6 +11238,10 @@ class FarmGame(
             return self.get_wilderness_cave_map()
         if self.state.location == "WildernessDungeon":
             return self.get_wilderness_dungeon_map()
+        if self.state.location == "WildernessOutpost":
+            return self.wilderness_outpost_map()
+        if self.state.location == "WildernessStructure":
+            return self.wilderness_structure_map()
         if self.state.location == "WildernessOverworld":
             return [["." for _ in range(VIEW_WIDTH)] for _ in range(VIEW_HEIGHT)]
         if self.state.location == PROCEDURAL_TOWN_INTERIOR_LOCATION:
@@ -9443,6 +11272,8 @@ class FarmGame(
             return self.market_row_map
         if self.state.location == "MuseumInterior":
             return self.museum_interior_map
+        if self.state.location == "TownResidenceInterior":
+            return self.authored_town_residence_map()
         return self.base_map
 
     def active_map_width(self) -> int:
@@ -9492,6 +11323,12 @@ class FarmGame(
     def on_wilderness_dungeon(self) -> bool:
         return self.state.location == "WildernessDungeon"
 
+    def on_wilderness_outpost(self) -> bool:
+        return self.state.location == "WildernessOutpost"
+
+    def on_wilderness_structure(self) -> bool:
+        return self.state.location == "WildernessStructure"
+
     def on_house(self) -> bool:
         return self.state.location == "HouseInterior"
 
@@ -9523,9 +11360,17 @@ class FarmGame(
         return self.on_general_store() or self.on_blacksmith_interior() or self.on_furniture_store() or self.on_carpenter_store()
 
     def on_town_interior(self) -> bool:
-        return self.state.location in set(TOWN_INTERIOR_LOCATION_BY_NAME.values())
+        return self.state.location in set(TOWN_INTERIOR_LOCATION_BY_NAME.values()) | {"TownResidenceInterior"}
+
+    def on_authored_town_residence(self) -> bool:
+        return self.state.location == "TownResidenceInterior"
 
     def location_label(self) -> str:
+        if self.on_authored_town_residence():
+            residence = AUTHORED_TOWN_RESIDENCE_DATA.get(
+                str(self.state.current_authored_residence_id), {}
+            )
+            return str(residence.get("label", "Town Residence"))
         if self.on_procedural_town_interior():
             building = self.current_procedural_town_building()
             plan = self.current_procedural_town_plan()
@@ -9557,7 +11402,11 @@ class FarmGame(
             "Mine": "Mine",
             "Wilderness": f"Wilderness ({self.state.wilderness_chunk_x},{self.state.wilderness_chunk_y})",
             "WildernessCave": "Wilderness Cave",
-            "WildernessDungeon": self.dungeon_name_for_key(str(self.state.current_dungeon_key or "")),
+            "WildernessDungeon": (
+                f"{self.dungeon_name_for_key(str(self.state.current_dungeon_key or ''))} — "
+                f"Floor {self.state.current_dungeon_floor}/"
+                f"{self.dungeon_max_floor_for_key(str(self.state.current_dungeon_key or ''))}"
+            ),
             "WildernessOverworld": f"Wilderness Overworld ({self.state.overworld_cursor_chunk_x},{self.state.overworld_cursor_chunk_y})",
             "HouseInterior": "Farmhouse",
             "GeneralStoreInterior": "General Store",
@@ -9592,14 +11441,18 @@ class FarmGame(
         self.autosave_with_message("You returned to the farm from town.")
 
     def transition_to_wilderness(self):
-        """Enter the origin wilderness chunk from the north side of town."""
+        """Leave the authored town through its physical origin-world gateway."""
         append_debug_log("transition_to_wilderness: begin")
         try:
             self.ensure_wilderness_chunks()
             self.state.location = "Wilderness"
             self.set_wilderness_chunk(0, 0, entry_side="center")
+            gate_x, gate_y = self.origin_world_gateway_positions()["town"]
+            self.state.player_x = gate_x
+            self.state.player_y = max(0, gate_y - 1)
+            self.state.facing = "UP"
             append_debug_log(f"transition_to_wilderness: success chunk=(0,0) size={self.active_map_width()}x{self.active_map_height()}")
-            self.autosave_with_message("You walked north into the wilderness origin. Walk off map edges to explore new chunks. Press R for emergency return.")
+            self.autosave_with_message("You leave town through its north road and enter the surrounding origin region.")
         except Exception as exc:
             append_debug_log(f"transition_to_wilderness: FAILED {type(exc).__name__}: {exc}")
             write_debug_report(self, exc, "transition_to_wilderness")
@@ -9610,7 +11463,11 @@ class FarmGame(
             self.set_message(f"Wilderness failed to load. Debug report: {CRASH_REPORT_PATH.name}")
 
     def return_from_wilderness_to_town(self, emergency: bool = False):
+        if self.wilderness_field_combat_active():
+            self.state.mine_combat_flees += 1
+            self.wilderness_field_combat_record()["active"] = False
         self.ensure_wilderness_chunks()
+        self.state.wilderness_boating = False
         self.state.location = "Town"
         self.state.wilderness_chunk_x = 0
         self.state.wilderness_chunk_y = 0
@@ -9624,7 +11481,10 @@ class FarmGame(
         else:
             self.autosave_with_message("You returned south to town.")
 
-    def transition_to_mine(self):
+    def transition_to_mine(self, return_location: Optional[str] = None):
+        if return_location is None:
+            return_location = "WildernessOrigin" if self.on_wilderness() else "Farm"
+        self.state.mine_return_location = str(return_location)
         self.state.location = "Mine"
         self.state.mine_floor = 1
         self.mine_map = self.get_mine_floor_map(1)
@@ -9635,6 +11495,16 @@ class FarmGame(
         self.autosave_with_message(f"You entered mine floor 1. {self.mine_floor_status_sentence(1)}")
 
     def transition_from_mine_to_farm(self):
+        if str(getattr(self.state, "mine_return_location", "Farm")) == "WildernessOrigin":
+            self.state.location = "Wilderness"
+            self.state.mine_floor = 1
+            self.set_wilderness_chunk(0, 0, entry_side="center")
+            gate_x, gate_y = self.origin_world_gateway_positions()["mine"]
+            self.state.player_x = gate_x
+            self.state.player_y = min(self.active_map_height() - 1, gate_y + 1)
+            self.state.facing = "DOWN"
+            self.autosave_with_message("You step out of the mine onto the home road.")
+            return
         self.state.location = "Farm"
         self.state.mine_floor = 1
         self.state.player_x = 27
@@ -9668,6 +11538,38 @@ class FarmGame(
                     if self.in_active_bounds(nx, ny) and self.passable(nx, ny):
                         return nx, ny
         return max(1, min(self.active_map_width() - 2, x)), max(1, min(self.active_map_height() - 2, y))
+
+    def enter_authored_town_residence(self, residence_id: str) -> bool:
+        residence_id = str(residence_id)
+        residence = AUTHORED_TOWN_RESIDENCE_DATA.get(residence_id)
+        if not residence:
+            self.set_message("That residence is not available.")
+            return False
+        self.state.current_authored_residence_id = residence_id
+        self.state.location = "TownResidenceInterior"
+        self.state.player_x, self.state.player_y = self.nearest_active_passable_tile(27, 18)
+        self.state.facing = "UP"
+        self.update_town_npcs(force_reanchor=True)
+        self.set_message(f"You entered {residence.get('label', 'the residence')}.")
+        return True
+
+    def exit_authored_town_residence(self):
+        residence_id = str(self.state.current_authored_residence_id)
+        residence = AUTHORED_TOWN_RESIDENCE_DATA.get(residence_id, {})
+        door_x, door_y = residence.get("door", (57, 43))
+        self.state.location = "Town"
+        self.state.player_x, self.state.player_y = int(door_x), int(door_y) + 1
+        self.state.facing = "DOWN"
+        self.update_town_npcs(force_reanchor=True)
+        self.set_message(f"You stepped out of {residence.get('label', 'the residence')}.")
+
+    def use_authored_town_residence_action(self, x: int, y: int):
+        tile = self.active_map()[y][x] if self.in_active_bounds(x, y) else "#"
+        if tile == "D":
+            self.exit_authored_town_residence()
+            return
+        description = self.town_interior_tile_description(x, y)
+        self.set_message(description or "Nothing here needs your attention.")
 
     def enter_town_interior(self, location: str, message: str) -> bool:
         building_id = town_building_id_for_location(location)
@@ -10815,15 +12717,15 @@ class FarmGame(
                     # Leave open ground if player already used it, but not as a transition.
                     pass
 
-        # Add west farm gate.
+        # Replace legacy compass-letter gates with visible road openings.
         for y in range(8, 13):
-            self.base_map[y][0] = "E"
+            self.base_map[y][0] = ":"
             self.base_map[y][1] = "."
             self.base_map[y][2] = "."
 
-        # Add north mine entrance.
+        # The north mine entrance uses the established stair/entrance mark.
         for x in range(25, 30):
-            self.base_map[0][x] = "N"
+            self.base_map[0][x] = "<"
             self.base_map[1][x] = "."
             self.base_map[2][x] = "."
 
@@ -10847,11 +12749,18 @@ class FarmGame(
                 if self.town_map[HEIGHT - 2][x] == "=":
                     self.town_map[HEIGHT - 2][x] = "."
 
-        # Add east town exit and road connection.
+        # Retire the old half-width east gate. The expanded town's real farm
+        # boulevard is at its far eastern edge, not in the middle of town.
         for y in range(9, 13):
-            self.town_map[y][WIDTH - 1] = "E"
-            self.town_map[y][WIDTH - 2] = "="
-            self.town_map[y][WIDTH - 3] = "="
+            if self.town_map[y][WIDTH - 1] == "E":
+                self.town_map[y][WIDTH - 1] = ":"
+
+        # Keep the real farm boulevard visibly open without compass-letter
+        # transition markers. Walking through the boundary performs the move.
+        for y in range(18, 23):
+            self.town_map[y][TOWN_WIDTH - 1] = ":"
+            self.town_map[y][TOWN_WIDTH - 2] = "="
+            self.town_map[y][TOWN_WIDTH - 3] = "="
 
         # Remove old farm shop footprint; the shop is now in town.
         for y in range(2, 5):
@@ -10878,15 +12787,19 @@ class FarmGame(
         self.town_map[7][8] = "D"
         self.town_map[8][8] = ":"
 
-        # Ensure north wilderness road exists on old town saves.
+        # Remove the obsolete north gate from the original half-width town.
         for xx in range(25, 30):
-            self.town_map[0][xx] = "W"
-            self.town_map[1][xx] = "W"
-            self.town_map[2][xx] = ":"
-        for yy in range(1, 4):
-            self.town_map[yy][27] = ":" if yy != 3 else "?"
-        self.town_map[0][27] = "W"
-        self.town_map[1][27] = "W"
+            if self.town_map[0][xx] == "W":
+                self.town_map[0][xx] = "#"
+            if self.town_map[1][xx] == "W":
+                self.town_map[1][xx] = "."
+
+        # Ensure the expanded town's true north wilderness road exists on old
+        # saves. Its open edge is itself the transition, so no W marker is used.
+        for xx in range(56, 60):
+            self.town_map[0][xx] = ":"
+            self.town_map[1][xx] = "="
+            self.town_map[2][xx] = "="
 
         if not hasattr(self, "wilderness_map") or not isinstance(self.wilderness_map, list):
             self.wilderness_map = self.make_wilderness_map(self.state.wilderness_seed)
@@ -11026,8 +12939,19 @@ class FarmGame(
         }
         return colorize(facing_symbols.get(self.state.facing, "@"), color)
 
+    def object_storage_position(self, x: int, y: int) -> Tuple[int, int]:
+        if (
+            hasattr(self, "on_player_owned_procedural_residence")
+            and self.on_player_owned_procedural_residence()
+        ):
+            building = self.current_procedural_town_building()
+            if building:
+                return self.procedural_town_display_to_source_position(x, y, building)
+        return int(x), int(y)
+
     def obj_key(self, x: int, y: int) -> str:
-        return f"{self.current_object_location_key()}:{x},{y}"
+        storage_x, storage_y = self.object_storage_position(x, y)
+        return f"{self.current_object_location_key()}:{storage_x},{storage_y}"
 
     def object_footprint_size(self, obj_name: str) -> Tuple[int, int]:
         data = INFRASTRUCTURE_DATA.get(obj_name, {})
@@ -11056,6 +12980,9 @@ class FarmGame(
 
     def placed_object_at(self, x: int, y: int) -> Tuple[Optional[str], Optional[str], Optional[int], Optional[int]]:
         """Return anchor key, object name, anchor x, anchor y for the object covering this tile."""
+        frame_lookup = getattr(self, "_frame_placed_object_lookup", None)
+        if isinstance(frame_lookup, dict):
+            return frame_lookup.get((int(x), int(y)), (None, None, None, None))
         direct_key = self.obj_key(x, y)
         if direct_key in self.state.placed_objects:
             return direct_key, self.state.placed_objects[direct_key], x, y
@@ -11063,6 +12990,12 @@ class FarmGame(
             return f"{x},{y}", self.state.placed_objects[f"{x},{y}"], x, y
 
         current_location = self.current_object_location_key()
+        residence_building = (
+            self.current_procedural_town_building()
+            if hasattr(self, "on_player_owned_procedural_residence")
+            and self.on_player_owned_procedural_residence()
+            else None
+        )
         for key, obj_name in list(self.state.placed_objects.items()):
             parsed = self.parse_object_key(key)
             if not parsed:
@@ -11070,9 +13003,53 @@ class FarmGame(
             location, ax, ay = parsed
             if location != current_location:
                 continue
-            if (x, y) in self.object_footprint_tiles(obj_name, ax, ay):
+            footprint = self.object_footprint_tiles(obj_name, ax, ay)
+            if residence_building:
+                source_w, source_h = self.procedural_town_interior_source_dimensions(residence_building)
+                side = self.procedural_town_building_door_side(residence_building)
+                display_footprint = {
+                    self.procedural_town_orient_position(px, py, source_w, source_h, side)
+                    for px, py in footprint
+                }
+                if (x, y) in display_footprint:
+                    display_ax, display_ay = self.procedural_town_orient_position(ax, ay, source_w, source_h, side)
+                    return key, obj_name, display_ax, display_ay
+            elif (x, y) in footprint:
                 return key, obj_name, ax, ay
         return None, None, None, None
+
+    def build_frame_placed_object_lookup(self) -> Dict[Tuple[int, int], Tuple[str, str, int, int]]:
+        """Index visible object footprints once instead of rescanning them per tile."""
+        lookup: Dict[Tuple[int, int], Tuple[str, str, int, int]] = {}
+        current_location = self.current_object_location_key()
+        residence_building = (
+            self.current_procedural_town_building()
+            if hasattr(self, "on_player_owned_procedural_residence")
+            and self.on_player_owned_procedural_residence()
+            else None
+        )
+        for key, obj_name in list(self.state.placed_objects.items()):
+            parsed = self.parse_object_key(key)
+            if not parsed:
+                continue
+            location, ax, ay = parsed
+            if location != current_location:
+                continue
+            footprint = self.object_footprint_tiles(obj_name, ax, ay)
+            if residence_building:
+                source_w, source_h = self.procedural_town_interior_source_dimensions(residence_building)
+                side = self.procedural_town_building_door_side(residence_building)
+                display_ax, display_ay = self.procedural_town_orient_position(ax, ay, source_w, source_h, side)
+                positions = [
+                    self.procedural_town_orient_position(px, py, source_w, source_h, side)
+                    for px, py in footprint
+                ]
+            else:
+                display_ax, display_ay = int(ax), int(ay)
+                positions = [(int(px), int(py)) for px, py in footprint]
+            for position in positions:
+                lookup.setdefault(position, (str(key), str(obj_name), display_ax, display_ay))
+        return lookup
 
     def get_placed_object(self, x: int, y: int) -> Optional[str]:
         _key, obj_name, _ax, _ay = self.placed_object_at(x, y)
@@ -11166,6 +13143,44 @@ class FarmGame(
         data = INFRASTRUCTURE_DATA.get(obj_name, {})
         symbol = data.get("symbol", "*")
         category = data.get("category", "infrastructure")
+        if obj_name in {"Fence", "Stone Path", "Pipe Segment"} and x is not None and y is not None:
+            def direct_object_at(nx: int, ny: int) -> str:
+                name = str(self.state.placed_objects.get(self.obj_key(nx, ny), "") or "")
+                if not name and self.on_farm():
+                    name = str(self.state.placed_objects.get(f"{int(nx)},{int(ny)}", "") or "")
+                return name
+
+            glyph = connected_network_glyph(
+                direct_object_at(int(x), int(y) - 1) == obj_name,
+                direct_object_at(int(x) + 1, int(y)) == obj_name,
+                direct_object_at(int(x), int(y) + 1) == obj_name,
+                direct_object_at(int(x) - 1, int(y)) == obj_name,
+                bool(getattr(self.state, "detailed_glyphs_enabled", True)),
+                str(symbol)[:1],
+            )
+            network_color = {
+                "Fence": C.WOOD,
+                "Stone Path": C.PATH,
+                "Pipe Segment": C.WATER,
+            }[obj_name]
+            if bool(getattr(self.state, "high_contrast_enabled", False)):
+                network_color = C.SERVICE
+            return colorize(glyph, network_color)
+        if category == "building" and x is not None and y is not None and ax is not None and ay is not None:
+            width, height = self.object_footprint_size(obj_name)
+            structure = farm_structure_surface(
+                obj_name,
+                width,
+                height,
+                int(x) - int(ax),
+                int(y) - int(ay),
+                bool(getattr(self.state, "detailed_glyphs_enabled", True)),
+                int(getattr(self, "_ambient_visual_phase", 0)),
+                int(x) * 31 + int(y) * 17,
+                bool(getattr(self.state, "high_contrast_enabled", False)),
+            )
+            if structure:
+                return colorize(*structure)
         if category == "storage":
             return colorize(symbol, C.WOOD)
         if category == "automation":
@@ -11338,8 +13353,10 @@ class FarmGame(
         x: int,
         y: int,
         tile_map: Optional[List[List[str]]] = None,
+        world_x: Optional[int] = None,
+        world_y: Optional[int] = None,
     ) -> Optional[str]:
-        """Sparse precipitation overlay for rainy/snowy weather."""
+        """Sparse, stable precipitation overlay for outdoor map tiles."""
         if self.location_is_weather_sheltered():
             return None
         weather = self.state.weather
@@ -11348,17 +13365,64 @@ class FarmGame(
 
         if self.on_farm_work_land() and self.get_placed_object(x, y):
             return None
+        if self.on_farm_work_land() and self.get_crop(x, y):
+            return None
 
         tile_map = tile_map if tile_map is not None else self.active_map()
         base_tile = tile_map[y][x]
-        if not tile_outdoors(base_tile):
+        if not tile_outdoors(base_tile) or not weather_overlay_allowed(base_tile):
             return None
 
-        # Keep precipitation sparse enough that the terrain remains readable.
-        if random.random() >= precipitation_density(weather):
-            return None
+        # Wilderness precipitation is a world-space field. It therefore covers
+        # neighboring streamed chunks and remains stable across redraws instead
+        # of changing according to render order.
+        if self.on_wilderness():
+            if world_x is None or world_y is None:
+                world_x, world_y = self.wilderness_world_coords(
+                    int(self.state.wilderness_chunk_x),
+                    int(self.state.wilderness_chunk_y),
+                    int(x),
+                    int(y),
+                )
+            calendar_phase = (
+                int(getattr(self.state, "year", 1)) * 70000
+                + int(getattr(self.state, "day", 1)) * 1900
+                + int(getattr(self.state, "hour", 6)) * 60
+                + int(getattr(self.state, "minute", 0))
+            )
+            phase = calendar_phase + int(getattr(self, "_weather_visual_phase", 0))
+            weather_roll = self.wilderness_hash01(
+                int(world_x) + phase * 3,
+                int(world_y) - phase * 2,
+                12051,
+            )
+            if weather_roll >= precipitation_density(weather):
+                return None
+            weather_symbols = weather_glyphs(weather)
+            symbol_roll = self.wilderness_hash01(
+                int(world_x) - phase,
+                int(world_y) + phase,
+                12052,
+            )
+            symbol_index = min(len(weather_symbols) - 1, int(symbol_roll * len(weather_symbols)))
+            depth_roll = self.wilderness_hash01(
+                int(world_x) + phase,
+                int(world_y) - phase,
+                12053,
+            )
+        else:
+            # Stable screen-space precipitation prevents random pop-in on every
+            # redraw while the visual phase still makes the field move.
+            phase = int(getattr(self, "_weather_visual_phase", 0))
+            roll = ((int(x) * 92821 + int(y) * 68917 + phase * 31337) & 0xFFFF) / 65535.0
+            if roll >= precipitation_density(weather):
+                return None
+            symbols = weather_glyphs(weather)
+            symbol_index = (int(x) * 7 + int(y) * 11 + phase) % len(symbols)
+            depth_roll = ((int(x) * 31337 + int(y) * 7919 + phase * 1543) & 0xFFFF) / 65535.0
 
-        return colorize(precipitation_symbol(weather), precipitation_color(weather))
+        symbol, color = weather_overlay_style(weather, symbol_index, depth_roll)
+        return colorize(symbol, color)
 
     def location_is_weather_sheltered(self) -> bool:
         return bool(
@@ -11368,6 +13432,8 @@ class FarmGame(
             or self.on_procedural_town_interior()
             or self.on_wilderness_cave()
             or self.on_wilderness_dungeon()
+            or self.on_wilderness_outpost()
+            or self.on_wilderness_structure()
         )
 
     def visible_weather_label(self) -> str:
@@ -11405,6 +13471,27 @@ class FarmGame(
                     return True
         return False
 
+    def town_streetlamp_lit_tile_lookup(self, radius: int = 5) -> Set[Tuple[int, int]]:
+        """Build the town's lamp-lit area once for a complete rendered frame."""
+        radius = max(0, int(radius))
+        lit_tiles: Set[Tuple[int, int]] = set()
+        town = self.town_map
+        for lamp_y, row in enumerate(town):
+            for lamp_x, tile in enumerate(row):
+                if tile != "!":
+                    continue
+                for dy in range(-radius, radius + 1):
+                    remaining = radius - abs(dy)
+                    y = lamp_y + dy
+                    if not (0 <= y < len(town)):
+                        continue
+                    for x in range(
+                        max(0, lamp_x - remaining),
+                        min(len(row), lamp_x + remaining + 1),
+                    ):
+                        lit_tiles.add((x, y))
+        return lit_tiles
+
     def town_lamp_count(self) -> int:
         return sum(row.count("!") for row in self.town_map)
 
@@ -11427,19 +13514,69 @@ class FarmGame(
         ]
 
     def night_lighting_color_for_tile(self, tile: str, x: int, y: int, base_color: str) -> str:
-        if not self.on_town() or not self.is_night_time():
-            if self.on_town() and self.is_dusk_time() and tile in [".", ",", "=", ":"]:
-                return C.DIM
+        if self.location_is_weather_sheltered():
             return base_color
-        if tile == "!":
-            return C.LAMP
-        if self.tile_is_near_streetlamp(x, y):
-            if tile in [".", ",", "=", ":", "?", "B", "D", "b", "m", "$", "F"]:
-                return C.LIT
-            return base_color
-        if tile in [".", ",", "=", ":", "T", "F", "b", "?", "m", "$"]:
-            return C.NIGHT
-        return base_color
+        lit = bool(tile in {"!", "H", "f"})
+        if self.on_town() and self.tile_is_near_streetlamp(x, y):
+            lit = True
+        return outdoor_time_color(
+            base_color,
+            int(getattr(self.state, "hour", 12)),
+            lit=lit,
+            ambient=bool(getattr(self.state, "ambient_visuals_enabled", True)),
+        )
+
+    def architectural_display_tile(
+        self,
+        tile_map: List[List[str]],
+        x: int,
+        y: int,
+        allow_windows: bool = False,
+        visual_key: Optional[int] = None,
+    ) -> str:
+        """Return presentation-only architecture for a stored map cell."""
+        tile = str(tile_map[int(y)][int(x)] or " ")[:1]
+        if tile != "#":
+            return tile
+        detailed = bool(getattr(self.state, "detailed_glyphs_enabled", True))
+        key = int(x) * 31 + int(y) * 17 if visual_key is None else int(visual_key)
+        if allow_windows and exterior_window_at(tile_map, x, y, key, detailed):
+            return "o"
+        return architectural_wall_glyph(tile_map, x, y, detailed)
+
+    def render_interior_visual_tile(
+        self,
+        tile_map: List[List[str]],
+        x: int,
+        y: int,
+        context: str,
+        override_color: str = "",
+    ) -> str:
+        """Render shaped walls and local light while retaining raw map data."""
+        tile = str(tile_map[int(y)][int(x)] or " ")[:1]
+        display_tile = self.architectural_display_tile(tile_map, x, y)
+        ambient = bool(getattr(self.state, "ambient_visuals_enabled", True))
+        high_contrast = bool(getattr(self.state, "high_contrast_enabled", False))
+        color = override_color or interior_tile_color(
+            tile,
+            context,
+            int(getattr(self, "_ambient_visual_phase", 0)),
+            int(x) * 31 + int(y) * 17,
+            ambient,
+            high_contrast,
+        )
+        hour = int(getattr(self.state, "hour", 12)) % 24
+        if ambient and not high_contrast and tile in {".", ":", ","} and not (7 <= hour < 19):
+            light_cache = getattr(self, "_interior_light_position_cache", None)
+            if not isinstance(light_cache, dict):
+                light_cache = {}
+                self._interior_light_position_cache = light_cache
+            cache_key = (id(tile_map), 4)
+            if cache_key not in light_cache:
+                light_cache[cache_key] = interior_light_positions(tile_map, 4)
+            if (int(x), int(y)) in light_cache[cache_key]:
+                color = C.LIT
+        return colorize(display_tile, color)
 
     def render_tile(
         self,
@@ -11451,26 +13588,53 @@ class FarmGame(
         ] = None,
         procedural_town_active: Optional[bool] = None,
         procedural_town_color_lookup: Optional[Dict[Tuple[int, int], str]] = None,
+        player_owned_residence: Optional[bool] = None,
+        town_public_event_lookup: Optional[
+            Dict[Tuple[int, int], Dict[str, object]]
+        ] = None,
+        town_streetlamp_lit_tiles: Optional[Set[Tuple[int, int]]] = None,
+        unlocked_town_buildings: Optional[Set[str]] = None,
     ) -> str:
         """Return a one-character tile with location/season-aware color applied."""
         tile_map = tile_map if tile_map is not None else self.active_map()
+        visual_key = int(x) * 31 + int(y) * 17
+        if self.on_wilderness():
+            visual_world_x, visual_world_y = self.wilderness_world_coords(
+                int(self.state.wilderness_chunk_x), int(self.state.wilderness_chunk_y),
+                int(x), int(y),
+            )
+            visual_key = int(visual_world_x) * 31 + int(visual_world_y) * 17
 
-        if (
-            self.on_farm_work_land()
-            or self.on_house()
-            or (
+        if player_owned_residence is None:
+            player_owned_residence = bool(
                 hasattr(self, "on_player_owned_procedural_residence")
                 and self.on_player_owned_procedural_residence()
             )
-        ):
+        if self.on_farm_work_land() or self.on_house() or player_owned_residence:
             _key, placed, ax, ay = self.placed_object_at(x, y)
             if placed:
                 return self.render_placed_object(placed, x, y, ax, ay)
+        if self.dropped_pack_at(x, y):
+            return colorize("*", C.CROP_READY)
 
         if self.on_farm_work_land():
             crop = self.get_crop(x, y)
             if crop:
                 return self.render_crop(crop)
+        if self.on_wilderness():
+            encounter_visual = self.wilderness_random_combat_visual_at(x, y)
+            if encounter_visual:
+                return colorize(str(encounter_visual.get("symbol", "!"))[:1], C.HOSTILE)
+        if (self.on_wilderness_dungeon() or self.on_wilderness()) and self.dungeon_floor_loot_at(x, y):
+            return colorize("*", C.CROP_READY)
+        if self.on_wilderness_dungeon() and tile_map[y][x] == "+":
+            return self.render_dungeon_door(x, y)
+        if self.on_wilderness_dungeon() and tile_map[y][x] == "!":
+            return self.render_dungeon_trap(x, y)
+        if self.map_native_combat_active():
+            skill_zone = self.render_dungeon_skill_zone(x, y)
+            if skill_zone is not None:
+                return skill_zone
 
         if procedural_town_active is None:
             procedural_town_active = bool(
@@ -11494,6 +13658,79 @@ class FarmGame(
                     overlay_colors.get(str(civic_overlay.get("kind", "")), C.PLACEMENT),
                 )
 
+        if self.on_wilderness():
+            wilderness_ground = self.active_map()[y][x]
+            if wilderness_ground in {"`", '"', "["}:
+                return colorize(
+                    wilderness_ground,
+                    wilderness_tile_color(
+                        wilderness_ground,
+                        self.state.season,
+                        int(getattr(self, "_ambient_visual_phase", 0)),
+                        visual_key,
+                        bool(getattr(self.state, "ambient_visuals_enabled", True)),
+                        bool(getattr(self.state, "high_contrast_enabled", False)),
+                        str(getattr(self.state, "weather", "")),
+                    ),
+                )
+            consequence_kind = self.wilderness_vitality_consequence_at(x, y)
+            if consequence_kind:
+                consequence_style = wilderness_landmark_style(
+                    self.active_map()[y][x],
+                    detailed=bool(getattr(self.state, "detailed_glyphs_enabled", True)),
+                    high_contrast=bool(getattr(self.state, "high_contrast_enabled", False)),
+                )
+                if consequence_style:
+                    return colorize(*consequence_style)
+            hinterland = self.procedural_town_hinterland_at(x, y)
+            if hinterland:
+                hinterland_colors = {"quarry": C.STONE, "fishery": C.WATER, "woodlot": C.WOOD, "reed_croft": C.WATER, "herding_station": C.SNOW}
+                return colorize(str(hinterland.get("symbol", "h"))[:1], hinterland_colors.get(str(hinterland.get("type_id", "")), C.CROP_READY))
+            maritime = self.wilderness_maritime_encounter_at(x, y)
+            if maritime:
+                return colorize(str(maritime.get("symbol", "?"))[:1], C.CROP_READY)
+            if self.wilderness_water_salvage_at(x, y):
+                return colorize("z", C.CROP_READY)
+            island_site = self.wilderness_island_site_at(x, y)
+            if island_site:
+                return colorize(str(island_site.get("symbol", "I"))[:1], C.WOOD)
+            if self.wilderness_expedition_camp_visual_at(x, y):
+                camp_style = wilderness_landmark_style(
+                    "R",
+                    detailed=bool(getattr(self.state, "detailed_glyphs_enabled", True)),
+                    high_contrast=bool(getattr(self.state, "high_contrast_enabled", False)),
+                )
+                return colorize(*(camp_style or ("R", C.ACTOR_RANGER)))
+            expedition_objective = self.wilderness_expedition_objective_visual_at(x, y)
+            if expedition_objective:
+                return colorize("+" if expedition_objective.get("surveyed") else str(expedition_objective.get("symbol", "?"))[:1], C.DIM if expedition_objective.get("surveyed") else C.CROP_READY)
+            event_visual = self.wilderness_event_visual_at(x, y)
+            if event_visual:
+                event_colors = {"crop": C.CROP_READY, "wood": C.WOOD, "magic": C.BIN, "water": C.WATER, "stone": C.STONE}
+                return colorize(str(event_visual.get("symbol", "'"))[:1], event_colors.get(str(event_visual.get("color", "crop")), C.CROP_READY))
+            frame_seasonal_lookup = getattr(self, "_frame_wilderness_seasonal_surface_lookup", None)
+            seasonal_surface = (
+                frame_seasonal_lookup.get((int(x), int(y)), {})
+                if isinstance(frame_seasonal_lookup, dict)
+                else self.wilderness_seasonal_surface_at(x, y)
+            )
+            if seasonal_surface:
+                seasonal_colors = {"crop": C.CROP_READY, "wood": C.WOOD, "water": C.SNOW, "stone": C.STONE}
+                return colorize(
+                    str(seasonal_surface.get("symbol", "'"))[:1],
+                    seasonal_colors.get(str(seasonal_surface.get("color", "crop")), C.CROP_READY),
+                )
+        if self.on_town():
+            public_feature = (
+                town_public_event_lookup.get((int(x), int(y)), {})
+                if town_public_event_lookup is not None
+                else self.town_public_event_feature_at(x, y)
+            )
+            if public_feature:
+                return colorize(
+                    str(public_feature.get("symbol", "*"))[:1],
+                    str(public_feature.get("color", C.CROP_READY)),
+                )
         tile = tile_map[y][x]
         if self.on_wilderness() and tile == RECLAIMED_STRONGHOLD_BUILD_BOARD_SYMBOL:
             return colorize(tile, C.SHOP)
@@ -11509,34 +13746,34 @@ class FarmGame(
         if self.on_wilderness() and tile == "!":
             record = self.wilderness_stronghold_record(create=False)
             return colorize(tile, C.CROP_READY if record.get("cleared") else C.HOSTILE)
+        if self.on_wilderness() and tile == PROCEDURAL_TOWN_DOOR_SYMBOL:
+            building = self.procedural_town_building_door_at(x, y)
+            if building:
+                return colorize(tile, C.WOOD if self.procedural_town_building_is_open(building) else C.DIM)
+        if self.on_wilderness():
+            landmark_kind = (
+                str(self.wilderness_landscape_record().get("type_id", ""))
+                if tile == WILDERNESS_LANDSCAPE_SYMBOL
+                else ""
+            )
+            display_tile = (
+                self.architectural_display_tile(
+                    tile_map, x, y, allow_windows=True, visual_key=visual_key,
+                )
+                if tile == "#" and (
+                    procedural_town_active
+                    or (int(self.state.wilderness_chunk_x), int(self.state.wilderness_chunk_y)) == (0, 0)
+                )
+                else None
+            )
+            return self.render_streamed_wilderness_raw_tile(
+                tile,
+                visual_key,
+                display_tile,
+                landmark_kind,
+                tile == "~" and self.wilderness_water_is_frozen_at(x, y),
+            )
         if self.on_procedural_town_interior():
-            interior_colors = {
-                ".": C.SNOW,
-                "#": C.WALL,
-                "D": C.WOOD,
-                "&": C.SHOP,
-                "$": C.SHOP,
-                "+": C.GRASS,
-                "l": C.SNOW,
-                "w": C.WOOD,
-                "x": C.STONE,
-                "a": C.WOOD,
-                "b": C.PLAYER,
-                "t": C.WOOD,
-                "c": C.WOOD,
-                "s": C.STONE,
-                "f": C.LAMP,
-                "P": C.WATER,
-                "d": C.WOOD,
-                "-": C.STONE,
-                "|": C.WOOD,
-                "_": C.WOOD,
-                "p": C.GRASS,
-                ",": C.CROP_READY,
-                "<": C.LAMP,
-                "U": C.LAMP,
-                ">": C.LAMP,
-            }
             custom_color_key = (
                 procedural_town_color_lookup.get((int(x), int(y)), "")
                 if procedural_town_color_lookup is not None
@@ -11558,71 +13795,111 @@ class FarmGame(
                 "gray": C.STONE,
             }
             if custom_color_key in custom_colors:
-                return colorize(tile, custom_colors[custom_color_key])
-            return colorize(tile, interior_colors.get(tile, C.WOOD))
+                return self.render_interior_visual_tile(tile_map, x, y, "public", custom_colors[custom_color_key])
+            return self.render_interior_visual_tile(tile_map, x, y, "public")
+        if self.on_wilderness_outpost():
+            return self.render_interior_visual_tile(tile_map, x, y, "outpost")
+        if self.on_wilderness_structure():
+            return self.render_interior_visual_tile(tile_map, x, y, "structure")
         if self.on_house():
-            house_colors = {
-                ".": C.WOOD,
-                ":": C.DIM,
-                ",": C.HOUSE,
-                "#": C.WALL,
-                "D": C.WOOD,
-                " ": C.WALL,
-            }
-            return colorize(tile, house_colors.get(tile, C.WOOD))
+            return self.render_interior_visual_tile(tile_map, x, y, "home")
         if self.on_town_interior():
-            interior_colors = {
-                ".": C.WOOD,
-                ":": C.DIM,
-                ",": C.HOUSE,
-                "#": C.WALL,
-                " ": C.WALL,
-                "D": C.WOOD,
-                "$": C.SHOP,
-                "&": C.CROP_READY,
-                "g": C.SHOP,
-                "x": C.STONE,
-                "n": C.SHOP,
-                "s": C.WOOD,
-                "f": C.CROP_READY,
-                "b": C.WOOD,
-                "t": C.WOOD,
-                "P": C.SHOP,
-                "a": C.STONE,
-                "o": C.STONE,
-                "q": C.DIM,
-                "w": C.WATER,
-                "l": C.SNOW,
-                "A": C.PLACEMENT,
-                "c": C.WOOD,
-                "d": C.WOOD,
-                "F": C.WATER,
-                "r": C.CROP_READY,
-                "B": C.PLAYER,
-                "k": C.CROP_READY,
-                "p": C.GRASS,
-                "h": C.WOOD,
-                "T": C.WOOD,
-                "L": C.SNOW,
-                "-": C.CROP_READY,
-                "U": C.WOOD,
-                "!": C.LAMP,
-                "m": C.WATER,
-                "C": C.WATER,
-                "e": C.STONE,
-                "G": C.CROP_READY,
-                "M": C.STONE,
-                "E": C.CROP_READY,
-                "S": C.CROP_READY,
-                "v": C.CROP_MID,
-            }
-            return colorize(tile, interior_colors.get(tile, C.WOOD))
+            return self.render_interior_visual_tile(tile_map, x, y, "public")
+        if self.on_town():
+            building_surface = town_building_surface(
+                tile_map,
+                x,
+                y,
+                bool(getattr(self.state, "detailed_glyphs_enabled", True)),
+                visual_key,
+                bool(getattr(self.state, "high_contrast_enabled", False)),
+            )
+            if building_surface:
+                building_glyph, building_color = building_surface
+                building_id = self.town_building_id_at(x, y)
+                building_unlocked = bool(
+                    not building_id
+                    or (
+                        building_id in unlocked_town_buildings
+                        if unlocked_town_buildings is not None
+                        else self.is_town_building_unlocked(building_id)
+                    )
+                )
+                if not building_unlocked:
+                    if building_glyph == "o":
+                        building_glyph = "\u2593"
+                    building_color = C.DIM + building_color
+                building_color = outdoor_time_color(
+                    building_color,
+                    int(getattr(self.state, "hour", 12)),
+                    lit=building_glyph == "o" and building_unlocked,
+                    ambient=bool(getattr(self.state, "ambient_visuals_enabled", True)) and building_unlocked,
+                )
+                return colorize(building_glyph, building_color)
+            if tile == "Q":
+                return colorize(
+                    "\u2501" if bool(getattr(self.state, "detailed_glyphs_enabled", True)) else "Q",
+                    C.WOOD + C.BOLD,
+                )
+            if tile == "D":
+                is_entry = (
+                    (int(x), int(y)) in set(TOWN_DOORS.values())
+                    or (int(x), int(y)) in AUTHORED_TOWN_RESIDENCE_ID_BY_DOOR
+                )
+                return colorize(tile, (C.DOOR if is_entry else C.SERVICE) + C.BOLD)
+        if self.on_farm() and tile == "H":
+            surface = farmhouse_surface(
+                tile_map,
+                x,
+                y,
+                bool(getattr(self.state, "detailed_glyphs_enabled", True)),
+                visual_key,
+                bool(getattr(self.state, "high_contrast_enabled", False)),
+                "Deluxe Farmhouse" in set(getattr(self.state, "house_upgrades", []) or []),
+            )
+            if surface:
+                glyph, color = surface
+                color = outdoor_time_color(
+                    color,
+                    int(getattr(self.state, "hour", 12)),
+                    lit=glyph == "o",
+                    ambient=bool(getattr(self.state, "ambient_visuals_enabled", True)),
+                )
+                return colorize(glyph, color)
+        if self.on_farm() and tile == "D":
+            return colorize(tile, C.DOOR + C.BOLD)
         if self.on_farm_work_land() and self.is_tile_fertilized(x, y) and tile in [",", "w"]:
             tile = "f" if tile == "," else "F"
         if self.on_mine() and tile == ">" and not self.mine_floor_stairs_available(self.state.mine_floor):
             return colorize("x", C.WALL)
+        if self.on_mine() or self.on_wilderness_cave() or self.on_wilderness_dungeon():
+            underground_context = (
+                "mine" if self.on_mine()
+                else "cave" if self.on_wilderness_cave()
+                else "dungeon"
+            )
+            display_tile, underground_color = underground_tile_style(
+                tile_map,
+                x,
+                y,
+                underground_context,
+                bool(getattr(self.state, "detailed_glyphs_enabled", True)),
+                int(getattr(self, "_ambient_visual_phase", 0)),
+                visual_key,
+                bool(getattr(self.state, "ambient_visuals_enabled", True)),
+                bool(getattr(self.state, "high_contrast_enabled", False)),
+            )
+            return colorize(display_tile, underground_color)
         season = self.state.season
-        colors = {
+        color_cache = getattr(self, "_base_tile_color_cache", None)
+        if (
+            isinstance(color_cache, tuple)
+            and len(color_cache) == 2
+            and color_cache[0] == season
+        ):
+            colors = color_cache[1]
+        else:
+            colors = {
             ".": season_tile_color(".", season),
             ",": season_tile_color(",", season),
             "w": season_tile_color("w", season),
@@ -11636,8 +13913,8 @@ class FarmGame(
             "^": season_tile_color("^", season),
             "o": season_tile_color("o", season),
             "*": season_tile_color("*", season),
-            "=": C.DIM,
-            ":": C.SHOP,
+            "=": C.ROAD,
+            ":": C.PATH,
             "D": C.WOOD,
             "t": C.WOOD,
             "s": C.WOOD,
@@ -11736,11 +14013,46 @@ class FarmGame(
             "'": C.GRASS,
             "\"": C.WOOD,
             ",": C.GRASS,
-            " ": C.WALL,
-        }
+                " ": C.WALL,
+            }
+            self._base_tile_color_cache = (season, colors)
         base_color = colors.get(tile, C.RESET)
-        base_color = self.night_lighting_color_for_tile(tile, x, y, base_color)
-        return colorize(tile, base_color)
+        display_tile = tile
+        if tile == "#" and (self.on_town() or self.on_wilderness_dungeon() or self.on_farm()):
+            display_tile = self.architectural_display_tile(
+                tile_map,
+                x,
+                y,
+                allow_windows=self.on_town(),
+                visual_key=visual_key,
+            )
+            if display_tile == "o":
+                base_color = C.LIT if self.is_night_time() else C.FLOOR_WARM
+        elif tile == "~" and self.on_farm():
+            if self.state.season == "Winter":
+                display_tile = "═" if bool(getattr(self.state, "detailed_glyphs_enabled", True)) else "~"
+                base_color = C.SNOW
+            else:
+                display_tile = wilderness_display_glyph(
+                    tile,
+                    int(getattr(self, "_ambient_visual_phase", 0)),
+                    visual_key,
+                    bool(getattr(self.state, "ambient_visuals_enabled", True)),
+                    bool(getattr(self.state, "detailed_glyphs_enabled", True)),
+                )
+        if town_streetlamp_lit_tiles is not None:
+            base_color = outdoor_time_color(
+                base_color,
+                int(getattr(self.state, "hour", 12)),
+                lit=bool(
+                    tile in {"!", "H", "f"}
+                    or (int(x), int(y)) in town_streetlamp_lit_tiles
+                ),
+                ambient=bool(getattr(self.state, "ambient_visuals_enabled", True)),
+            )
+        else:
+            base_color = self.night_lighting_color_for_tile(tile, x, y, base_color)
+        return colorize(display_tile, base_color)
 
 
     def render_crop(self, crop: Crop) -> str:
@@ -11801,18 +14113,25 @@ class FarmGame(
             self.base_map[y][w - 1] = "#"
 
         for y in range(8, min(13, h - 1)):
-            self.base_map[y][0] = "E"
+            self.base_map[y][0] = ":"
             if w > 1:
                 self.base_map[y][1] = "."
             if w > 2:
                 self.base_map[y][2] = "."
 
         for x in range(25, min(30, w - 1)):
-            self.base_map[0][x] = "N"
+            self.base_map[0][x] = "<"
             if h > 1:
                 self.base_map[1][x] = "."
             if h > 2:
                 self.base_map[2][x] = "."
+
+        for y in range(8, min(13, h - 1)):
+            self.base_map[y][w - 1] = ":"
+            if w > 1:
+                self.base_map[y][w - 2] = "."
+            if w > 2:
+                self.base_map[y][w - 3] = "."
 
         for yy in range(2, min(6, h)):
             for xx in range(3, min(9, w)):
@@ -11908,11 +14227,20 @@ class FarmGame(
         self.autosave_with_message(f"Purchased {expansion_name}. Farm size is now {self.farm_width()}x{self.farm_height()}.")
         return True
 
-    def passable(self, x: int, y: int, ignore_travel_follower_id: Optional[str] = None) -> bool:
+    def passable(
+        self,
+        x: int,
+        y: int,
+        ignore_travel_follower_id: Optional[str] = None,
+        ignore_all_travel_followers: bool = False,
+    ) -> bool:
         if not self.in_active_bounds(x, y):
             return False
-        occupying_follower = self.travel_follower_at(x, y)
-        if occupying_follower and occupying_follower != str(ignore_travel_follower_id or ""):
+        if not ignore_all_travel_followers:
+            occupying_follower = self.travel_follower_at(x, y)
+            if occupying_follower and occupying_follower != str(ignore_travel_follower_id or ""):
+                return False
+        if (self.on_farm() or self.on_mine()) and self.town_npc_at(x, y):
             return False
         if self.on_farm() and self.farm_animal_at(x, y):
             return False
@@ -11930,7 +14258,7 @@ class FarmGame(
         if self.on_procedural_town_interior():
             return self.procedural_town_interior_tile_passable(tile)
         if self.on_town():
-            return tile not in ["#", "~", "G", "C", "X", "L", "M", "I", "Y", "A", "H", "R", "P", "U", "Q", "F", "T", "b", "B", "N", "m", "$"]
+            return tile not in ["#", "~", "G", "C", "X", "L", "M", "I", "Y", "A", "H", "R", "P", "U", "Q", "F", "T", "b", "B", "N", "m", "$", "h"]
         if self.on_mine():
             if self.mine_enemy_at(x, y):
                 return False
@@ -11938,9 +14266,30 @@ class FarmGame(
                 return False
             return tile not in ["#", " ", "r", "O", "I", "G", "M", "q", "c", "g", "B", "?"]
         if self.on_wilderness():
+            if self.procedural_town_hinterland_at(x, y) or self.wilderness_maritime_encounter_at(x, y) or self.wilderness_island_site_at(x, y):
+                return False
+            if self.wilderness_water_salvage_at(x, y):
+                return False
+            if self.state.wilderness_boating:
+                if tile == "~" and self.wilderness_water_is_frozen_at(x, y):
+                    return False
+                return tile in {"~", "="} and not self.wilderness_event_blocking_at(x, y)
+            if self.wilderness_expedition_camp_visual_at(x, y):
+                return False
+            if self.wilderness_event_blocking_at(x, y):
+                return False
+            if self.wilderness_seasonal_surface_blocking_at(x, y):
+                return False
+            if self.wilderness_traveler_at(x, y):
+                return False
+            encounter_visual = self.wilderness_random_combat_visual_at(x, y)
+            if encounter_visual and bool(encounter_visual.get("blocking", False)):
+                return False
             if self.bounty_target_at(x, y):
                 return False
             if self.wilderness_stronghold_enemy_at(x, y):
+                return False
+            if self.wilderness_random_combat_enemy_at(x, y):
                 return False
             if self.reclaimed_stronghold_build_board_at(x, y):
                 return False
@@ -11952,11 +14301,19 @@ class FarmGame(
                 or tile == PROCEDURAL_TOWN_SIGN_SYMBOL
             ):
                 return False
-            return tile not in ["#", "~", "T", "o", "*", "?", WILDERNESS_CLAIM_SYMBOL, "R", "J", "P", "K", "Q", "Y", "u", "W", "N", "F", "V", "X", "O", "L", "e", "p", "M", "G", "Z"]
+            if tile == "~":
+                return self.wilderness_water_is_frozen_at(x, y)
+            return tile not in ["#", "T", "o", "*", "?", FIELD_SITE_SYMBOL, WILDERNESS_OUTPOST_SYMBOL, WILDERNESS_STRUCTURE_SYMBOL, WILDERNESS_LANDSCAPE_SYMBOL, WILDERNESS_DOCK_SYMBOL, WILDERNESS_FISHING_SETTLEMENT_SYMBOL, WILDERNESS_REFUGE_SYMBOL, WILDERNESS_STAFFED_SITE_SYMBOL, WILDERNESS_EXCURSION_SYMBOL, WILDERNESS_CLAIM_SYMBOL, "R", "J", "P", "K", "Q", "Y", "u", "W", "N", "F", "V", "X", "O", "L", "e", "p", "M", "G", "Z"]
+        if self.on_wilderness_outpost():
+            return tile not in ["#", " ", "-", "&", "@", "n", "b", "t", "c", "f", "s", "P", "l", "w", "a", "p"]
+        if self.on_wilderness_structure():
+            return tile not in ["#", " ", "-", "&", "@", "b", "t", "c", "f", "s", "P", "d", "+"]
         if self.on_wilderness_cave():
             return tile not in ["#", " ", "o", "q", "m", "c", "i", "g", "A", "C", "h", "b", "d"]
         if self.on_wilderness_dungeon():
             if self.wilderness_dungeon_enemy_at(x, y):
+                return False
+            if self.dungeon_door_closed(x, y):
                 return False
             return tile not in ["#", " ", "$", "P"]
         if self.on_town_interior():
@@ -11987,6 +14344,8 @@ class FarmGame(
             return tile not in ["#", " ", "$", "&", "v", "f", "r", "t", "P"]
         if self.on_museum():
             return tile not in ["#", " ", "$", "&", "d", "C", "S", "A", "G", "F", "M", "E", "P"]
+        if self.on_farm() and tile == "~" and self.state.season == "Winter":
+            return True
         return tile not in ["#", "~", "H"]
 
 
@@ -12145,6 +14504,8 @@ class FarmGame(
 
     def describe_tile(self, x: int, y: int) -> str:
         if not self.in_active_bounds(x, y):
+            if self.on_wilderness():
+                return self.describe_streamed_wilderness_tile(x, y)
             return "Out of bounds"
         travel_follower_id = self.travel_follower_at(x, y)
         if travel_follower_id:
@@ -12213,8 +14574,12 @@ class FarmGame(
                     return "Sheriff desk: use Z/Enter for the bounty board"
                 if tile == "P":
                     return "Wanted board: use Z/Enter to view bounties"
-                if tile == "d":
-                    return "Patrol desk with reports, maps, and witness notes"
+            if tile == "d":
+                return "Patrol desk with reports, maps, and witness notes"
+            if tile == "&" and building:
+                staff = self.procedural_town_building_service_staff(building)
+                if staff:
+                    return f"{building.get('name', 'Building')} service counter, staffed by {staff[0].get('name', 'the attendant')}"
             return {
                 "#": "Interior wall",
                 "-": "Interior partition",
@@ -12241,6 +14606,24 @@ class FarmGame(
                 "p": "Local planter and household decoration",
                 ",": "Woven local rug",
             }.get(tile, "Settlement building interior")
+        if self.on_wilderness_outpost():
+            tile = self.active_map()[y][x]
+            if tile == "@":
+                keeper = self.wilderness_outpost_keeper(self.state.wilderness_chunk_x, self.state.wilderness_chunk_y)
+                return f"{keeper.get('name', 'Regional steward')} ({keeper.get('role', 'Trail Caretaker')}, {self.wilderness_outpost_keeper_bond_label(keeper)}): use Z/Enter to talk"
+            if tile == "n":
+                specialist = self.wilderness_specialist_actor(self.state.wilderness_chunk_x, self.state.wilderness_chunk_y)
+                return (
+                    f"{specialist.get('name', 'Regional specialist')} "
+                    f"({specialist.get('role', 'Naturalist')}, {self.recurring_wilderness_traveler_bond_label(int(specialist.get('bond', 0)))}): "
+                    f"at home in {specialist.get('home_name', 'the outpost')}; use Z/Enter to talk"
+                )
+            return {".": "Clean outpost floor", "#": "Outpost wall", "D": "Door back to the wilderness", "-": "Interior partition", "|": "Open partition doorway", "&": "Outpost service counter and supply register", "b": "Resident bunk: rest here once per day", "t": "Field table", "c": "Sturdy chair", "f": "Heating stove", "s": "Weekly supply locker", "P": "Regional records desk", "l": "Naturalist reference shelf", "w": "Repair workbench", "a": "Trail equipment rack", "p": "Living regional exhibit", " ": "Solid wall"}.get(tile, "Regional wilderness outpost")
+        if self.on_wilderness_structure():
+            tile = self.active_map()[y][x]
+            record = self.wilderness_structure_record()
+            repaired = bool(record.get("repaired"))
+            return {".": f"Floor of {record.get('name', 'the wilderness structure')}", "#": "Exterior wall", "D": "Door back to the wilderness", "-": "Interior partition", "|": "Open doorway", "&": "Service counter: weekly support is available after restoration", "@": "Resident caretaker: use Z/Enter to speak", "b": "Bunk: rest here once per day", "t": "Plain table", "c": "Chair", "f": "Hearth", "s": "Regional supply storage", "P": "Structure records and restoration plaque", "d": "Field observation desk", "+": "Wayside shrine", " ": "Solid wall"}.get(tile, f"{'Restored' if repaired else 'Abandoned'} wilderness structure interior")
         if self.on_town_interior():
             interior_desc = self.town_interior_tile_description(x, y)
             if interior_desc:
@@ -12319,9 +14702,50 @@ class FarmGame(
                 " ": "Museum wall",
             }.get(tile, f"Museum tile '{tile}'")
         if self.on_wilderness():
+            home_gateway = self.origin_world_gateway_at(x, y)
+            if home_gateway == "farm":
+                return "Your farm's east gate: the farmhouse, fields, pond, and working land continue beyond this lane. Walk into it to enter the farm"
+            if home_gateway == "town":
+                return "The main town's north gate: the civic streets and familiar businesses lie beyond it. Walk into it to enter town"
+            if home_gateway == "mine":
+                return "The home-region mine entrance: a permanent stone structure connected to the town-and-farm road. Walk into it to enter the mine"
+            home_sign = self.origin_world_sign_at(x, y)
+            if home_sign:
+                return f"Home-road wayfinding sign ({home_sign.replace('_', ' ')}): use Z/Enter to read"
+            consequence_kind = self.wilderness_vitality_consequence_at(x, y)
+            if consequence_kind:
+                title = {"refuge": "Wildlife Refuge", "staffed_site": "Staffed Field Activity", "excursion": "Public Excursion Site"}[consequence_kind]
+                return f"{title}: a visible benefit of regional vitality. Use Z/Enter for its weekly activity"
+            hinterland = self.procedural_town_hinterland_at(x, y)
+            if hinterland:
+                return f"{hinterland.get('name')} serving {hinterland.get('town_name')}: {hinterland.get('work')}. Use Z/Enter for weekly work"
+            maritime = self.wilderness_maritime_encounter_at(x, y)
+            if maritime:
+                return f"{maritime.get('name', 'Maritime encounter')}: {maritime.get('description', 'Something is happening on the water')} Use Z/Enter from the skiff"
+            if self.wilderness_water_salvage_at(x, y):
+                return "Floating salvage: a recoverable bundle of driftwood and supplies. Use Z/Enter from the skiff"
+            island_site = self.wilderness_island_site_at(x, y)
+            if island_site:
+                record = self.wilderness_island_site_record()
+                return f"{island_site.get('name', 'Island site')} ({'restored' if record.get('restored') else 'abandoned'}): {island_site.get('benefit', 'a useful coastal landmark')} Use Z/Enter"
+            if self.wilderness_expedition_camp_visual_at(x, y):
+                return "Temporary ranger expedition camp: review the briefing, rest, or claim field supplies. Use Z/Enter."
+            expedition_objective = self.wilderness_expedition_objective_at(x, y)
+            if expedition_objective:
+                status = "surveyed" if expedition_objective.get("surveyed") else "unsurveyed"
+                return f"Expedition survey marker {expedition_objective.get('index')}/{expedition_objective.get('total')} ({status}): {expedition_objective.get('action', expedition_objective.get('objective'))}"
+            traveler = self.wilderness_traveler_at(x, y)
+            if traveler:
+                return f"{traveler.get('name', 'Traveler')} ({traveler.get('role', 'Traveler')}): {traveler.get('activity', 'traveling the region')}. Use Z/Enter to talk"
             bounty = self.bounty_target_at(x, y)
             if bounty:
                 species = str(bounty.get("species", "enemy"))
+                if self.wilderness_field_combat_active():
+                    bounty = self.ensure_dungeon_roguelike_enemy(self.bounty_record_as_enemy(bounty))
+                    return (
+                        f"{bounty.get('target_name', species)}: HP {bounty['hp']}/{bounty['max_hp']}; "
+                        f"behavior {bounty.get('behavior', 'hunter')}. Bump to attack; F aims; V opens skills."
+                    )
                 return (
                     f"{bounty.get('target_name', species)} ({self.bounty_status_label(bounty)} bounty): "
                     f"{self.mine_enemy_description(bounty).replace('this mine floor', 'this wilderness chunk')} "
@@ -12330,7 +14754,47 @@ class FarmGame(
             enemy = self.wilderness_stronghold_enemy_at(x, y)
             if enemy:
                 species = str(enemy.get("species", "enemy"))
+                if self.wilderness_field_combat_active():
+                    enemy = self.ensure_dungeon_roguelike_enemy(enemy)
+                    return (
+                        f"{species}: HP {enemy['hp']}/{enemy['max_hp']}; behavior {enemy.get('behavior', 'hunter')}. "
+                        "Bump to attack; F aims; V opens skills."
+                    )
                 return f"{species}: {self.mine_enemy_description(enemy).replace('this mine floor', 'this stronghold')} Bump or step close to start combat."
+            enemy = self.wilderness_random_combat_enemy_at(x, y)
+            if enemy:
+                species = str(enemy.get("species", "enemy"))
+                encounter = self.wilderness_random_combat_record(
+                    self.state.wilderness_chunk_x, self.state.wilderness_chunk_y, create=False
+                )
+                if self.wilderness_field_combat_active():
+                    enemy = self.ensure_dungeon_roguelike_enemy(enemy)
+                    return (
+                        f"{species} from {encounter.get('name', 'a wilderness encounter')}: "
+                        f"HP {enemy['hp']}/{enemy['max_hp']}; behavior {enemy.get('behavior', 'hunter')}. "
+                        "Bump to attack; F aims; V opens skills."
+                    )
+                return (
+                    f"{species}: part of {encounter.get('name', 'a hostile wilderness encounter')}. "
+                    f"{encounter.get('description', 'It threatens nearby travel.')} Bump or step close to engage."
+                )
+            encounter_visual = self.wilderness_random_combat_visual_at(x, y)
+            if encounter_visual:
+                encounter = self.wilderness_random_combat_record(
+                    self.state.wilderness_chunk_x, self.state.wilderness_chunk_y, create=False
+                )
+                return (
+                    f"{encounter_visual.get('name', 'Encounter site')} at {encounter.get('name', 'a wilderness encounter')}: "
+                    f"{encounter.get('description', 'Evidence of nearby danger.')}"
+                )
+            loot = self.dungeon_floor_loot_at(x, y)
+            if loot:
+                contents = []
+                if int(loot.get("money", 0)):
+                    contents.append(f"{int(loot['money'])}g")
+                if loot.get("items"):
+                    contents.append(format_drops(dict(loot.get("items", {}))))
+                return f"Remains of {loot.get('source', 'an enemy')}: {', '.join(contents) or 'empty'}. Use Z/Enter to search the body."
             animal = self.animal_at(x, y)
             if animal:
                 species = str(animal.get("species", "Animal"))
@@ -12357,14 +14821,46 @@ class FarmGame(
             building = self.procedural_town_building_at(x, y)
             if building:
                 if int(building.get("door_x", -1)) == x and int(building.get("door_y", -1)) == y:
-                    return f"{building.get('name', 'Settlement building')} entrance"
+                    hours = self.procedural_town_building_hours(building)
+                    status = self.procedural_town_building_open_status(building)
+                    hours_text = (
+                        f"; {self.procedural_town_format_hour(hours[0])}–{self.procedural_town_format_hour(hours[1])}"
+                        if hours else ""
+                    )
+                    return f"{building.get('name', 'Settlement building')} entrance ({status}{hours_text})"
                 return f"{building.get('name', 'Settlement building')} exterior"
             plan = self.current_procedural_town_plan()
             if plan and int(plan.get("sign_x", -1)) == x and int(plan.get("sign_y", -1)) == y:
                 return f"{plan.get('name', 'Wilderness town')} welcome sign"
+            event_visual = self.wilderness_event_visual_at(x, y)
+            if event_visual:
+                event_name = str(event_visual.get("event", "Regional event"))
+                action = {
+                    "Fresh Rockfall": " Use Z/Enter with a Pickaxe to clear it.",
+                    "High-Water Pulse": " Temporary floodwater blocks passage; maintained trails remain usable.",
+                    "Mass Wildflower Bloom": " Use Z/Enter to gather a regional sample.",
+                    "Fruiting Surge": " Use Z/Enter to gather a regional sample.",
+                    "Desert Bloom": " Use Z/Enter to gather a regional sample.",
+                    "Sandstorm Drifts": " Use Z/Enter to clear a passage through the drift.",
+                    "Whiteout Drifts": " Use Z/Enter to clear and remark the snow route.",
+                }.get(event_name, " Use Z/Enter to inspect it.")
+                return f"{event_name}: {event_visual.get('description', 'visible environmental change')}.{action}"
+            seasonal_surface = self.wilderness_seasonal_surface_at(x, y)
+            if seasonal_surface:
+                action = {
+                    "spring_bloom": "Gather it with Z/Enter.",
+                    "autumn_leaves": "Collect the fresh leaf litter with Z/Enter.",
+                    "snow_drift": "Clear a passage with Z/Enter.",
+                    "storm_debris": "Clear the debris with Z/Enter; an Axe reduces the effort.",
+                    "spring_high_water": "Use higher ground until it recedes.",
+                    "cracking_ice": "The crossing is visibly nearing thaw.",
+                    "ice_floes": "The water is open and no longer a safe crossing.",
+                }.get(str(seasonal_surface.get("kind", "")), "Inspect it with Z/Enter.")
+                return f"Seasonal change: {seasonal_surface.get('description', 'changed ground')}. {action}"
             if tile == "S": return "Walk south: return to town"
             if tile == "=": return "Bridge: cross the river"
-            if tile == "~": return "Equip Fishing Rod and press F to fish"
+            if tile == "~":
+                return self.wilderness_water_description(x, y)
             if tile == WILDERNESS_CLAIM_SYMBOL:
                 owned = self.owned_wilderness_claim()
                 if owned:
@@ -12385,7 +14881,30 @@ class FarmGame(
             if tile == "G": return "Wild root patch: use Z/Enter to gather roots"
             if tile == "Z": return "Mushroom log: use Z/Enter to gather mushrooms"
             if tile == "M": return "Mineral outcrop: use F with Pickaxe"
-            if tile == "R": return "Ranger camp: rest, read route notes, or search weekly trail supplies"
+            if tile == WILDERNESS_OUTPOST_SYMBOL: return f"Door to {self.wilderness_outpost_name(self.state.wilderness_chunk_x, self.state.wilderness_chunk_y)}: use Z/Enter to enter"
+            if tile == WILDERNESS_STRUCTURE_SYMBOL and self.wilderness_structure_marker_at(x, y):
+                record = self.wilderness_structure_record()
+                return f"Door to {record.get('name', 'wilderness structure')} ({'restored and staffed' if record.get('repaired') else 'abandoned'}): use Z/Enter to enter or restore"
+            if tile == WILDERNESS_LANDSCAPE_SYMBOL:
+                record = self.wilderness_landscape_record()
+                return f"{record.get('name', 'Major landscape')}: follow its marked route, complete specialty work, or chart nearby wilderness"
+            if tile == WILDERNESS_DOCK_SYMBOL:
+                if self.wilderness_portable_raft_available():
+                    status = "portable Explorer Raft ready"
+                elif self.state.wilderness_boat_owned:
+                    status = "owned skiff available"
+                elif self.wilderness_boat_available():
+                    status = "rental active today"
+                else:
+                    status = "skiffs available to rent or buy"
+                return f"Wilderness dock beside navigable water: {status}. Use Z/Enter for water travel, ferries, and services"
+            if tile == WILDERNESS_FISHING_SETTLEMENT_SYMBOL:
+                record = self.wilderness_fishing_settlement_record()
+                return f"{record.get('name', 'Island settlement')} harbor: {self.fishing_settlement_stage_name(record.get('level', 0))}, development {record.get('level', 0)}/3. Use Z/Enter"
+            if tile == FIELD_SITE_SYMBOL:
+                site = self.wilderness_field_site_type(self.state.wilderness_chunk_x, self.state.wilderness_chunk_y)
+                return f"{site['name']}: use Z/Enter for fieldwork and regional study"
+            if tile == "R": return "Ranger camp route board: rest, chart nearby wilderness, or search weekly trail supplies"
             if tile == "H": return "Campfire ring: use Z/Enter to take a short daily rest"
             if tile == "B": return "Supply crate"
             if tile == "!":
@@ -12393,14 +14912,28 @@ class FarmGame(
                 name = str(record.get("name", "Enemy Stronghold"))
                 remaining = len(self.get_wilderness_stronghold_enemies(create=False))
                 return f"{name}: {'reclaimed safe landmark' if record.get('cleared') else f'hostile stronghold, {remaining} enemy patrol(s) remain'}"
-            if tile == "J": return "Old standing stone: use Z/Enter to search the stone circle"
-            if tile == "P": return "Ancient wilderness marker: use Z/Enter to survey the ruin"
+            if tile == "J": return "Old route ruin: excavate it, restore its courtyard, and reopen its map marker"
+            if tile == "P": return "Old route ruin marker: excavate, restore, or chart from this site"
             if tile == "Y": return "Berry thicket: use Z/Enter to gather berries"
             if tile == "u": return "Mushroom hollow: use Z/Enter to gather mushrooms"
-            if tile == "K": return "River overlook: use Z/Enter to scout nearby wilderness sites"
-            if tile == "Q": return "Wilderness shelter: rest, check supplies, or read travel notes"
-            if tile == "?": return "Z/Enter: inspect landmark and nearby routes"
-            if tile == "X": return "Ruined dungeon entrance: walk or use Z/Enter to enter"
+            if tile == "K": return "Wilderness overlook: survey the region or conduct a daily wildlife watch"
+            if tile == "Q": return "Public trail shelter: rest, check supplies, or maintain it for the region"
+            if tile == "?":
+                kind = self.wilderness_landmark_kind_at(x, y)
+                return {
+                    "old_quarry": "Old quarry: work its accessible seam once per week",
+                    "spring_garden": "Abandoned spring garden: tend its growing beds once per week",
+                    "fungal_garden": "Sheltered fungal garden: tend its beds once per week",
+                    "waystone": "Waystone crossroads: align the stones and chart nearby trails",
+                }.get(kind, "Working wilderness landmark")
+            if tile == "X":
+                key = self.dungeon_key_for_entrance(self.state.wilderness_chunk_x, self.state.wilderness_chunk_y, x, y)
+                if self.dungeon_is_mega(key):
+                    return (
+                        f"Mega-dungeon entrance: {self.dungeon_name_for_key(key)}, "
+                        f"{self.dungeon_max_floor_for_key(key)} persistent floors; walk or use Z/Enter to enter"
+                    )
+                return "Ruined dungeon entrance: walk or use Z/Enter to enter"
             if tile in WILDERNESS_FORAGE_SYMBOLS: return f"Z/Enter: forage {forage_item_for_symbol(tile)}"
             if tile == "T": return "F with Axe: chop tree"
             if tile == "o": return "F with Pickaxe: break rock"
@@ -12411,7 +14944,38 @@ class FarmGame(
             enemy = self.wilderness_dungeon_enemy_at(x, y)
             if enemy:
                 species = str(enemy.get("species", "enemy"))
-                return f"{species}: {self.wilderness_dungeon_enemy_description(enemy)} Bump or step close to start combat."
+                enemy = self.ensure_dungeon_roguelike_enemy(enemy)
+                statuses = enemy.get("statuses", {}) if isinstance(enemy.get("statuses"), dict) else {}
+                active_statuses = [
+                    f"{name} {int(statuses.get(name, 0))}t"
+                    for name in ("poison", "root", "vulnerable", "stunned")
+                    if int(statuses.get(name, 0)) > 0
+                ]
+                status_text = f" Status: {', '.join(active_statuses)}." if active_statuses else ""
+                return (
+                    f"{species}: {self.wilderness_dungeon_enemy_description(enemy)} "
+                    f"HP {enemy['hp']}/{enemy['max_hp']}; behavior {enemy.get('behavior', 'hunter')}. "
+                    f"{status_text} Bump it for a map-native melee attack; V opens skills."
+                )
+            loot = self.dungeon_floor_loot_at(x, y)
+            if loot:
+                contents = []
+                if int(loot.get("money", 0)):
+                    contents.append(f"{int(loot['money'])}g")
+                if loot.get("items"):
+                    contents.append(format_drops(dict(loot.get("items", {}))))
+                return f"Remains of {loot.get('source', 'an enemy')}: {', '.join(contents) or 'empty'}. Use Z/Enter to search the body."
+            skill_zone = self.dungeon_skill_zone_at(x, y)
+            if skill_zone:
+                rider = ""
+                if int(skill_zone.get("damage", 0)):
+                    rider += f" {int(skill_zone['damage'])} damage each turn."
+                if skill_zone.get("status"):
+                    rider += f" Applies {skill_zone.get('status')}."
+                return (
+                    f"{skill_zone.get('name', 'Skill')} {skill_zone.get('kind', 'elemental')} field: "
+                    f"{int(skill_zone.get('duration', 0))} turns remain.{rider}"
+                )
             tile = self.active_map()[y][x]
             key = str(getattr(self.state, "current_dungeon_key", "") or "")
             name = self.dungeon_name_for_key(key)
@@ -12421,10 +14985,20 @@ class FarmGame(
                 "<": "Exit back to the wilderness",
                 "U": "Exit back to the wilderness",
                 ">": "Stairs deeper into the ruins",
-                "+": "Battered dungeon doorway",
+                "+": "Closed dungeon door" if self.dungeon_door_closed(x, y) else "Open dungeon doorway",
                 "$": "Treasure chest: use Z/Enter to open",
-                "P": "Final chamber marker",
-                "!": "Hidden trap plate: it can hurt you once, but it cannot kill you",
+                "P": (
+                    "Final chamber marker"
+                    if self.state.current_dungeon_floor >= self.dungeon_max_floor_for_key(key)
+                    else "Sealed stratum guardian chamber"
+                ),
+                "!": (
+                    "Safely disarmed trap mechanism"
+                    if self.dungeon_trap_disarmed(x, y)
+                    else "Revealed trap plate: use Z/Enter to attempt disarming it"
+                    if self.dungeon_trap_revealed(x, y)
+                    else "Suspicious dungeon floor"
+                ),
                 "S": "Cracked shrine: use Z/Enter for one helpful blessing",
                 "?": "Weathered inscription: use Z/Enter to copy the clue",
                 "'": "Creeping roots and cracked weeds",
@@ -12603,7 +15177,7 @@ class FarmGame(
                 "o": "Boulder",
                 "*": "Fallen log",
                 "^": "Tall weeds",
-                "?": "Wilderness landmark",
+                "?": "Working wilderness landmark",
                 "S": "South trail back to town",
             }.get(tile, forage_description_for_symbol(tile) if tile in WILDERNESS_FORAGE_SYMBOLS else f"Wilderness tile '{tile}'")
         tile = self.base_map[y][x]
@@ -12613,7 +15187,10 @@ class FarmGame(
         crop = self.get_crop(x, y)
         if crop:
             return self.describe_crop(crop)
-        return {".": "Grass", ",": "Tilled soil", "w": "Watered soil", "f": "Fertilized tilled soil", "F": "Fertilized watered soil", "#": "Fence or boundary", "~": "Pond water", "H": "Farmhouse exterior wall", "D": "Farmhouse door", "B": "Shipping bin", "$": "Old shop tile", "^": "Weeds", "o": "Stone", "*": "Stump or log", "E": "Road to town", "N": "Path to the mine. Check Tab > Adventure before pushing deeper"}.get(tile, f"Farm tile '{tile}'")
+        farm_descriptions = {".": "Grass", ",": "Tilled soil", "w": "Watered soil", "f": "Fertilized tilled soil", "F": "Fertilized watered soil", "#": "Fence or boundary", "~": "Pond water", "H": "Farmhouse exterior wall", "D": "Farmhouse door", "B": "Shipping bin", "$": "Old shop tile", "^": "Weeds", "o": "Stone", "*": "Stump or log", "E": "Road to town", "N": "Path to the mine. Check Tab > Adventure before pushing deeper"}
+        if tile == "~" and self.state.season == "Winter":
+            return "Frozen farm pond: safe to cross until the spring thaw"
+        return farm_descriptions.get(tile, f"Farm tile '{tile}'")
 
     def target_action_hint(self, x: int, y: int) -> str:
         """Tell the player what F is likely to do on the target tile."""
@@ -12732,13 +15309,17 @@ class FarmGame(
             if tile == "!":
                 return "Z: inspect stronghold | I: inspect"
             if tile == "R":
-                return "Z: camp services | I: inspect"
+                return "Z: rest, supplies, or map | I: inspect"
             if tile == "Q":
-                return "Z: shelter services | I: inspect"
+                return "Z: rest, supplies, or maintain | I: inspect"
             if tile == "K":
-                return "Z: scout routes | I: inspect"
-            if tile in ["H", "J", "P", "?"]:
-                return "Z: inspect landmark | I: inspect"
+                return "Z: survey or wildlife watch | I: inspect"
+            if tile in ["J", "P"]:
+                return "Z: excavate, restore, or chart | I: inspect"
+            if tile == "?":
+                return "Z: use landmark | I: inspect"
+            if tile == "H":
+                return "Z: rest at landmark | I: inspect"
             if tile in ["Y", "u", "W", "N", "F", "O", "L", "e", "p", "G", "Z"]:
                 return "Z: gather/search | I: inspect"
             if tool == "Fishing Rod":
@@ -12960,6 +15541,8 @@ class FarmGame(
             enemy = self.wilderness_stronghold_enemy_at(x, y)
             if enemy:
                 species = str(enemy.get("species", "enemy"))
+                enemy = self.ensure_dungeon_roguelike_enemy(enemy)
+                intent = enemy.get("intent", {}) if isinstance(enemy.get("intent"), dict) else {}
                 lines.extend([
                     "",
                     "Stronghold enemy:",
@@ -12967,7 +15550,16 @@ class FarmGame(
                     self.mine_enemy_description(enemy).replace("this mine floor", "this stronghold"),
                     "Captain: yes" if enemy.get("boss") else "Captain: no",
                     "Alert: yes" if enemy.get("alert") else "Alert: no",
-                    "Combat starts if you bump it or move within 1 tile.",
+                    (
+                        f"Intent: {str(intent.get('name', intent.get('type', 'special attack'))).replace('_', ' ').title()} "
+                        f"at {int(intent.get('x', 0))},{int(intent.get('y', 0))}"
+                        if intent else "Intent: none"
+                    ),
+                    (
+                        f"Awareness: investigating {enemy.get('alert_reason', 'your position')}"
+                        if enemy.get("alert") else "Awareness: unaware"
+                    ),
+                    "Bump it to attack; yellow ! marks a telegraphed special action.",
                 ])
             animal = self.animal_at(x, y)
             if animal:
@@ -12997,15 +15589,24 @@ class FarmGame(
         if self.on_wilderness_dungeon():
             enemy = self.wilderness_dungeon_enemy_at(x, y)
             if enemy:
+                enemy = self.ensure_dungeon_roguelike_enemy(enemy)
                 species = str(enemy.get("species", "enemy"))
+                statuses = enemy.get("statuses", {}) if isinstance(enemy.get("statuses"), dict) else {}
+                status_text = ", ".join(
+                    f"{name} {int(statuses.get(name, 0))}t"
+                    for name in ("poison", "root", "vulnerable", "stunned")
+                    if int(statuses.get(name, 0)) > 0
+                ) or "none"
                 lines.extend([
                     "",
                     "Dungeon enemy:",
                     species,
                     self.wilderness_dungeon_enemy_description(enemy),
+                    f"HP: {int(enemy.get('hp', 0))}/{int(enemy.get('max_hp', 0))}",
+                    f"Status: {status_text}",
                     "Guardian: yes" if enemy.get("boss") else "Guardian: no",
                     "Alert: yes" if enemy.get("alert") else "Alert: no",
-                    "Combat starts if you bump it or move within 1 tile.",
+                    "Bump for melee, or press V to target a learned skill.",
                 ])
 
         travel_follower_id = self.travel_follower_at(x, y)
@@ -13059,6 +15660,9 @@ class FarmGame(
         return lines
 
     def draw_with_look_cursor(self, cursor_x: int, cursor_y: int):
+        if self.on_wilderness():
+            self.draw_streamed_wilderness_look_cursor(cursor_x, cursor_y)
+            return
         self.sync_travel_followers()
         lines: List[str] = []
         lines.extend(self.header_lines())
@@ -13093,6 +15697,7 @@ class FarmGame(
                 stronghold_enemy = actor_lookups["stronghold_enemies"].get(position)
                 bounty_target = actor_lookups["bounty_targets"].get(position)
                 wilderness_animal = actor_lookups["wilderness_animals"].get(position)
+                wilderness_traveler = actor_lookups["wilderness_travelers"].get(position)
                 farm_animal = actor_lookups["farm_animals"].get(position)
                 follower_id = actor_lookups["followers"].get(position)
                 if world_x >= map_w or world_y >= map_h:
@@ -13104,11 +15709,13 @@ class FarmGame(
                 elif mine_enemy:
                     line.append(self.render_mine_enemy(mine_enemy))
                 elif dungeon_enemy:
-                    line.append(self.render_mine_enemy(dungeon_enemy))
+                    line.append(self.render_dungeon_roguelike_enemy(dungeon_enemy))
                 elif stronghold_enemy:
                     line.append(self.render_mine_enemy(stronghold_enemy))
                 elif bounty_target:
                     line.append(self.render_mine_enemy(bounty_target))
+                elif wilderness_traveler:
+                    line.append(self.render_wilderness_traveler(wilderness_traveler))
                 elif wilderness_animal:
                     line.append(self.render_animal(wilderness_animal))
                 elif farm_animal:
@@ -13139,7 +15746,79 @@ class FarmGame(
 
         lines.extend(self.footer_lines())
         lines.append(f"Look cursor: ({cursor_x},{cursor_y}) {self.describe_tile(cursor_x, cursor_y)}")
-        lines.append("WASD/Arrows move cursor | Z/Enter details | I details | X/L/Esc/Q/Tab exit")
+        lines.append("WASD/Arrows/Numpad move cursor | Z/Enter details | I details | X/L/Esc/Q/Tab exit")
+        frame = "".join("\033[2K" + str(line) + "\n" for line in lines)
+        if frame == self._last_draw_frame and not self._force_full_redraw:
+            return
+        self.prepare_terminal_for_fast_draw()
+        try:
+            sys.stdout.write("\033[H" + frame + "\033[J")
+            sys.stdout.flush()
+        except Exception:
+            clear_screen()
+            print(frame, end="")
+        self._last_draw_frame = frame
+        self._force_full_redraw = False
+
+    def describe_streamed_wilderness_tile(self, relative_x: int, relative_y: int) -> str:
+        chunk_x, chunk_y, local_x, local_y = self.wilderness_stream_resolve(relative_x, relative_y)
+        if (chunk_x, chunk_y) == (int(self.state.wilderness_chunk_x), int(self.state.wilderness_chunk_y)):
+            return self.describe_tile(local_x, local_y)
+        kind, actor = self.wilderness_stream_actor_at(relative_x, relative_y)
+        if actor:
+            if kind == "animal": return f"{actor.get('species', 'Animal')}: {self.animal_description(str(actor.get('species', 'Animal')))}"
+            if kind == "traveler": return f"{actor.get('name', 'Traveler')} ({actor.get('role', 'Traveler')}): {actor.get('activity', 'traveling the region')}"
+            if kind == "resident": return f"{actor.get('name', 'Resident')} ({actor.get('role', 'Resident')}): {actor.get('runtime_activity', 'following the town routine')}"
+            return f"{actor.get('target_name', actor.get('species', 'Hostile'))}: hostile presence in neighboring chunk ({chunk_x},{chunk_y})"
+        home_gateway = self.origin_world_gateway_kind(chunk_x, chunk_y, local_x, local_y)
+        if home_gateway:
+            return {
+                "farm": "Main farm gate on the home road",
+                "town": "Main town gate on the home road",
+                "mine": "Home-region mine building",
+            }.get(home_gateway, "Home-region gateway")
+        home_sign = self.origin_world_sign_kind(chunk_x, chunk_y, local_x, local_y)
+        if home_sign:
+            return f"Home-road wayfinding sign ({home_sign.replace('_', ' ')})"
+        grid = self.wilderness_stream_map(chunk_x, chunk_y)
+        if grid:
+            position = (local_x, local_y)
+            event = self.wilderness_event_visual_lookup(chunk_x, chunk_y, grid).get(position, {})
+            if event:
+                return f"{event.get('event', 'Regional event')}: {event.get('description', 'visible environmental change')}"
+            seasonal = self.wilderness_seasonal_surface_lookup(chunk_x, chunk_y, grid).get(position, {})
+            if seasonal:
+                return f"Seasonal change: {seasonal.get('description', 'changed ground')}"
+        tile = self.wilderness_stream_preview_tile(chunk_x, chunk_y, local_x, local_y)
+        if tile == "~" and self.wilderness_water_is_frozen_at(local_x, local_y, chunk_x, chunk_y):
+            return "Frozen freshwater ice; passable until the spring thaw"
+        if tile == "X":
+            key = self.dungeon_key_for_entrance(chunk_x, chunk_y, local_x, local_y)
+            if self.dungeon_is_mega(key):
+                return f"Mega-dungeon entrance: {self.dungeon_name_for_key(key)} ({self.dungeon_max_floor_for_key(key)} floors)"
+        descriptions = {"~": "Wilderness water", "=": "Bridge across a continuous waterway", ":": "Regional road", "V": "Cave entrance", "X": "Dungeon entrance", "!": "Stronghold", "A": "Regional outpost", "E": "Field site", "h": "Wilderness structure", "q": "Fishing settlement", "k": "Dock"}
+        if tile in WILDERNESS_BIOME_TILES:
+            return wilderness_biome_description(tile, self.state.season)
+        return descriptions.get(tile, f"Neighboring wilderness feature '{tile}'")
+
+    def streamed_wilderness_look_lines(self, relative_x: int, relative_y: int) -> List[str]:
+        chunk_x, chunk_y, local_x, local_y = self.wilderness_stream_resolve(relative_x, relative_y)
+        kind, actor = self.wilderness_stream_actor_at(relative_x, relative_y)
+        lines = ["STREAMED WILDERNESS LOOK", "", f"Chunk: ({chunk_x},{chunk_y})", f"Local tile: ({local_x},{local_y})", f"World-relative tile: ({relative_x},{relative_y})", "", self.describe_streamed_wilderness_tile(relative_x, relative_y)]
+        if actor:
+            lines.extend(["", f"Actor: {actor.get('name', actor.get('target_name', actor.get('species', 'Unknown')))}", f"Type: {kind.title()}", "Snapshot only until this chunk becomes current."])
+        elif (chunk_x, chunk_y) != (int(self.state.wilderness_chunk_x), int(self.state.wilderness_chunk_y)):
+            lines.extend(["", "This neighboring chunk is visible through the runtime stream.", "Enter it to make interactions and dynamic simulation authoritative."])
+        return lines
+
+    def draw_streamed_wilderness_look_cursor(self, cursor_x: int, cursor_y: int) -> None:
+        self.sync_travel_followers()
+        lines = list(self.header_lines())
+        lines.extend(self.wilderness_stream_map_lines(cursor_x, cursor_y, (cursor_x, cursor_y)))
+        lines.extend(self.footer_lines())
+        chunk_x, chunk_y, local_x, local_y = self.wilderness_stream_resolve(cursor_x, cursor_y)
+        lines.append(f"Look: chunk ({chunk_x},{chunk_y}) tile ({local_x},{local_y}) - {self.describe_streamed_wilderness_tile(cursor_x, cursor_y)}")
+        lines.append("WASD/Arrows/Numpad move across streamed chunks | Z/Enter/I details | X/L/Esc/Q/Tab exit")
         frame = "".join("\033[2K" + str(line) + "\n" for line in lines)
         if frame == self._last_draw_frame and not self._force_full_redraw:
             return
@@ -13174,28 +15853,27 @@ class FarmGame(
                 self.invalidate_draw_cache()
                 return
 
-            dx, dy = 0, 0
-            if key in ["w", "UP"]:
-                dy = -1
-            elif key in ["s", "DOWN"]:
-                dy = 1
-            elif key in ["a", "LEFT"]:
-                dx = -1
-            elif key in ["d", "RIGHT"]:
-                dx = 1
-
-            if dx or dy:
-                cursor_x = max(0, min(self.active_map_width() - 1, cursor_x + dx))
-                cursor_y = max(0, min(self.active_map_height() - 1, cursor_y + dy))
-                self.set_message(f"Look cursor at {cursor_x},{cursor_y}: {self.describe_tile(cursor_x, cursor_y)}")
+            movement = movement_delta_for_key(key)
+            if movement:
+                dx, dy = movement
+                if self.on_wilderness():
+                    cursor_x = max(-86, min(171, cursor_x + dx))
+                    cursor_y = max(-38, min(75, cursor_y + dy))
+                    description = self.describe_streamed_wilderness_tile(cursor_x, cursor_y)
+                else:
+                    cursor_x = max(0, min(self.active_map_width() - 1, cursor_x + dx))
+                    cursor_y = max(0, min(self.active_map_height() - 1, cursor_y + dy))
+                    description = self.describe_tile(cursor_x, cursor_y)
+                self.set_message(f"Look cursor at {cursor_x},{cursor_y}: {description}")
                 continue
 
             if key in MENU_CONFIRM_KEYS or key == "i":
-                self.vertical_panel_view("Look", self.look_tile_lines(cursor_x, cursor_y), LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
+                look_lines = self.streamed_wilderness_look_lines(cursor_x, cursor_y) if self.on_wilderness() else self.look_tile_lines(cursor_x, cursor_y)
+                self.vertical_panel_view("Look", look_lines, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
                 self.invalidate_draw_cache()
                 continue
 
-            self.set_message("Look mode: WASD move, Z/Enter details, X/L/Esc/Q exit.")
+            self.set_message("Look mode: WASD/numpad move, Z/Enter details, X/L/Esc/Q exit.")
 
     def inspect_target(self):
         """Dedicated look/inspect command bound to I."""
@@ -13226,6 +15904,12 @@ class FarmGame(
                     rows.extend(["- Wildflowers, herbs, and berries favor sunny meadow ground."])
                 elif tile == "x":
                     rows.extend(["- Hardy plants and stones are more common on the ridge."])
+                elif tile == "`":
+                    rows.extend(["- Desert forage is sparse and follows brief seasonal growth.", "- Lizards, hawks, foxes, and rabbits tolerate the arid province."])
+                elif tile == '"':
+                    rows.extend(["- Hardy roots and snow yams survive beneath frozen ground.", "- Large animals and hunting birds follow exposed tundra routes."])
+                elif tile == "[":
+                    rows.extend(["- Tidal forage follows wet strand and sheltered pools.", "- Waterfowl and shore animals gather around the islands."])
                 self.vertical_panel_view(wilderness_biome_name(tile), rows, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
                 self.set_message(f"Inspected the {wilderness_biome_name(tile)}.")
                 return
@@ -13238,11 +15922,11 @@ class FarmGame(
         ix, iy = self.interaction_target_pos()
         tool_hint = self.target_action_hint(x, y)
         interact_hint = self.interaction_hint(ix, iy)
-        lines = [f"Target ({x},{y}): {self.describe_tile(x, y)}"]
+        lines = [f"TARGET | ({x},{y}) {self.describe_tile(x, y)}"]
         if tool_hint and tool_hint != "Nothing to use here":
-            lines.append(f"Tool: {tool_hint}")
+            lines.append(f"TOOL | {tool_hint}")
         if interact_hint != "Z/Enter: nothing":
-            lines.append(f"Action: {interact_hint}")
+            lines.append(f"ACTION | {interact_hint}")
         return "\n".join(lines)
 
 
@@ -13294,45 +15978,75 @@ class FarmGame(
         seed_text = f" ({s.selected_seed})" if tool == "Seeds" else ""
         time_text = f"{s.hour:02d}:{s.minute:02d}"
         width = self.hud_line_width()
-        player_bits = [
-            str(s.player_name),
-            f"Stamina {s.stamina}/{self.max_stamina()}",
-            f"Money ${s.money}",
-            f"Tool: {tool_label}{seed_text}",
+        detailed = bool(getattr(s, "detailed_glyphs_enabled", True))
+        max_stamina = self.max_stamina()
+        stamina_ratio = int(s.stamina) / max(1, max_stamina)
+        stamina_color = C.CROP_READY if stamina_ratio > 0.5 else C.SOIL_WET if stamina_ratio > 0.25 else C.HOSTILE
+        combat_profile = farmstead_combat_profile(s)
+        hp_now = int(combat_profile.get("current_hp", 1) or 1)
+        hp_max = max(1, int(combat_profile.get("max_hp", hp_now) or hp_now))
+        hp_ratio = hp_now / hp_max
+        hp_color = C.CROP_READY if hp_ratio > 0.5 else C.SOIL_WET if hp_ratio > 0.25 else C.HOSTILE
+
+        weather_label = self.visible_weather_label()
+        weather_color = {
+            "Rainy": C.RAIN,
+            "Stormy": C.STORM,
+            "Snowy": C.SNOW,
+            "Blizzard": C.SNOW + C.BOLD,
+            "Underground": C.CAVE_FLOOR,
+            "Sheltered": C.FLOOR_WARM,
+        }.get(weather_label, C.UI_MUTED)
+        season_color = {
+            "Spring": C.SPRING_GRASS,
+            "Summer": C.SUMMER_GRASS,
+            "Fall": C.FALL_GRASS,
+            "Winter": C.WINTER_GRASS,
+        }.get(str(s.season), C.UI_MUTED)
+        lighting_label = self.visible_lighting_label()
+        lighting_color = C.LIT if lighting_label in {"Night", "Dusk", "Dawn"} else C.UI_MUTED
+
+        world_chips = [
+            status_chip(f"{s.date_label} {s.weekday}", C.UI_TITLE),
+            status_chip(self.location_label(), C.UI_SELECTED),
+            status_chip(s.season, season_color),
+            status_chip(weather_label, weather_color),
+            status_chip(f"{time_text} {lighting_label}", lighting_color),
+        ]
+        player_chips = [
+            status_chip(str(s.player_name), C.PLAYER),
+            status_chip(f"STA {meter_text(s.stamina, max_stamina, 8, detailed)} {s.stamina}/{max_stamina}", stamina_color),
+            status_chip(f"HP {meter_text(hp_now, hp_max, 6, detailed)} {hp_now}/{hp_max}", hp_color),
+            status_chip(f"${s.money}", C.SERVICE),
+            status_chip(f"Tool {tool_label}{seed_text}", C.INFRA),
         ]
 
-        world_bits = [
-            f"Overworld cursor ({s.overworld_cursor_chunk_x},{s.overworld_cursor_chunk_y})"
-            if self.on_wilderness_overworld()
-            else f"Map {self.active_map_width()}x{self.active_map_height()}"
+        context_chips = [
+            status_chip(
+                f"Overworld cursor ({s.overworld_cursor_chunk_x},{s.overworld_cursor_chunk_y})"
+                if self.on_wilderness_overworld()
+                else f"Map {self.active_map_width()}x{self.active_map_height()}",
+                C.UI_MUTED,
+            )
         ]
         if self.unread_mail_count():
-            world_bits.append(f"Mail {self.unread_mail_count()} unread")
+            context_chips.append(status_chip(f"Mail {self.unread_mail_count()} unread", C.LAMP))
         if self.on_mine():
-            world_bits.append(f"Mine F{s.mine_floor}/{s.deepest_mine_floor} {self.mine_floor_status_label(s.mine_floor)}")
+            context_chips.append(status_chip(f"Mine F{s.mine_floor}/{s.deepest_mine_floor} {self.mine_floor_status_label(s.mine_floor)}", C.UNDERGROUND_RELIC))
         if self.on_wilderness() or self.on_wilderness_overworld():
-            world_bits.append(f"Chunks {len(getattr(self, 'wilderness_maps', {}))}")
+            context_chips.append(status_chip(f"Chunks {self.wilderness_visited_map_count()}", C.LANDMARK_NATURAL))
         if self.active_food_buff_summary():
-            world_bits.append(f"Buffs: {self.active_food_buff_summary()}")
+            context_chips.append(status_chip(f"Buffs {self.active_food_buff_summary()}", C.UNDERGROUND_RELIC))
 
-        raw_lines = [
-            GAME_DISPLAY_TITLE,
-            "=" * width,
-            f"{s.date_label} ({s.weekday}) | {self.location_label()} | "
-            f"{s.season} | {self.visible_weather_label()} | {time_text} | "
-            f"{self.visible_lighting_label()}",
-            " | ".join(player_bits),
-            " | ".join(world_bits),
-            "-" * width,
+        lines: List[str] = [
+            colorize(fit_text(GAME_DISPLAY_TITLE, width), C.UI_TITLE),
+            colorize("─" * width, C.UI_BORDER),
         ]
-
-        lines: List[str] = []
-        for raw in raw_lines:
-            if set(str(raw)) in [{"="}, {"-"}]:
-                lines.append(str(raw)[:width].ljust(width, str(raw)[0]))
-            else:
-                lines.extend(self.wrap_hud_text(raw, width, ellipsis=False))
-        return [fit_text(line, width) for line in lines]
+        lines.extend(wrap_status_chips(world_chips, width))
+        lines.extend(wrap_status_chips(player_chips, width))
+        lines.extend(wrap_status_chips(context_chips, width))
+        lines.append(colorize("─" * width, C.UI_BORDER))
+        return lines
 
 
     def stronghold_enemy_passable_tile(
@@ -13478,6 +16192,7 @@ class FarmGame(
             "defeated": False,
             "boss": True,
         })
+        record["enemy_states"] = enemies
         return enemies
 
     def clean_wilderness_stronghold_enemy_record(self, key: str, index: int, enemy: Dict[str, object]) -> Optional[Dict[str, object]]:
@@ -13540,7 +16255,16 @@ class FarmGame(
             self.wilderness_stronghold_enemies[key] = []
             return []
         if create and key not in self.wilderness_stronghold_enemies:
-            self.wilderness_stronghold_enemies[key] = self.generate_wilderness_stronghold_enemies(cx, cy)
+            stronghold = self.wilderness_stronghold_record(cx, cy)
+            saved_enemies = stronghold.get("enemy_states", [])
+            if isinstance(saved_enemies, list) and saved_enemies:
+                self.wilderness_stronghold_enemies[key] = [
+                    enemy for enemy in saved_enemies
+                    if isinstance(enemy, dict) and not bool(enemy.get("defeated", False))
+                ]
+                stronghold["enemy_states"] = self.wilderness_stronghold_enemies[key]
+            else:
+                self.wilderness_stronghold_enemies[key] = self.generate_wilderness_stronghold_enemies(cx, cy)
         return self.wilderness_stronghold_enemies.get(key, [])
 
     def wilderness_stronghold_enemy_at(self, x: int, y: int) -> Optional[Dict[str, object]]:
@@ -13564,6 +16288,11 @@ class FarmGame(
             for current in self.get_wilderness_stronghold_enemies(create=False)
             if str(current.get("id", "")) != enemy_id
         ]
+        try:
+            cx_text, cy_text = key.split(",", 1)
+            self.wilderness_stronghold_record(int(cx_text), int(cy_text))["enemy_states"] = self.wilderness_stronghold_enemies[key]
+        except Exception:
+            pass
 
     def nearest_engaging_wilderness_stronghold_enemy(self) -> Optional[Dict[str, object]]:
         if not self.on_wilderness():
@@ -13712,10 +16441,11 @@ class FarmGame(
                 marker_x, marker_y = markers[0]
         h = len(grid)
         w = len(grid[0]) if h else 0
-        for yy in range(max(1, marker_y - 5), min(h - 1, marker_y + 6)):
-            for xx in range(max(1, marker_x - 8), min(w - 1, marker_x + 9)):
-                if grid[yy][xx] in ["#", "B", "^"]:
-                    grid[yy][xx] = "." if (xx + yy) % 3 else ":"
+        protected = {"~", "=", "S", "V", "X", WILDERNESS_CLAIM_SYMBOL}
+        for yy in range(max(1, marker_y - 12), min(h - 1, marker_y + 13)):
+            for xx in range(max(1, marker_x - 22), min(w - 1, marker_x + 23)):
+                if grid[yy][xx] not in protected:
+                    grid[yy][xx] = "."
         if 0 <= marker_y < h and 0 <= marker_x < w:
             self.dress_reclaimed_stronghold_site(grid, marker_x, marker_y, record)
             self.apply_reclaimed_stronghold_features_to_grid(chunk_x, chunk_y, grid)
@@ -13732,12 +16462,14 @@ class FarmGame(
             return ["The reclaimed stronghold stays quiet."]
         record["cleared"] = True
         record["reward_claimed"] = True
+        self.invalidate_wilderness_road_network()
         self.state.wilderness_strongholds_cleared = max(0, int(getattr(self.state, "wilderness_strongholds_cleared", 0))) + 1
         self.reclaim_wilderness_stronghold_map(chunk_x, chunk_y)
         money, items = self.wilderness_stronghold_clear_reward(chunk_x, chunk_y)
         self.state.money += money
         add_inventory_items(self.state.inventory, items)
         self.wilderness_stronghold_enemies[self.wilderness_stronghold_key(chunk_x, chunk_y)] = []
+        record["enemy_states"] = []
         if hasattr(self, "wilderness_animals") and isinstance(self.wilderness_animals, dict):
             self.wilderness_animals.pop(self.wilderness_animal_key(chunk_x, chunk_y), None)
         name = str(record.get("name", "Stronghold"))
@@ -13827,6 +16559,14 @@ class FarmGame(
         self.autosave_with_message(f"{summary}. The stronghold patrol regroups nearby.{party_text}")
 
     def start_wilderness_stronghold_combat_encounter(self, enemy: Dict[str, object], reason: str = "nearby"):
+        if self.on_wilderness():
+            enemy["field_combat_kind"] = "stronghold"
+            if self.begin_wilderness_field_combat(enemy, reason=reason):
+                if reason in {"bump", "interact", "tool"}:
+                    self.dungeon_player_melee_attack(enemy)
+                else:
+                    self.advance_dungeon_roguelike_turn("hostile engagement")
+            return
         species = str(enemy.get("species", "enemy"))
         chunk_x = int(enemy.get("chunk_x", self.state.wilderness_chunk_x))
         chunk_y = int(enemy.get("chunk_y", self.state.wilderness_chunk_y))
@@ -13961,6 +16701,7 @@ class FarmGame(
         record["founded_settlement_name"] = town_name
         record["founded_settlement_style"] = style
         record["founded_settlement_day"] = self.errand_day_key()
+        self.invalidate_wilderness_road_network()
 
         buildings = plan.get("buildings", {}) if isinstance(plan.get("buildings", {}), dict) else {}
         town_hall_id = next(
@@ -14686,7 +17427,7 @@ class FarmGame(
             f"Build Board: {item.get('name', item_id)} | ${item.get('cost', 0)} | {size} | "
             f"{'OK' if ok else 'Blocked: ' + reason}"
         )
-        lines.append("WASD/Arrows move cursor | Z/Enter place | I inspect | X/Esc/Q/Tab cancel")
+        lines.append("WASD/Arrows/Numpad move cursor | Z/Enter place | I inspect | X/Esc/Q/Tab cancel")
         frame = "".join("\033[2K" + str(line) + "\n" for line in lines)
         if frame == self._last_draw_frame and not self._force_full_redraw:
             return
@@ -14723,16 +17464,9 @@ class FarmGame(
                 self.set_message("Stronghold build placement cancelled.")
                 self.invalidate_draw_cache()
                 return
-            dx, dy = 0, 0
-            if key in ["w", "UP"]:
-                dy = -1
-            elif key in ["s", "DOWN"]:
-                dy = 1
-            elif key in ["a", "LEFT"]:
-                dx = -1
-            elif key in ["d", "RIGHT"]:
-                dx = 1
-            if dx or dy:
+            movement = movement_delta_for_key(key)
+            if movement:
+                dx, dy = movement
                 cursor_x = max(0, min(self.active_map_width() - 1, cursor_x + dx))
                 cursor_y = max(0, min(self.active_map_height() - 1, cursor_y + dy))
                 continue
@@ -15425,10 +18159,15 @@ class FarmGame(
         cx = int(getattr(self.state, "wilderness_chunk_x", 0))
         cy = int(getattr(self.state, "wilderness_chunk_y", 0))
         biome = wilderness_biome_name(self.wilderness_world_biome_tile(cx * 86 + 43, cy * 38 + 19))
+        region = self.wilderness_region_profile(cx, cy)
+        mastery_count, mastery = self.wilderness_region_mastery(cx, cy)
         rows = [
             title.upper(),
             "",
             f"Current chunk: {cx},{cy}",
+            f"Region: {region['name']} ({mastery}, {mastery_count}/6 sites)",
+            f"Regional traits: {', '.join(region['traits'])}",
+            f"Seasonal condition: {self.wilderness_region_condition(cx, cy)}",
             f"Dominant terrain: {biome}",
             f"Visible forage: {self.count_wilderness_forage()}",
             "",
@@ -15473,29 +18212,10 @@ class FarmGame(
         return rows
 
     def show_wilderness_overlook(self, x: int, y: int):
-        rows = self.wilderness_scouting_lines("River Overlook")
-        rows.insert(2, "The high bank gives you a clean view of bends, smoke, roads, and old stonework.")
-        self.vertical_panel_view("River Overlook", rows, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
-        self.set_message("You studied the river overlook and marked nearby routes.")
+        self.open_wilderness_overlook_site(x, y)
 
     def show_wilderness_landmark(self, x: int, y: int):
-        rows = [
-            "WILDERNESS LANDMARK",
-            "",
-            "The trees open just enough for you to get your bearings.",
-            "",
-            f"Current season: {self.state.season}",
-            f"Current chunk: {self.state.wilderness_chunk_x},{self.state.wilderness_chunk_y}",
-            f"Forage currently visible: {self.count_wilderness_forage()}",
-            "",
-        ]
-        rows.extend(self.wilderness_scouting_lines("Trail Notes")[6:])
-        rows.extend([
-            "",
-            "Remember: press R anywhere in the wilderness to make an emergency return to town.",
-        ])
-        self.vertical_panel_view("Wilderness Landmark", rows, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
-        self.set_message("You study the landmark and steady your sense of direction.")
+        self.open_wilderness_minor_landmark(x, y)
 
     def show_wilderness_ranger_camp(self, x: int, y: int):
         while True:
@@ -15505,7 +18225,7 @@ class FarmGame(
             items = [
                 MenuItem(label="Rest at camp", value="rest", enabled=not rested_today, hint="+20 stamina, small HP, 20 min"),
                 MenuItem(label="Search weekly supplies", value="cache", enabled=cache_ready, hint="light trail supplies"),
-                MenuItem(label="Read route board", value="routes", enabled=True, hint="nearby sites"),
+                MenuItem(label="Update route map", value="routes", enabled=True, hint="chart nearby wilderness"),
                 MenuItem(label="Back", value=MENU_BACK, enabled=True),
             ]
             choice = self.vertical_panel_select("Ranger Camp", items, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT, return_back=True)
@@ -15519,15 +18239,8 @@ class FarmGame(
                 self.claim_wilderness_poi_cache(x, y, "camp", "Ranger Camp")
                 return
             if choice.value == "routes":
-                rows = self.wilderness_scouting_lines("Ranger Route Board")
-                rows.extend([
-                    "",
-                    "Notes:",
-                    "- River fish are most active near rain and morning.",
-                    "- Berry thickets are now sparse patches, not endless orchards.",
-                    "- Press R if you get lost in the wilderness.",
-                ])
-                self.vertical_panel_view("Ranger Route Board", rows, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
+                self.update_ranger_camp_map(x, y)
+                return
 
     def show_wilderness_shelter_menu(self, x: int, y: int):
         while True:
@@ -15537,7 +18250,7 @@ class FarmGame(
             items = [
                 MenuItem(label="Rest in shelter", value="rest", enabled=not rested_today, hint="+30 stamina, HP, 35 min"),
                 MenuItem(label="Check shelter supplies", value="cache", enabled=cache_ready, hint="weekly cache"),
-                MenuItem(label="Read travel notes", value="routes", enabled=True, hint="nearby sites"),
+                MenuItem(label="Maintain public shelter", value="maintain", enabled=True, hint="2 Wood, 1 Fiber; improves the region"),
                 MenuItem(label="Back", value=MENU_BACK, enabled=True),
             ]
             choice = self.vertical_panel_select("Wilderness Shelter", items, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT, return_back=True)
@@ -15550,8 +18263,9 @@ class FarmGame(
             if choice.value == "cache":
                 self.claim_wilderness_poi_cache(x, y, "shelter", "Wilderness Shelter")
                 return
-            if choice.value == "routes":
-                self.vertical_panel_view("Shelter Travel Notes", self.wilderness_scouting_lines("Shelter Travel Notes"), LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
+            if choice.value == "maintain":
+                self.maintain_wilderness_shelter(x, y)
+                return
 
     def wilderness_animal_key(self, chunk_x: Optional[int] = None, chunk_y: Optional[int] = None) -> str:
         cx = self.state.wilderness_chunk_x if chunk_x is None else int(chunk_x)
@@ -15569,6 +18283,9 @@ class FarmGame(
             "l": ["Toad", "Squirrel", "Fox", "Owl"],
             "r": ["Duck", "Frog", "Heron", "Rabbit"],
             "x": ["Lizard", "Hawk", "Fox", "Deer"],
+            "`": ["Lizard", "Hawk", "Fox", "Rabbit"],
+            '"': ["Deer", "Fox", "Owl", "Hawk"],
+            "[": ["Duck", "Heron", "Frog", "Songbird"],
         }
         return rng.choice(table.get(biome, ["Rabbit", "Squirrel", "Songbird"]))
 
@@ -15605,8 +18322,12 @@ class FarmGame(
                 return False
         if self.wilderness_stronghold_enemy_at(x, y):
             return False
+        if self.wilderness_expedition_camp_visual_at(x, y) or self.wilderness_event_blocking_at(x, y) or self.wilderness_seasonal_surface_blocking_at(x, y):
+            return False
         tile = self.active_map()[y][x]
-        blocked = ["#", "~", "=", "S", "V", "T", "o", "*", "?", "R", "J", "P", "K", "Q", "Y", "u", "W", "N", "F", "O", "L", "e", "p", "M", "G", "Z"]
+        blocked = ["#", "~", "=", "S", "V", "T", "o", "*", "?", "R", "J", "P", "K", "Q", "Y", "u", "W", "N", "F", "O", "L", "e", "p", "M", "G", "Z", WILDERNESS_OUTPOST_SYMBOL, WILDERNESS_STRUCTURE_SYMBOL, WILDERNESS_LANDSCAPE_SYMBOL, WILDERNESS_DOCK_SYMBOL, WILDERNESS_FISHING_SETTLEMENT_SYMBOL, WILDERNESS_REFUGE_SYMBOL, WILDERNESS_STAFFED_SITE_SYMBOL, WILDERNESS_EXCURSION_SYMBOL]
+        if tile == "~" and self.wilderness_water_is_frozen_at(x, y):
+            return True
         return tile not in blocked
 
     def generate_wilderness_animals_for_chunk(self, chunk_x: int, chunk_y: int) -> List[Dict[str, object]]:
@@ -15620,13 +18341,21 @@ class FarmGame(
         if not h or not w:
             return []
         dist = abs(int(chunk_x)) + abs(int(chunk_y))
-        count = rng.randint(2, 4) + min(2, dist // 4)
+        event_name = str(self.wilderness_weekly_event_profile(chunk_x, chunk_y).get("name", ""))
+        migration_species = {
+            "Migrating Herd": ["Deer", "Deer", "Deer", "Rabbit"],
+            "Waterfowl Arrival": ["Duck", "Heron", "Duck", "Heron"],
+            "Canopy Nesting Rush": ["Songbird", "Owl", "Songbird"],
+            "Tundra Herd Passage": ["Deer", "Deer", "Fox", "Hawk"],
+            "Seabird Gathering": ["Duck", "Heron", "Songbird", "Duck"],
+        }.get(event_name, [])
+        count = min(8, rng.randint(2, 4) + min(2, dist // 4) + len(migration_species))
         animals: List[Dict[str, object]] = []
         used = set()
         candidates = []
         for y in range(2, h - 2):
             for x in range(2, w - 2):
-                if not self.animal_passable_tile(x, y):
+                if not self.wilderness_stream_actor_passable(chunk_x, chunk_y, x, y):
                     continue
                 biome = grid[y][x] if grid[y][x] in WILDERNESS_BIOME_TILES else self.wilderness_world_biome_tile(*self.wilderness_world_coords(chunk_x, chunk_y, x, y))
                 candidates.append((x, y, biome))
@@ -15637,7 +18366,7 @@ class FarmGame(
                 break
             if any(abs(x - ux) + abs(y - uy) < 8 for ux, uy in used):
                 continue
-            species = self.animal_species_for_biome(biome, rng)
+            species = migration_species[len(animals)] if len(animals) < len(migration_species) else self.animal_species_for_biome(biome, rng)
             animals.append({"id": f"{key}:{len(animals)}:{species}", "species": species, "x": int(x), "y": int(y), "seen": False, "calm": rng.randint(0, 2)})
             used.add((x, y))
         return animals
@@ -15654,7 +18383,8 @@ class FarmGame(
     def animal_at(self, x: int, y: int) -> Optional[Dict[str, object]]:
         if not self.on_wilderness():
             return None
-        for animal in self.get_wilderness_animals():
+        cx, cy = int(self.state.wilderness_chunk_x), int(self.state.wilderness_chunk_y)
+        for animal in list(self.get_wilderness_animals()):
             try:
                 if int(animal.get("x", -1)) == int(x) and int(animal.get("y", -1)) == int(y):
                     return animal
@@ -15664,7 +18394,14 @@ class FarmGame(
 
     def render_animal(self, animal: Dict[str, object]) -> str:
         species = str(animal.get("species", "Animal"))
-        return colorize(self.animal_symbol(species), self.animal_color(species))
+        symbol, color = actor_style(
+            "wildlife",
+            self.animal_symbol(species),
+            role=species,
+            base_color=self.animal_color(species),
+            high_contrast=bool(getattr(self.state, "high_contrast_enabled", False)),
+        )
+        return colorize(symbol, color)
 
     def animal_description(self, species: str) -> str:
         return {
@@ -15735,10 +18472,10 @@ class FarmGame(
                     options = [(1,0),(-1,0),(0,1),(0,-1)]
                     random.shuffle(options)
                 for ox, oy in options:
-                    nx, ny = ax + ox, ay + oy
-                    if self.animal_passable_tile(nx, ny) and self.animal_at(nx, ny) is None:
-                        animal["x"] = nx
-                        animal["y"] = ny
+                    moved, _destination_x, _destination_y = self.try_move_wilderness_stream_actor(
+                        "animal", animal, cx, cy, [(ox, oy)]
+                    )
+                    if moved:
                         break
             except Exception:
                 continue
@@ -15968,12 +18705,15 @@ class FarmGame(
         map_height: int,
     ) -> Dict[str, Dict[Tuple[int, int], object]]:
         """Index moving actors once for a frame instead of scanning per tile."""
+        if self.on_wilderness():
+            self.prepare_wilderness_runtime_overlays()
         lookups: Dict[str, Dict[Tuple[int, int], object]] = {
             "mine_enemies": {},
             "dungeon_enemies": {},
             "stronghold_enemies": {},
             "bounty_targets": {},
             "wilderness_animals": {},
+            "wilderness_travelers": {},
             "farm_animals": {},
             "followers": dict(
                 self.travel_follower_position_lookup(map_width, map_height)
@@ -16023,7 +18763,7 @@ class FarmGame(
         elif self.on_wilderness():
             index_records(
                 "stronghold_enemies",
-                self.get_wilderness_stronghold_enemies(),
+                self.get_wilderness_stronghold_enemies() + self.get_wilderness_random_combat_enemies(),
                 skip_defeated=True,
             )
             index_records(
@@ -16034,6 +18774,10 @@ class FarmGame(
             index_records(
                 "wilderness_animals",
                 self.get_wilderness_animals(),
+            )
+            index_records(
+                "wilderness_travelers",
+                self.get_wilderness_travelers(),
             )
         elif self.on_farm():
             index_records(
@@ -16046,12 +18790,659 @@ class FarmGame(
             )
         return lookups
 
+    def wilderness_water_is_frozen_at(
+        self,
+        x: int,
+        y: int,
+        chunk_x: Optional[int] = None,
+        chunk_y: Optional[int] = None,
+    ) -> bool:
+        """Fresh wilderness water freezes in winter; the open coast does not."""
+        if str(getattr(self.state, "season", "")) != "Winter":
+            return False
+        cx = int(self.state.wilderness_chunk_x if chunk_x is None else chunk_x)
+        cy = int(self.state.wilderness_chunk_y if chunk_y is None else chunk_y)
+        wx, wy = self.wilderness_world_coords(cx, cy, int(x), int(y))
+        return self.wilderness_world_biome_tile(wx, wy) != "["
+
+    def resolve_wilderness_freeze_thaw(self, old_season: str, new_season: str) -> str:
+        """Apply safe physical consequences when the calendar changes ice state."""
+        old_season, new_season = str(old_season), str(new_season)
+        if old_season == new_season:
+            return ""
+        if new_season == "Winter":
+            return " Inland freshwater froze; ice routes remain temporary, while salt coasts stay open."
+        if old_season != "Winter":
+            return ""
+        relocated = False
+        if self.on_wilderness() and not bool(getattr(self.state, "wilderness_boating", False)):
+            x, y = int(self.state.player_x), int(self.state.player_y)
+            if self.in_active_bounds(x, y) and self.active_map()[y][x] == "~":
+                safe_x, safe_y = self.nearest_active_passable_tile(x, y, radius_limit=14)
+                if (safe_x, safe_y) != (x, y):
+                    self.state.player_x, self.state.player_y = safe_x, safe_y
+                    relocated = True
+        return (
+            " Inland ice thawed; you moved safely onto the nearest bank."
+            if relocated
+            else " Inland ice thawed and freshwater routes returned to open water."
+        )
+
+    def render_streamed_wilderness_raw_tile(
+        self,
+        tile: str,
+        visual_key: int = 0,
+        display_tile: Optional[str] = None,
+        landmark_kind: str = "",
+        frozen_water: bool = False,
+    ) -> str:
+        """Render wilderness terrain identically on either side of a chunk edge."""
+        raw_tile = str(tile or " ")[:1]
+        landmark_style = wilderness_landmark_style(
+            raw_tile,
+            landmark_kind,
+            bool(getattr(self.state, "detailed_glyphs_enabled", True)),
+            bool(getattr(self.state, "high_contrast_enabled", False)),
+        )
+        if landmark_style:
+            landmark_glyph, landmark_color = landmark_style
+            landmark_color = outdoor_time_color(
+                landmark_color,
+                int(getattr(self.state, "hour", 12)),
+                lit=raw_tile in {WILDERNESS_OUTPOST_SYMBOL, WILDERNESS_STRUCTURE_SYMBOL, WILDERNESS_FISHING_SETTLEMENT_SYMBOL, "R", "Q", "E", "g", "i", "?"},
+                ambient=bool(getattr(self.state, "ambient_visuals_enabled", True)),
+            )
+            return colorize(landmark_glyph, landmark_color)
+        if display_tile is None:
+            if raw_tile == "~" and frozen_water:
+                display_tile = "═" if bool(getattr(self.state, "detailed_glyphs_enabled", True)) else "~"
+            else:
+                display_tile = wilderness_display_glyph(
+                    raw_tile,
+                    int(getattr(self, "_ambient_visual_phase", 0)),
+                    int(visual_key),
+                    bool(getattr(self.state, "ambient_visuals_enabled", True)),
+                    bool(getattr(self.state, "detailed_glyphs_enabled", True)),
+                )
+        base_color = wilderness_tile_color(
+            raw_tile,
+            self.state.season,
+            int(getattr(self, "_ambient_visual_phase", 0)),
+            int(visual_key),
+            bool(getattr(self.state, "ambient_visuals_enabled", True)),
+            bool(getattr(self.state, "high_contrast_enabled", False)),
+            str(getattr(self.state, "weather", "")),
+        )
+        if raw_tile == "~" and frozen_water:
+            base_color = C.TUNDRA + (C.BOLD if bool(getattr(self.state, "high_contrast_enabled", False)) else "")
+        base_color = outdoor_time_color(
+            base_color,
+            int(getattr(self.state, "hour", 12)),
+            lit=raw_tile in {"H", "!"},
+            ambient=bool(getattr(self.state, "ambient_visuals_enabled", True)),
+        )
+        if raw_tile == "#" and display_tile == "o":
+            base_color = C.LIT if self.is_night_time() else C.FLOOR_WARM
+        return colorize(display_tile, base_color)
+
+    def wilderness_stream_feature_lookup(
+        self,
+        chunk_x: int,
+        chunk_y: int,
+        grid: List[List[str]],
+    ) -> Dict[Tuple[int, int], Dict[str, object]]:
+        """Read-only dynamic features that must be visible before chunk promotion."""
+        lookup: Dict[Tuple[int, int], Dict[str, object]] = {}
+        hinterland = self.procedural_town_hinterland_profile(chunk_x, chunk_y)
+        if hinterland:
+            position = self.procedural_town_hinterland_position(chunk_x, chunk_y, grid)
+            if position != (-1, -1):
+                lookup[position] = {
+                    "kind": "hinterland",
+                    "symbol": str(hinterland.get("symbol", "h"))[:1],
+                    "color": {
+                        "quarry": C.STONE,
+                        "fishery": C.WATER,
+                        "woodlot": C.WOOD,
+                        "reed_croft": C.WATER,
+                        "herding_station": C.SNOW,
+                    }.get(str(hinterland.get("type_id", "")), C.CROP_READY),
+                }
+        if self.state.wilderness_boating:
+            salvage_position = self.wilderness_water_salvage_position(chunk_x, chunk_y, grid)
+            if salvage_position != (-1, -1):
+                lookup[salvage_position] = {
+                    "kind": "water_salvage",
+                    "symbol": "z",
+                    "color": C.CROP_READY,
+                }
+            maritime = self.wilderness_maritime_encounter(chunk_x, chunk_y, grid)
+            maritime_position = tuple(maritime.get("position", (-1, -1)))
+            if maritime and maritime_position != (-1, -1):
+                lookup[maritime_position] = {
+                    "kind": "maritime_encounter",
+                    "symbol": str(maritime.get("symbol", "?"))[:1],
+                    "color": C.CROP_READY,
+                }
+        island_profile = self.wilderness_island_site_profile(chunk_x, chunk_y)
+        if island_profile:
+            island_position = self.wilderness_island_site_position(chunk_x, chunk_y, grid)
+            if island_position != (-1, -1):
+                lookup[island_position] = {
+                    "kind": "island_site",
+                    "symbol": str(island_profile.get("symbol", "I"))[:1],
+                    "color": C.WOOD,
+                }
+        stronghold = self.wilderness_stronghold_record(chunk_x, chunk_y, create=False)
+        if stronghold.get("cleared"):
+            for feature in self.reclaimed_stronghold_feature_records(stronghold).values():
+                if not isinstance(feature, dict):
+                    continue
+                color = {
+                    "road": C.DIM,
+                    "building": C.SHOP,
+                    "decoration": C.CROP_READY,
+                }.get(str(feature.get("kind", "")), C.PLACEMENT)
+                for position in self.reclaimed_stronghold_build_item_footprint(
+                    feature, int(feature.get("x", 0)), int(feature.get("y", 0)),
+                ):
+                    if not (
+                        0 <= int(position[1]) < len(grid)
+                        and grid
+                        and 0 <= int(position[0]) < len(grid[0])
+                    ):
+                        continue
+                    lookup[position] = {
+                        "kind": "stronghold_feature",
+                        "rendered": colorize(
+                            str(feature.get("symbol", grid[position[1]][position[0]]))[:1], color,
+                        ),
+                    }
+        return lookup
+
+    def wilderness_current_render_feature_lookup(
+        self,
+        chunk_x: int,
+        chunk_y: int,
+        grid: List[List[str]],
+    ) -> Dict[Tuple[int, int], Dict[str, object]]:
+        """Build dynamic current-chunk render markers once per frame."""
+        lookup = self.wilderness_stream_feature_lookup(chunk_x, chunk_y, grid)
+        consequence_kinds = {
+            WILDERNESS_REFUGE_SYMBOL: "refuge",
+            WILDERNESS_STAFFED_SITE_SYMBOL: "staffed_site",
+            WILDERNESS_EXCURSION_SYMBOL: "excursion",
+        }
+        for y, row in enumerate(grid):
+            for x, tile in enumerate(row):
+                if tile not in consequence_kinds:
+                    continue
+                style = wilderness_landmark_style(
+                    tile,
+                    detailed=bool(getattr(self.state, "detailed_glyphs_enabled", True)),
+                    high_contrast=bool(getattr(self.state, "high_contrast_enabled", False)),
+                )
+                if style:
+                    lookup[(x, y)] = {"kind": consequence_kinds[tile], "rendered": colorize(*style)}
+        encounter = self.wilderness_random_combat_record(chunk_x, chunk_y, create=False)
+        if encounter.get("present") and not encounter.get("resolved"):
+            for visual in encounter.get("visuals", []):
+                if not isinstance(visual, dict):
+                    continue
+                try:
+                    position = (int(visual.get("x", -1)), int(visual.get("y", -1)))
+                except Exception:
+                    continue
+                lookup[position] = {
+                    "kind": "combat_encounter",
+                    "rendered": colorize(str(visual.get("symbol", "!"))[:1], C.HOSTILE),
+                }
+        for pile in self.dungeon_floor_loot():
+            try:
+                position = (int(pile.get("x", -1)), int(pile.get("y", -1)))
+            except Exception:
+                continue
+            lookup[position] = {"kind": "combat_loot", "rendered": colorize("*", C.CROP_READY)}
+        if self.wilderness_field_combat_active():
+            for zone in self.dungeon_skill_zones():
+                if int(zone.get("floor", -1)) != self.map_combat_floor() or int(zone.get("duration", 0)) <= 0:
+                    continue
+                for raw_position in zone.get("tiles", []):
+                    if not isinstance(raw_position, (list, tuple)) or len(raw_position) != 2:
+                        continue
+                    position = (int(raw_position[0]), int(raw_position[1]))
+                    rendered = self.render_dungeon_skill_zone(*position)
+                    if rendered is not None:
+                        lookup[position] = {"kind": "combat_field", "rendered": rendered}
+        return lookup
+
+    def wilderness_stream_feature_at(
+        self,
+        relative_x: int,
+        relative_y: int,
+    ) -> Dict[str, object]:
+        chunk_x, chunk_y, local_x, local_y = self.wilderness_stream_resolve(relative_x, relative_y)
+        grid = self.wilderness_stream_map(chunk_x, chunk_y)
+        if not grid:
+            return {}
+        position = (local_x, local_y)
+        feature = self.wilderness_stream_feature_lookup(chunk_x, chunk_y, grid).get(position, {})
+        if feature:
+            return feature
+        plan = self.procedural_town_plan(chunk_x, chunk_y)
+        if plan:
+            civic = self.procedural_town_civic_overlay_lookup(plan).get(position, {})
+            if civic:
+                return {"kind": "civic_overlay", **civic}
+        expedition = self.wilderness_expedition_objective_for_chunk_at(
+            chunk_x,
+            chunk_y,
+            local_x,
+            local_y,
+            grid,
+        )
+        if expedition:
+            return {"kind": "expedition_objective", **expedition}
+        if self.wilderness_expedition_camp_position(chunk_x, chunk_y, grid) == position:
+            return {"kind": "expedition_camp", "symbol": "R"}
+        event = self.wilderness_event_visual_lookup(chunk_x, chunk_y, grid).get(position, {})
+        if event:
+            return {"kind": "environmental_event", **event}
+        seasonal = self.wilderness_seasonal_surface_lookup(chunk_x, chunk_y, grid).get(position, {})
+        if seasonal:
+            return {"kind": "seasonal_surface", **seasonal}
+        return {}
+
+    def wilderness_stream_tile_interactable(self, tile: str) -> bool:
+        return bool(
+            tile in {
+                "S", "=", "~", FIELD_SITE_SYMBOL, WILDERNESS_OUTPOST_SYMBOL,
+                WILDERNESS_STRUCTURE_SYMBOL, WILDERNESS_LANDSCAPE_SYMBOL,
+                WILDERNESS_DOCK_SYMBOL, WILDERNESS_FISHING_SETTLEMENT_SYMBOL,
+                WILDERNESS_CLAIM_SYMBOL, "R", "H", "B", "J", "P", "Y",
+                "u", "K", "Q", "?", "W", "N", "F", "!", "T", "o",
+                "*", "^",
+            }
+            or tile in WILDERNESS_FORAGE_SYMBOLS
+        )
+
+    def render_streamed_wilderness_tile(
+        self,
+        chunk_x: int,
+        chunk_y: int,
+        x: int,
+        y: int,
+        grid: List[List[str]],
+        event_lookup: Optional[Dict[Tuple[int, int], Dict[str, object]]] = None,
+        civic_overlay_lookup: Optional[Dict[Tuple[int, int], Dict[str, object]]] = None,
+        expedition_lookup: Optional[Dict[Tuple[int, int], Dict[str, object]]] = None,
+        expedition_camp: Tuple[int, int] = (-1, -1),
+        feature_lookup: Optional[Dict[Tuple[int, int], Dict[str, object]]] = None,
+        procedural_town_active: bool = False,
+        seasonal_lookup: Optional[Dict[Tuple[int, int], Dict[str, object]]] = None,
+    ) -> str:
+        """Render a fully loaded neighboring tile with current-chunk semantics."""
+        civic_overlay = (civic_overlay_lookup or {}).get((int(x), int(y)), {})
+        if civic_overlay:
+            overlay_colors = {
+                "residence": C.PLAYER,
+                "business": C.SHOP,
+                "initiative": C.CROP_READY,
+                "regional_project": C.WATER,
+            }
+            return colorize(
+                str(civic_overlay.get("symbol", "+"))[:1],
+                overlay_colors.get(str(civic_overlay.get("kind", "")), C.PLACEMENT),
+            )
+        stream_feature = (feature_lookup or {}).get((int(x), int(y)), {})
+        if stream_feature:
+            if stream_feature.get("rendered") is not None:
+                return str(stream_feature.get("rendered"))
+            return colorize(
+                str(stream_feature.get("symbol", "?"))[:1],
+                str(stream_feature.get("color", C.CROP_READY)),
+            )
+        if (int(x), int(y)) == tuple(expedition_camp):
+            camp_style = wilderness_landmark_style(
+                "R",
+                detailed=bool(getattr(self.state, "detailed_glyphs_enabled", True)),
+                high_contrast=bool(getattr(self.state, "high_contrast_enabled", False)),
+            )
+            return colorize(*(camp_style or ("R", C.ACTOR_RANGER)))
+        expedition_objective = (expedition_lookup or {}).get((int(x), int(y)), {})
+        if expedition_objective:
+            return colorize(
+                "+" if expedition_objective.get("surveyed") else str(expedition_objective.get("symbol", "?"))[:1],
+                C.DIM if expedition_objective.get("surveyed") else C.CROP_READY,
+            )
+        event_visual = (event_lookup or {}).get((int(x), int(y)), {})
+        if event_visual:
+            event_colors = {
+                "crop": C.CROP_READY,
+                "wood": C.WOOD,
+                "magic": C.BIN,
+                "water": C.WATER,
+                "stone": C.STONE,
+            }
+            return colorize(
+                str(event_visual.get("symbol", "'"))[:1],
+                event_colors.get(str(event_visual.get("color", "crop")), C.CROP_READY),
+            )
+        seasonal_surface = (seasonal_lookup or {}).get((int(x), int(y)), {})
+        if seasonal_surface:
+            seasonal_colors = {
+                "crop": C.CROP_READY, "wood": C.WOOD,
+                "water": C.SNOW, "stone": C.STONE,
+            }
+            return colorize(
+                str(seasonal_surface.get("symbol", "'"))[:1],
+                seasonal_colors.get(str(seasonal_surface.get("color", "crop")), C.CROP_READY),
+            )
+        tile = str(grid[int(y)][int(x)])
+        if tile == RECLAIMED_STRONGHOLD_BUILD_BOARD_SYMBOL:
+            return colorize(tile, C.SHOP)
+        if feature_lookup is None:
+            _feature_id, stronghold_feature = self.reclaimed_stronghold_feature_at(x, y, chunk_x, chunk_y)
+            if stronghold_feature:
+                feature_color = {
+                    "road": C.DIM,
+                    "building": C.SHOP,
+                    "decoration": C.CROP_READY,
+                }.get(str(stronghold_feature.get("kind", "")), C.PLACEMENT)
+                return colorize(tile, feature_color)
+        if tile == "!":
+            record = self.wilderness_stronghold_record(chunk_x, chunk_y, create=False)
+            return colorize(tile, C.CROP_READY if record.get("cleared") else C.HOSTILE)
+        if (
+            tile == PROCEDURAL_TOWN_DOOR_SYMBOL
+            and (int(chunk_x), int(chunk_y))
+            == (int(self.state.wilderness_chunk_x), int(self.state.wilderness_chunk_y))
+        ):
+            building = self.procedural_town_building_door_at(x, y)
+            if building:
+                return colorize(
+                    tile,
+                    C.WOOD if self.procedural_town_building_is_open(building) else C.DIM,
+                )
+        world_x, world_y = self.wilderness_world_coords(chunk_x, chunk_y, x, y)
+        frozen_water = tile == "~" and self.wilderness_water_is_frozen_at(
+            x, y, chunk_x, chunk_y
+        )
+        display_tile = None
+        if tile == "~" and not frozen_water and self.wilderness_world_ocean_tile(world_x, world_y):
+            if self.wilderness_world_reef_at(world_x, world_y):
+                display_tile = "¤" if bool(getattr(self.state, "detailed_glyphs_enabled", True)) else "*"
+            else:
+                current = self.wilderness_world_current(world_x, world_y)
+                if current and self.wilderness_hash01(world_x, world_y, 94) > 0.80:
+                    display_tile = str(current.get("glyph", "~"))[:1]
+        elif tile == "#" and (procedural_town_active or (int(chunk_x), int(chunk_y)) == (0, 0)):
+            display_tile = self.architectural_display_tile(
+                grid,
+                x,
+                y,
+                allow_windows=True,
+                visual_key=int(world_x) * 31 + int(world_y) * 17,
+            )
+        return self.render_streamed_wilderness_raw_tile(
+            tile,
+            int(world_x) * 31 + int(world_y) * 17,
+            display_tile,
+            str(self.wilderness_landscape_record(chunk_x, chunk_y).get("type_id", ""))
+            if tile == WILDERNESS_LANDSCAPE_SYMBOL
+            else "",
+            frozen_water,
+        )
+
+    def wilderness_stream_actor_snapshots(self) -> Dict[Tuple[int, int, int, int], Tuple[str, Dict[str, object]]]:
+        """Read-only actors from loaded neighboring chunks; current actors use live lookups."""
+        snapshots: Dict[Tuple[int, int, int, int], Tuple[str, Dict[str, object]]] = {}
+        current = (int(self.state.wilderness_chunk_x), int(self.state.wilderness_chunk_y))
+        for chunk_x, chunk_y in self.wilderness_stream_window_chunks():
+            if (chunk_x, chunk_y) == current or self.wilderness_stream_map(chunk_x, chunk_y) is None:
+                continue
+            groups = (
+                ("enemy", self.get_wilderness_stronghold_enemies(chunk_x, chunk_y, create=False) + self.get_wilderness_random_combat_enemies(chunk_x, chunk_y, create=False)),
+                ("bounty", self.get_bounty_targets_for_chunk(chunk_x, chunk_y, create=False)),
+                ("traveler", self.get_wilderness_travelers_for_chunk(chunk_x, chunk_y)),
+                ("animal", self.get_wilderness_animals(chunk_x, chunk_y)),
+                ("resident", self.procedural_town_stream_resident_lookup(chunk_x, chunk_y).values()),
+            )
+            for kind, records in groups:
+                for record in records:
+                    if not isinstance(record, dict) or bool(record.get("defeated", False)):
+                        continue
+                    try:
+                        x, y = int(record.get("x", -1)), int(record.get("y", -1))
+                    except Exception:
+                        continue
+                    if 0 <= x < 86 and 0 <= y < 38:
+                        snapshots.setdefault((chunk_x, chunk_y, x, y), (kind, record))
+        return snapshots
+
+    def render_wilderness_stream_actor(self, kind: str, record: Dict[str, object]) -> str:
+        if kind in {"enemy", "bounty"}:
+            if self.wilderness_field_combat_active():
+                return self.render_dungeon_roguelike_enemy(record)
+            return self.render_mine_enemy(record)
+        if kind == "traveler":
+            return self.render_wilderness_traveler(record)
+        if kind == "resident":
+            return self.render_town_npc(record)
+        return self.render_animal(record)
+
+    def wilderness_stream_actor_at(self, relative_x: int, relative_y: int) -> Tuple[str, Dict[str, object]]:
+        chunk_x, chunk_y, local_x, local_y = self.wilderness_stream_resolve(relative_x, relative_y)
+        return self.wilderness_stream_actor_snapshots().get((chunk_x, chunk_y, local_x, local_y), ("", {}))
+
+    def wilderness_stream_map_lines(self, focus_x: Optional[int] = None, focus_y: Optional[int] = None, cursor: Optional[Tuple[int, int]] = None) -> List[str]:
+        """Render a player-centered viewport spanning the current 3x3 chunk window."""
+        self._frame_placed_object_lookup = self.build_frame_placed_object_lookup()
+        self.prepare_wilderness_runtime_overlays()
+        self._frame_wilderness_seasonal_surface_lookup = getattr(
+            self, "_active_wilderness_seasonal_surface_lookup", {}
+        )
+        focus_x = int(self.state.player_x if focus_x is None else focus_x)
+        focus_y = int(self.state.player_y if focus_y is None else focus_y)
+        # Any terrain close enough to be drawn is generated before this frame.
+        # The broader 3x3 cache can continue warming incrementally off screen.
+        visible_prepared = self.prepare_wilderness_visible_chunks(focus_x, focus_y, margin=0)
+        if visible_prepared:
+            self._wilderness_stream_last_prefetch_time = time.monotonic()
+            self._wilderness_stream_last_prefetch_facing = str(getattr(self.state, "facing", "DOWN"))
+        # Evict stale stream-only maps, but do not eagerly generate the other
+        # seven neighbors. At most one likely destination warms at a controlled
+        # interval, and never in a frame that already had to prepare visibility.
+        self.prepare_wilderness_stream_window(limit=0)
+        if not visible_prepared:
+            self.prepare_wilderness_predictive_chunk(focus_x, focus_y)
+        current_x, current_y = int(self.state.wilderness_chunk_x), int(self.state.wilderness_chunk_y)
+        current_map = self.active_map()
+        map_h = len(current_map)
+        map_w = len(current_map[0]) if map_h else 0
+        actors = self.frame_actor_position_lookups(map_w, map_h)
+        npc_positions = self.town_npc_position_lookup()
+        procedural_town_active = bool(self.current_procedural_town_plan())
+        civic_lookup = self.procedural_town_civic_overlay_lookup() if procedural_town_active else {}
+        current_event_lookup = getattr(self, "_active_wilderness_event_visual_lookup", {})
+        current_seasonal_lookup = getattr(self, "_active_wilderness_seasonal_surface_lookup", {})
+        current_expedition_lookup = getattr(self, "_active_wilderness_expedition_objective_lookup", {})
+        current_expedition_camp = tuple(
+            getattr(self, "_active_wilderness_expedition_camp_position", (-1, -1))
+        )
+        current_feature_lookup = self.wilderness_current_render_feature_lookup(
+            current_x, current_y, current_map,
+        )
+        current_fast_render = not self.on_owned_wilderness_claim()
+        weather_overlay_active = bool(
+            weather_has_precipitation(self.state.weather)
+            and not self.location_is_weather_sheltered()
+        )
+        snapshots = self.wilderness_stream_actor_snapshots()
+        visible_chunks = self.wilderness_stream_viewport_chunks(focus_x, focus_y, margin=0)
+        neighbor_grids = {
+            (chunk_x, chunk_y): self.wilderness_stream_map(chunk_x, chunk_y)
+            for chunk_x, chunk_y in visible_chunks
+            if (chunk_x, chunk_y) != (current_x, current_y)
+        }
+        neighbor_event_lookups = {
+            point: self.wilderness_event_visual_lookup(point[0], point[1], grid)
+            for point, grid in neighbor_grids.items()
+            if grid
+        }
+        neighbor_seasonal_lookups = {
+            point: self.wilderness_seasonal_surface_lookup(point[0], point[1], grid)
+            for point, grid in neighbor_grids.items()
+            if grid
+        }
+        neighbor_civic_lookups = {}
+        neighbor_expedition_lookups = {}
+        neighbor_expedition_camps = {}
+        neighbor_feature_lookups = {}
+        for point in neighbor_grids:
+            plan = self.procedural_town_plan(point[0], point[1])
+            if plan:
+                neighbor_civic_lookups[point] = self.procedural_town_civic_overlay_lookup(plan)
+            grid = neighbor_grids.get(point)
+            if grid:
+                neighbor_feature_lookups[point] = self.wilderness_stream_feature_lookup(point[0], point[1], grid)
+            if grid and self.active_wilderness_expedition_for_chunk(point[0], point[1]):
+                objective_lookup = {}
+                for objective_x, objective_y in self.wilderness_expedition_objective_positions(point[0], point[1], grid):
+                    objective = self.wilderness_expedition_objective_for_chunk_at(
+                        point[0], point[1], objective_x, objective_y, grid
+                    )
+                    if objective:
+                        objective_lookup[(objective_x, objective_y)] = objective
+                neighbor_expedition_lookups[point] = objective_lookup
+                neighbor_expedition_camps[point] = self.wilderness_expedition_camp_position(point[0], point[1], grid)
+        center_screen_x, center_screen_y = VIEW_WIDTH // 2, VIEW_HEIGHT // 2
+        lines = []
+        for screen_y in range(VIEW_HEIGHT):
+            line = []
+            relative_y = focus_y + screen_y - center_screen_y
+            for screen_x in range(VIEW_WIDTH):
+                relative_x = focus_x + screen_x - center_screen_x
+                chunk_x, chunk_y, local_x, local_y = self.wilderness_stream_resolve(relative_x, relative_y)
+                if (chunk_x, chunk_y) != (current_x, current_y):
+                    snapshot = snapshots.get((chunk_x, chunk_y, local_x, local_y))
+                    if cursor == (relative_x, relative_y):
+                        line.append(colorize("X", C.PLACEMENT))
+                    elif snapshot:
+                        line.append(self.render_wilderness_stream_actor(snapshot[0], snapshot[1]))
+                    else:
+                        grid = neighbor_grids.get((chunk_x, chunk_y))
+                        if grid:
+                            world_x, world_y = self.wilderness_world_coords(chunk_x, chunk_y, local_x, local_y)
+                            overlay = (
+                                self.render_weather_overlay(
+                                    local_x,
+                                    local_y,
+                                    grid,
+                                    world_x=world_x,
+                                    world_y=world_y,
+                                )
+                                if weather_overlay_active
+                                else None
+                            )
+                            line.append(
+                                overlay
+                                if overlay is not None
+                                else self.render_streamed_wilderness_tile(
+                                    chunk_x,
+                                    chunk_y,
+                                    local_x,
+                                    local_y,
+                                    grid,
+                                    neighbor_event_lookups.get((chunk_x, chunk_y), {}),
+                                    neighbor_civic_lookups.get((chunk_x, chunk_y), {}),
+                                    neighbor_expedition_lookups.get((chunk_x, chunk_y), {}),
+                                    neighbor_expedition_camps.get((chunk_x, chunk_y), (-1, -1)),
+                                    neighbor_feature_lookups.get((chunk_x, chunk_y), {}),
+                                    (chunk_x, chunk_y) in neighbor_civic_lookups,
+                                    seasonal_lookup=neighbor_seasonal_lookups.get((chunk_x, chunk_y), {}),
+                                )
+                            )
+                        else:
+                            tile = self.wilderness_stream_preview_tile(chunk_x, chunk_y, local_x, local_y)
+                            line.append(self.render_streamed_wilderness_raw_tile(
+                                tile,
+                                int(world_x) * 31 + int(world_y) * 17,
+                                frozen_water=(
+                                    tile == "~"
+                                    and self.wilderness_water_is_frozen_at(local_x, local_y, chunk_x, chunk_y)
+                                ),
+                            ))
+                    continue
+                position = (local_x, local_y)
+                if cursor == (relative_x, relative_y):
+                    line.append(colorize("X", C.PLACEMENT))
+                elif position == (int(self.state.player_x), int(self.state.player_y)):
+                    line.append(self.render_player())
+                elif self.state.fishing_active and position == (int(self.state.fishing_target_x), int(self.state.fishing_target_y)):
+                    phase = self.fishing_phase()
+                    line.append(colorize("!" if phase == "bite" else ("?" if phase == "nibble" else "o"), C.PLACEMENT if phase == "bite" else C.WATER))
+                elif position in actors["stronghold_enemies"]:
+                    enemy = actors["stronghold_enemies"][position]
+                    line.append(self.render_dungeon_roguelike_enemy(enemy) if self.wilderness_field_combat_active() else self.render_mine_enemy(enemy))
+                elif position in actors["bounty_targets"]:
+                    enemy = actors["bounty_targets"][position]
+                    line.append(self.render_dungeon_roguelike_enemy(enemy) if self.wilderness_field_combat_active() else self.render_mine_enemy(enemy))
+                elif position in actors["wilderness_travelers"]:
+                    line.append(self.render_wilderness_traveler(actors["wilderness_travelers"][position]))
+                elif position in actors["wilderness_animals"]:
+                    line.append(self.render_animal(actors["wilderness_animals"][position]))
+                elif position in actors["followers"]:
+                    line.append(self.render_travel_follower(str(actors["followers"][position])))
+                elif position in npc_positions:
+                    line.append(self.render_town_npc(npc_positions[position]))
+                else:
+                    overlay = (
+                        self.render_weather_overlay(local_x, local_y, current_map)
+                        if weather_overlay_active
+                        else None
+                    )
+                    line.append(
+                        overlay
+                        if overlay is not None
+                        else (
+                            self.render_streamed_wilderness_tile(
+                                current_x,
+                                current_y,
+                                local_x,
+                                local_y,
+                                current_map,
+                                current_event_lookup,
+                                civic_lookup,
+                                current_expedition_lookup,
+                                current_expedition_camp,
+                                current_feature_lookup,
+                                procedural_town_active,
+                                seasonal_lookup=current_seasonal_lookup,
+                            )
+                            if current_fast_render
+                            else self.render_tile(
+                                local_x, local_y, current_map,
+                                civic_lookup, procedural_town_active, {},
+                            )
+                        )
+                    )
+            lines.append("".join(line))
+        self._frame_placed_object_lookup = None
+        self._frame_wilderness_seasonal_surface_lookup = None
+        return lines
+
     def map_lines(self) -> List[str]:
         if self.on_wilderness_overworld():
             return self.overworld_lines()
+        if self.on_wilderness():
+            return self.wilderness_stream_map_lines()
         lines: List[str] = []
         s = self.state
         tile_map = self.active_map()
+        self._frame_placed_object_lookup = self.build_frame_placed_object_lookup()
+        # Lighting is derived once per frame, then shared by every interior cell.
+        self._interior_light_position_cache = {}
         map_h = len(tile_map)
         map_w = len(tile_map[0]) if map_h else 0
         if (
@@ -16094,6 +19485,27 @@ class FarmGame(
             and hasattr(self, "procedural_town_custom_tile_color_lookup")
             else {}
         )
+        town_public_event_lookup = self.town_public_event_features() if self.on_town() else None
+        town_streetlamp_lit_tiles = self.town_streetlamp_lit_tile_lookup() if self.on_town() else None
+        unlocked_town_buildings = (
+            set(
+                normalize_unlocked_town_buildings(
+                    getattr(self.state, "unlocked_town_buildings", []),
+                    getattr(self.state, "town_development_stage", 0),
+                )
+            )
+            if self.on_town()
+            else None
+        )
+        player_owned_residence = bool(
+            self.on_procedural_town_interior()
+            and hasattr(self, "on_player_owned_procedural_residence")
+            and self.on_player_owned_procedural_residence()
+        )
+        render_weather = bool(
+            not self.location_is_weather_sheltered()
+            and weather_has_precipitation(self.state.weather)
+        )
 
         held_obj = s.held_object if self.can_hold_objects_here() else None
         held_anchor = self.front_tile_pos() if held_obj else None
@@ -16115,6 +19527,7 @@ class FarmGame(
                 stronghold_enemy = actor_lookups["stronghold_enemies"].get(position)
                 bounty_target = actor_lookups["bounty_targets"].get(position)
                 wilderness_animal = actor_lookups["wilderness_animals"].get(position)
+                wilderness_traveler = actor_lookups["wilderness_travelers"].get(position)
                 farm_animal = actor_lookups["farm_animals"].get(position)
                 follower_id = actor_lookups["followers"].get(position)
                 if world_x >= map_w or world_y >= map_h:
@@ -16132,11 +19545,13 @@ class FarmGame(
                 elif mine_enemy:
                     line.append(self.render_mine_enemy(mine_enemy))
                 elif dungeon_enemy:
-                    line.append(self.render_mine_enemy(dungeon_enemy))
+                    line.append(self.render_dungeon_roguelike_enemy(dungeon_enemy))
                 elif stronghold_enemy:
-                    line.append(self.render_mine_enemy(stronghold_enemy))
+                    line.append(self.render_dungeon_roguelike_enemy(stronghold_enemy) if self.wilderness_field_combat_active() else self.render_mine_enemy(stronghold_enemy))
                 elif bounty_target:
-                    line.append(self.render_mine_enemy(bounty_target))
+                    line.append(self.render_dungeon_roguelike_enemy(bounty_target) if self.wilderness_field_combat_active() else self.render_mine_enemy(bounty_target))
+                elif wilderness_traveler:
+                    line.append(self.render_wilderness_traveler(wilderness_traveler))
                 elif wilderness_animal:
                     line.append(self.render_animal(wilderness_animal))
                 elif farm_animal:
@@ -16146,10 +19561,10 @@ class FarmGame(
                 elif npc:
                     line.append(self.render_town_npc(npc))
                 else:
-                    overlay = self.render_weather_overlay(
-                        world_x,
-                        world_y,
-                        tile_map,
+                    overlay = (
+                        self.render_weather_overlay(world_x, world_y, tile_map)
+                        if render_weather
+                        else None
                     )
                     if overlay is not None:
                         line.append(overlay)
@@ -16162,15 +19577,20 @@ class FarmGame(
                                 civic_overlay_lookup,
                                 procedural_town_active,
                                 procedural_town_color_lookup,
+                                player_owned_residence,
+                                town_public_event_lookup,
+                                town_streetlamp_lit_tiles,
+                                unlocked_town_buildings,
                             )
                         )
             lines.append("".join(line))
+        self._frame_placed_object_lookup = None
         return lines
 
     def footer_lines(self) -> List[str]:
         width = self.hud_line_width()
         max_rows = self.hud_footer_budget()
-        lines = ["-" * width]
+        lines = [colorize("-" * width, C.UI_BORDER)]
 
         def append_wrapped(
             text: object,
@@ -16192,34 +19612,43 @@ class FarmGame(
             ok, reason = self.can_place_object(self.state.held_object, x, y) if self.can_hold_objects_here() else (False, "wrong location")
             status = "OK" if ok else f"Blocked: {reason}"
             status_blocks.append(f"Holding: {self.state.held_object} ({self.footprint_label(self.state.held_object)}) | Z place | X store | {status}")
+        if self.map_native_combat_active():
+            status_blocks.append(self.dungeon_combat_status_line())
 
         target_line = self.target_status_line() if self.state.show_target_info else ""
         control_line = ""
         if self.state.show_control_hints:
             if self.on_wilderness():
-                control_line = "WASD move/explore edges | Red patrols fight | Z interact/gather/enter | I inspect | L look cursor | U overworld | R emergency return"
+                if self.wilderness_field_combat_active():
+                    control_line = "FIELD COMBAT: WASD/Num move/attack | F aim | V skills | P potion | ./Num5 wait | cross region to escape"
+                else:
+                    control_line = "WASD/Num sail | Z use dock | I inspect | R return" if self.state.wilderness_boating else "WASD/Num move | Red patrols fight | Z interact/enter | I inspect | L look | U overworld | R return"
             elif self.on_wilderness_overworld():
-                control_line = "Overworld: WASD move cursor | U/Z/Enter enter | Esc/C/Q/Tab cancel | R return to town"
+                control_line = "Overworld: WASD/Num move | U/Z/Enter enter | Esc/C/Q/Tab cancel | R return"
             elif self.on_wilderness_cave():
-                control_line = "WASD move | F pickaxe nodes | Z gather/exit | I inspect | L look cursor | Tab menu"
+                control_line = "WASD/Num move | F pickaxe | Z gather/exit | I inspect | L look | Tab menu"
             elif self.on_wilderness_dungeon():
-                control_line = "WASD move | Red enemies engage nearby | Z chests/shrines/exit | I inspect | L look cursor"
+                control_line = "WASD/Num move/attack | F aim | V skills | P potion | ./Num5 wait | Z use | I inspect"
+            elif self.on_wilderness_outpost():
+                control_line = "WASD/Num move | Z records/bunk/supplies | D leave | I inspect | Tab menu"
+            elif self.on_wilderness_structure():
+                control_line = "WASD/Num move | Z rest/records/services | D leave | I inspect | Tab menu"
             elif self.on_mine():
-                control_line = "WASD move | Clear enemies to open > stairs | F mine | Z interact | L look cursor"
+                control_line = "WASD/Num move | Clear enemies for > | F mine | Z interact | L look"
             elif self.on_town():
-                control_line = "WASD move | Z doors/signs/benches | I inspect | L look cursor | Tab menu"
+                control_line = "WASD/Num move | Z doors/signs/benches | I inspect | L look | Tab menu"
             else:
-                control_line = "WASD move | F use tool | Z use furniture/doors | I inspect | L look cursor | X move furniture | Tab menu"
+                control_line = "WASD/Num move | F tool | Z use | I inspect | L look | X furniture | Tab menu"
 
-        append_wrapped(self.state.message, max_lines=2, ellipsis=False)
+        append_wrapped(f"MESSAGE | {self.state.message}", max_lines=2, ellipsis=False)
 
         for block in status_blocks:
-            append_wrapped(block, reserve_after=(3 if target_line else 0) + (2 if control_line else 0), max_lines=2)
+            append_wrapped(f"STATUS | {block}", reserve_after=(3 if target_line else 0) + (2 if control_line else 0), max_lines=2)
         if self.state.show_target_info:
             append_wrapped(target_line, reserve_after=2 if control_line else 0, max_lines=3)
         if control_line:
-            append_wrapped(control_line, max_lines=2)
-        return lines
+            append_wrapped(f"CONTROLS | {control_line}", max_lines=2)
+        return [lines[0]] + [style_labeled_row(line) for line in lines[1:]]
 
     def invalidate_draw_cache(self):
         """Force the next normal game draw to repaint after modal/legacy screens."""
@@ -16273,6 +19702,9 @@ class FarmGame(
 
     def set_message(self, msg: str):
         self.sync_travel_followers()
+        rejected = self.drop_rejected_inventory_near_player()
+        if rejected:
+            msg = f"{msg} Backpack full; {format_drops(rejected)} was left in a dropped pack here."
         self.state.message = msg
 
     def safe_menu(self, menu_func, fallback_message: str = "Closed menu."):
@@ -16291,12 +19723,19 @@ class FarmGame(
     def autosave_with_message(self, msg: str):
         """Autosave quietly, then show the gameplay message if saving worked."""
         self.sync_travel_followers()
+        rejected = self.drop_rejected_inventory_near_player()
+        if rejected:
+            msg = f"{msg} Backpack full; {format_drops(rejected)} was left in a dropped pack here."
         if self.save(quiet=True):
             self.set_message(msg)
 
-    def advance_time(self, minutes: int):
+    def advance_time(self, minutes: int, allow_natural_recovery: bool = True):
         s = self.state
+        minutes = max(0, int(minutes))
         previous_phase = self.town_routine_phase()
+        previous_commute_band = self.home_region_commute_band()
+        if allow_natural_recovery and minutes > 0:
+            self.apply_natural_recovery(minutes)
         s.minute += minutes
         while s.minute >= 60:
             s.minute -= 60
@@ -16309,7 +19748,9 @@ class FarmGame(
             self.sleep(force=True)
         elif s.hour >= 23:
             self.set_message("It is very late. You should sleep soon.")
-        if self.on_town():
+        if self.home_region_commute_band() != previous_commute_band:
+            self.invalidate_home_region_commuter_cache()
+        if self.on_town() or self.on_town_interior():
             current_phase = self.town_routine_phase()
             if current_phase != previous_phase or s.minute % 5 == 0:
                 self.update_town_npcs(force_reanchor=current_phase != previous_phase)
@@ -16372,6 +19813,79 @@ class FarmGame(
         )
         return int(self.state.stamina) - before
 
+    def record_player_damage(self) -> None:
+        """Restart the quiet period before natural HP recovery can resume."""
+        self.state.natural_health_recovery_delay_minutes = (
+            NATURAL_HEALTH_RECOVERY_DELAY_MINUTES
+        )
+        self.state.natural_health_recovery_minutes = 0
+
+    def apply_natural_recovery(self, minutes: int) -> Tuple[int, int]:
+        """Recover field stamina and post-combat HP from elapsed world time."""
+        elapsed = max(0, int(minutes))
+        if elapsed <= 0:
+            return 0, 0
+
+        stamina_gained = 0
+        if self.missing_stamina() > 0:
+            stamina_progress = max(
+                0,
+                int(getattr(self.state, "natural_stamina_recovery_minutes", 0)),
+            ) + elapsed
+            stamina_ticks, stamina_remainder = divmod(
+                stamina_progress,
+                NATURAL_STAMINA_RECOVERY_INTERVAL_MINUTES,
+            )
+            if stamina_ticks > 0:
+                stamina_gained = self.restore_stamina(stamina_ticks)
+            self.state.natural_stamina_recovery_minutes = (
+                stamina_remainder if self.missing_stamina() > 0 else 0
+            )
+        else:
+            # Do not bank recovery while already rested.
+            self.state.natural_stamina_recovery_minutes = 0
+
+        profile = build_player_combat_profile(self.state)
+        current_hp = max(1, int(profile.get("current_hp", 1) or 1))
+        max_hp = max(1, int(profile.get("max_hp", current_hp) or current_hp))
+        health_gained = 0
+        if current_hp >= max_hp:
+            self.state.natural_health_recovery_minutes = 0
+            self.state.natural_health_recovery_delay_minutes = 0
+            return stamina_gained, health_gained
+
+        recovery_minutes = elapsed
+        delay = max(
+            0,
+            int(getattr(self.state, "natural_health_recovery_delay_minutes", 0)),
+        )
+        if delay > 0:
+            delayed_minutes = min(delay, recovery_minutes)
+            delay -= delayed_minutes
+            recovery_minutes -= delayed_minutes
+            self.state.natural_health_recovery_delay_minutes = delay
+        if recovery_minutes <= 0:
+            return stamina_gained, health_gained
+
+        health_progress = max(
+            0,
+            int(getattr(self.state, "natural_health_recovery_minutes", 0)),
+        ) + recovery_minutes
+        health_ticks, health_remainder = divmod(
+            health_progress,
+            NATURAL_HEALTH_RECOVERY_INTERVAL_MINUTES,
+        )
+        if health_ticks > 0:
+            before_hp = current_hp
+            self.state.combat_current_hp = min(max_hp, current_hp + health_ticks)
+            health_gained = int(self.state.combat_current_hp) - before_hp
+        self.state.natural_health_recovery_minutes = (
+            health_remainder
+            if int(self.state.combat_current_hp) < max_hp
+            else 0
+        )
+        return stamina_gained, health_gained
+
 
     def front_tile_pos(self) -> Tuple[int, int]:
         """Tile directly in front of the player based on facing direction."""
@@ -16386,14 +19900,14 @@ class FarmGame(
         return s.player_x + dx, s.player_y + dy
 
     def set_facing_from_delta(self, dx: int, dy: int):
-        if dx < 0:
-            self.state.facing = "LEFT"
-        elif dx > 0:
-            self.state.facing = "RIGHT"
-        elif dy < 0:
+        if dy < 0:
             self.state.facing = "UP"
         elif dy > 0:
             self.state.facing = "DOWN"
+        elif dx < 0:
+            self.state.facing = "LEFT"
+        elif dx > 0:
+            self.state.facing = "RIGHT"
 
     def target_tile_pos(self) -> Tuple[int, int]:
         """Return the current tool target tile based on the selected targeting mode."""
@@ -16419,14 +19933,45 @@ class FarmGame(
     def world_tick(self, elapsed_seconds: float):
         """
         Advance passive world time based on elapsed real time, not player actions.
-        This keeps precipitation/time steady whether the player is moving or idle.
+        Weather animation remains active whether the player is moving or idle.
         """
+        elapsed_seconds = max(0.0, float(elapsed_seconds))
+        if bool(getattr(self.state, "ambient_visuals_enabled", True)):
+            self._ambient_visual_accumulator = float(
+                getattr(self, "_ambient_visual_accumulator", 0.0)
+            ) + elapsed_seconds
+            while self._ambient_visual_accumulator >= 0.9:
+                self._ambient_visual_accumulator -= 0.9
+                self._ambient_visual_phase = int(
+                    getattr(self, "_ambient_visual_phase", 0)
+                ) + 1
+        else:
+            self._ambient_visual_accumulator = 0.0
+
+        weather_interval = {
+            "Rainy": 0.42,
+            "Stormy": 0.22,
+            "Snowy": 0.65,
+            "Blizzard": 0.28,
+        }.get(str(getattr(self.state, "weather", "")), 0.0)
+        if weather_interval > 0.0 and not self.location_is_weather_sheltered():
+            self._weather_visual_accumulator = float(
+                getattr(self, "_weather_visual_accumulator", 0.0)
+            ) + elapsed_seconds
+            while self._weather_visual_accumulator >= weather_interval:
+                self._weather_visual_accumulator -= weather_interval
+                self._weather_visual_phase = int(
+                    getattr(self, "_weather_visual_phase", 0)
+                ) + 1
+        else:
+            self._weather_visual_accumulator = 0.0
+
         if not self.state.live_time_enabled:
             self._world_time_accumulator = 0.0
             return
 
         self.fishing_tick(elapsed_seconds)
-        self._world_time_accumulator = getattr(self, "_world_time_accumulator", 0.0) + max(0.0, elapsed_seconds)
+        self._world_time_accumulator = getattr(self, "_world_time_accumulator", 0.0) + elapsed_seconds
 
         minute_seconds = self.game_minute_real_seconds()
         while self._world_time_accumulator >= minute_seconds:
@@ -16445,25 +19990,49 @@ class FarmGame(
             self.clear_fishing_state()
             self.set_message("You moved and pulled your line from the water.")
             return
+        dx = max(-1, min(1, int(dx)))
+        dy = max(-1, min(1, int(dy)))
+        if not dx and not dy:
+            return
+        if dx and dy:
+            if self.on_wilderness():
+                horizontal_open = self.wilderness_water_movement_preview(
+                    int(s.player_x) + dx, int(s.player_y)
+                )
+                vertical_open = self.wilderness_water_movement_preview(
+                    int(s.player_x), int(s.player_y) + dy
+                )
+            else:
+                horizontal_open = self.passable(int(s.player_x) + dx, int(s.player_y))
+                vertical_open = self.passable(int(s.player_x), int(s.player_y) + dy)
+            if not horizontal_open or not vertical_open:
+                self.set_facing_from_delta(dx, dy)
+                self.set_message("You cannot move diagonally through a blocked corner.")
+                return
         self.set_facing_from_delta(dx, dy)
         was_in_shop = self.in_seed_shop(s.player_x, s.player_y)
         was_in_blacksmith = self.in_blacksmith(s.player_x, s.player_y)
         was_near_bin = self.near_shipping_bin(s.player_x, s.player_y)
+        previous_player_position = (int(s.player_x), int(s.player_y))
         nx, ny = s.player_x + dx, s.player_y + dy
 
         travel_follower_id = self.travel_follower_at(nx, ny) if self.in_active_bounds(nx, ny) else None
         if travel_follower_id:
-            follower = self.travel_follower_data(travel_follower_id)
-            self.set_message(f"{follower.get('name', 'Your follower')} is there. Use Z/Enter to talk or change follow mode.")
-            return
+            if not self.yield_travel_follower_to_player(travel_follower_id):
+                follower = self.travel_follower_data(travel_follower_id)
+                self.set_message(f"{follower.get('name', 'Your follower')} is there. Use Z/Enter to talk or change follow mode.")
+                return
 
         if self.on_farm() and self.in_active_bounds(nx, ny) and self.farm_animal_at(nx, ny):
             animal = self.farm_animal_at(nx, ny)
-            self.startle_farm_animal(animal)
-            self.set_message(f"{animal.get('name', 'The animal')} the {animal.get('species', 'animal')} moves out of your path.")
+            moved = self.startle_farm_animal(animal)
+            if moved:
+                self.set_message(f"{animal.get('name', 'The animal')} the {animal.get('species', 'animal')} moves out of your path.")
+            else:
+                self.set_message(f"{animal.get('name', 'The animal')} greets you. Use Z/Enter to give individual care.")
             return
 
-        if (self.on_town() or self.on_town_interior() or self.on_house()) and self.in_active_bounds(nx, ny) and self.town_npc_at(nx, ny):
+        if (self.on_town() or self.on_town_interior() or self.on_house() or self.on_farm() or self.on_mine()) and self.in_active_bounds(nx, ny) and self.town_npc_at(nx, ny):
             npc = self.town_npc_at(nx, ny)
             self.town_npc_face_player(npc)
             self.set_message(f"{npc.get('name', 'Someone')} pauses, {self.town_npc_activity_label(npc)}. Use Z/Enter to talk.")
@@ -16483,6 +20052,9 @@ class FarmGame(
 
         if self.on_farm() and nx <= 0 and 8 <= ny <= 12: self.transition_to_town(); return
         if self.on_farm() and ny <= 0 and 25 <= nx <= 29: self.transition_to_mine(); return
+        if self.on_farm() and nx >= self.active_map_width() - 1 and 8 <= ny <= 12:
+            self.transition_from_farm_to_origin_world()
+            return
         if self.on_farm() and self.is_farmhouse_door(nx, ny): self.transition_to_house(); return
         if self.on_town() and nx >= self.active_map_width() - 1 and 18 <= ny <= 22: self.transition_to_farm(); return
         if self.on_town() and ((ny <= 0 and 56 <= nx <= 59) or (self.in_active_bounds(nx, ny) and self.active_map()[ny][nx] == "W")):
@@ -16525,11 +20097,31 @@ class FarmGame(
         if self.on_wilderness_dungeon() and self.in_active_bounds(nx, ny) and self.active_map()[ny][nx] == ">":
             self.descend_wilderness_dungeon()
             return
+        if self.on_wilderness_dungeon() and self.in_active_bounds(nx, ny) and self.dungeon_door_closed(nx, ny):
+            self.dungeon_use_door(nx, ny)
+            return
         if self.on_wilderness_dungeon() and self.in_active_bounds(nx, ny) and self.wilderness_dungeon_enemy_at(nx, ny):
             self.start_wilderness_dungeon_combat_encounter(self.wilderness_dungeon_enemy_at(nx, ny), reason="bump")
             return
+        if self.on_wilderness_outpost() and self.in_active_bounds(nx, ny) and self.active_map()[ny][nx] == "D":
+            self.exit_wilderness_outpost()
+            return
+        if self.on_wilderness_structure() and self.in_active_bounds(nx, ny) and self.active_map()[ny][nx] == "D":
+            self.exit_wilderness_structure()
+            return
         if self.on_wilderness():
             if self.in_active_bounds(nx, ny):
+                home_gateway = self.origin_world_gateway_at(nx, ny)
+                if home_gateway:
+                    self.enter_origin_world_gateway(home_gateway)
+                    return
+            if self.in_active_bounds(nx, ny):
+                if self.active_map()[ny][nx] == WILDERNESS_OUTPOST_SYMBOL:
+                    self.enter_wilderness_outpost(nx, ny)
+                    return
+                if self.active_map()[ny][nx] == WILDERNESS_STRUCTURE_SYMBOL:
+                    self.enter_wilderness_structure(nx, ny)
+                    return
                 building = self.procedural_town_building_door_at(nx, ny)
                 if building:
                     self.enter_procedural_town_building(building)
@@ -16539,6 +20131,11 @@ class FarmGame(
                 return
             if self.in_active_bounds(nx, ny) and self.bounty_target_at(nx, ny):
                 self.start_bounty_combat_encounter(self.bounty_target_at(nx, ny), reason="bump")
+                return
+            if self.in_active_bounds(nx, ny) and self.wilderness_random_combat_enemy_at(nx, ny):
+                enemy = self.wilderness_random_combat_enemy_at(nx, ny)
+                if self.begin_wilderness_field_combat(enemy, reason="bump"):
+                    self.dungeon_player_melee_attack(enemy)
                 return
             if self.in_active_bounds(nx, ny) and self.animal_at(nx, ny):
                 animal = self.animal_at(nx, ny)
@@ -16551,32 +20148,10 @@ class FarmGame(
             if self.in_active_bounds(nx, ny) and self.active_map()[ny][nx] == "X":
                 self.enter_wilderness_dungeon(nx, ny)
                 return
-            # Chunk travel triggers at the border gate rows/columns, not only
-            # outside the map. Otherwise the solid # border can prevent travel.
+            # The player may stand on the outermost tile. Only the next step
+            # crosses, preserving exact world coordinates across the seam.
             w = self.active_map_width()
             h = self.active_map_height()
-            mid_x = w // 2
-            mid_y = h // 2
-
-            # North/south/east/west gate bands. Entry lanes are cleared around
-            # these same bands by clear_wilderness_chunk_entry_lanes().
-            if ny <= 0 and abs(nx - mid_x) <= 4:
-                self.transition_wilderness_chunk(0, -1)
-                return
-            if ny >= h - 1 and abs(nx - mid_x) <= 4:
-                if self.state.wilderness_chunk_x == 0 and self.state.wilderness_chunk_y == 0:
-                    self.return_from_wilderness_to_town(emergency=False)
-                else:
-                    self.transition_wilderness_chunk(0, 1)
-                return
-            if nx <= 0 and abs(ny - mid_y) <= 4:
-                self.transition_wilderness_chunk(-1, 0)
-                return
-            if nx >= w - 1 and abs(ny - mid_y) <= 4:
-                self.transition_wilderness_chunk(1, 0)
-                return
-
-            # Safety fallback for any out-of-bounds movement.
             if ny >= h:
                 self.transition_wilderness_chunk(0, 1)
                 return
@@ -16599,6 +20174,9 @@ class FarmGame(
         if self.on_procedural_town_interior() and self.in_active_bounds(nx, ny) and self.active_map()[ny][nx] == "D":
             self.exit_procedural_town_building()
             return
+        if self.on_authored_town_residence() and self.in_active_bounds(nx, ny) and self.active_map()[ny][nx] == "D":
+            self.exit_authored_town_residence()
+            return
         if self.on_general_store() and self.in_active_bounds(nx, ny) and self.active_map()[ny][nx] == "D": self.transition_from_general_store_to_town(); return
         if self.on_blacksmith_interior() and self.in_active_bounds(nx, ny) and self.active_map()[ny][nx] == "D": self.transition_from_blacksmith_to_town(); return
         if self.on_library_interior() and self.in_active_bounds(nx, ny) and self.active_map()[ny][nx] == "D": self.transition_from_library_to_town(); return
@@ -16612,9 +20190,15 @@ class FarmGame(
         if self.on_market_row() and self.in_active_bounds(nx, ny) and self.active_map()[ny][nx] == "D": self.transition_from_market_row_to_town(); return
         if self.on_museum() and self.in_active_bounds(nx, ny) and self.active_map()[ny][nx] == "D": self.transition_from_museum_to_town(); return
 
+        if self.on_wilderness() and self.in_active_bounds(nx, ny):
+            if not self.prepare_wilderness_water_movement(nx, ny):
+                return
+
         if self.passable(nx, ny):
             s.player_x, s.player_y = nx, ny
-            self.update_travel_followers_after_player_move()
+            self.update_travel_followers_after_player_move(previous_player_position)
+            if self.on_wilderness():
+                self.apply_wilderness_current_after_move(dx, dy)
             now_in_shop = self.in_seed_shop(nx, ny)
             now_in_blacksmith = self.in_blacksmith(nx, ny)
             now_near_bin = self.near_shipping_bin(nx, ny)
@@ -16634,30 +20218,47 @@ class FarmGame(
                 if self.check_mine_enemy_engagement(reason="enemy"):
                     return
             if self.on_wilderness_dungeon():
+                terrain = self.dungeon_terrain_name(nx, ny)
+                move_cost = self.dungeon_player_move_cost(nx, ny)
                 if self.in_active_bounds(nx, ny) and self.active_map()[ny][nx] == "!":
                     self.trigger_wilderness_dungeon_trap(nx, ny)
-                if self.check_wilderness_dungeon_enemy_engagement(reason="approach"):
-                    return
-                self.update_wilderness_dungeon_enemies()
-                if self.check_wilderness_dungeon_enemy_engagement(reason="enemy"):
-                    return
+                self._dungeon_turn_messages = [] if not getattr(self, "_dungeon_turn_messages", None) else self._dungeon_turn_messages
+                self.dungeon_emit_noise(nx, ny, self.dungeon_terrain_noise_radius(nx, ny), label=f"movement through {terrain}")
+                self.advance_dungeon_roguelike_turn("move", enemy_phases=move_cost)
+                return
             if self.on_wilderness():
+                if self.wilderness_field_combat_active():
+                    terrain = self.dungeon_terrain_name(nx, ny)
+                    move_cost = self.dungeon_player_move_cost(nx, ny)
+                    self._dungeon_turn_messages = [] if not getattr(self, "_dungeon_turn_messages", None) else self._dungeon_turn_messages
+                    self.dungeon_emit_noise(
+                        nx, ny, self.dungeon_terrain_noise_radius(nx, ny),
+                        label=f"movement through {terrain}",
+                    )
+                    self.advance_dungeon_roguelike_turn("move", enemy_phases=move_cost)
+                    return
                 if self.check_wilderness_stronghold_enemy_engagement(reason="approach"):
                     return
                 if self.check_bounty_target_engagement(reason="approach"):
                     return
+                if self.check_wilderness_random_combat_engagement(reason="approach"):
+                    return
                 self.update_wilderness_stronghold_enemies()
                 self.update_bounty_targets()
+                self.update_wilderness_travelers()
                 if self.check_wilderness_stronghold_enemy_engagement(reason="enemy"):
                     return
                 if self.check_bounty_target_engagement(reason="enemy"):
                     return
+                if self.check_wilderness_random_combat_engagement(reason="enemy"):
+                    return
                 self.update_wilderness_animals()
+                self.update_wilderness_stream_actors(limit=1)
                 if self.current_procedural_town_plan():
                     self.update_procedural_town_residents()
             if self.on_procedural_town_interior():
                 self.update_procedural_town_residents()
-            if self.on_town():
+            if self.on_town() or self.on_town_interior():
                 self.update_town_npcs()
             if self.on_farm():
                 self._farm_animal_player_steps = int(getattr(self, "_farm_animal_player_steps", 0)) + 1
@@ -16722,8 +20323,21 @@ class FarmGame(
     def is_interactable_tile(self, x: int, y: int) -> bool:
         """Return whether a tile has a general-world interaction."""
         if not self.in_active_bounds(x, y):
+            if self.on_wilderness():
+                chunk_x, chunk_y, _local_x, _local_y = self.wilderness_stream_resolve(x, y)
+                dx = int(chunk_x) - int(self.state.wilderness_chunk_x)
+                dy = int(chunk_y) - int(self.state.wilderness_chunk_y)
+                if abs(dx) + abs(dy) == 1:
+                    _kind, actor = self.wilderness_stream_actor_at(x, y)
+                    if actor or self.wilderness_stream_feature_at(x, y):
+                        return True
+                    grid = self.wilderness_stream_map(chunk_x, chunk_y)
+                    if grid:
+                        return self.wilderness_stream_tile_interactable(str(grid[_local_y][_local_x]))
             return False
         if self.travel_follower_at(x, y):
+            return True
+        if (self.on_farm() or self.on_mine()) and self.town_npc_at(x, y):
             return True
         if self.on_farm() and self.farm_animal_at(x, y):
             return True
@@ -16739,10 +20353,17 @@ class FarmGame(
             return tile in {
                 "D", "<", "U", ">", "&", "_", "|",
             }
+        if self.on_wilderness_outpost():
+            return self.active_map()[y][x] in {"D", "&", "@", "n", "b", "s", "P"}
+        if self.on_wilderness_structure():
+            return self.active_map()[y][x] in {"D", "&", "@", "b", "s", "P", "+"}
 
         if self.on_town():
+            public_feature = self.town_public_event_feature_at(x, y)
+            if public_feature:
+                return f"Z/Enter: {public_feature.get('name', 'public occasion')}"
             tile = self.active_map()[y][x]
-            return self.in_seed_shop(x, y) or self.in_blacksmith(x, y) or tile in ["E", "D", "Q", "G", "C", "X", "L", "M", "I", "Y", "A", "H", "R", "P", "U", "?", "F", "b", "B", "N", "m", "$", "!", "T", "W", "~"]
+            return self.in_seed_shop(x, y) or self.in_blacksmith(x, y) or tile in ["E", "D", "Q", "G", "C", "X", "L", "M", "I", "Y", "A", "H", "R", "P", "U", "?", "F", "b", "B", "N", "m", "$", "!", "T", "W", "~", "h"]
 
         if self.on_town_interior():
             tile = self.active_map()[y][x]
@@ -16750,9 +20371,27 @@ class FarmGame(
 
         if self.on_wilderness():
             tile = self.active_map()[y][x]
+            if self.wilderness_vitality_consequence_at(x, y):
+                return True
+            if self.wilderness_water_salvage_at(x, y):
+                return True
+            if self.wilderness_expedition_camp_visual_at(x, y) or self.wilderness_event_visual_at(x, y):
+                return True
+            if self.wilderness_seasonal_surface_at(x, y):
+                return True
+            if self.wilderness_expedition_objective_at(x, y):
+                return True
+            if self.wilderness_traveler_at(x, y):
+                return True
             if self.bounty_target_at(x, y):
                 return True
             if self.wilderness_stronghold_enemy_at(x, y):
+                return True
+            if self.wilderness_random_combat_enemy_at(x, y):
+                return True
+            if self.wilderness_random_combat_visual_at(x, y):
+                return True
+            if self.dungeon_floor_loot_at(x, y):
                 return True
             if self.reclaimed_stronghold_build_board_at(x, y):
                 return True
@@ -16762,7 +20401,7 @@ class FarmGame(
             if self.get_placed_object(x, y) or self.get_crop(x, y) or self.near_shipping_bin(x, y):
                 return True
             return (
-                tile in ["S", "=", "~", "d", WILDERNESS_CLAIM_SYMBOL, "R", "H", "B", "J", "P", "Y", "u", "K", "Q", "?", "W", "N", "F", "!"]
+                tile in ["S", "=", "~", FIELD_SITE_SYMBOL, WILDERNESS_OUTPOST_SYMBOL, WILDERNESS_STRUCTURE_SYMBOL, WILDERNESS_LANDSCAPE_SYMBOL, WILDERNESS_DOCK_SYMBOL, WILDERNESS_FISHING_SETTLEMENT_SYMBOL, WILDERNESS_CLAIM_SYMBOL, "R", "H", "B", "J", "P", "Y", "u", "K", "Q", "?", "W", "N", "F", "!"]
                 or tile in WILDERNESS_FORAGE_SYMBOLS
                 or tile in ["T", "o", "*", "^"]
             )
@@ -16775,6 +20414,8 @@ class FarmGame(
 
         if self.on_wilderness_dungeon():
             if self.wilderness_dungeon_enemy_at(x, y):
+                return True
+            if self.dungeon_floor_loot_at(x, y):
                 return True
             tile = self.active_map()[y][x]
             return tile in ["<", "U", ">", "+", "$", "P", "S", "?", "!"]
@@ -16824,12 +20465,19 @@ class FarmGame(
         is wider/taller than the farm, so falling through to base_map can crash.
         """
         if not self.in_active_bounds(x, y):
+            if self.on_wilderness():
+                return f"Z/Enter: enter neighboring chunk and interact | {self.describe_streamed_wilderness_tile(x, y)}"
             return "Z/Enter: nothing"
 
         travel_follower_id = self.travel_follower_at(x, y)
         if travel_follower_id:
             follower = self.travel_follower_data(travel_follower_id)
             return f"Z/Enter: talk to {follower.get('name', 'follower')}"
+
+        if self.on_farm() or self.on_mine():
+            local_worker = self.town_npc_at(x, y)
+            if local_worker:
+                return f"Z/Enter: talk to {local_worker.get('name', 'resident')} about local work"
 
         if self.on_farm() and self.farm_animal_at(x, y):
             animal = self.farm_animal_at(x, y)
@@ -16840,6 +20488,13 @@ class FarmGame(
                 if resident.get("procedural_caravan"):
                     return f"Z/Enter: visit {resident.get('name', 'trade caravan')}"
                 return f"Z/Enter: talk to {resident.get('name', 'resident')}"
+        if self.on_wilderness():
+            home_gateway = self.origin_world_gateway_at(x, y)
+            if home_gateway:
+                return f"Walk into entrance: enter the main {home_gateway}"
+            home_sign = self.origin_world_sign_at(x, y)
+            if home_sign:
+                return "Z/Enter: read home-road directions"
         if self.on_procedural_town_interior():
             tile = self.active_map()[y][x]
             if tile == "D":
@@ -16853,11 +20508,27 @@ class FarmGame(
             if tile == ">":
                 return "Walk onto stairs: go down"
             if tile == "&":
-                return "Z/Enter: use settlement service"
+                building = self.current_procedural_town_building()
+                staff = self.procedural_town_building_service_staff(building) if building else []
+                if staff:
+                    return f"Z/Enter: request service from {staff[0].get('name', 'the attendant')}"
+                return "Z/Enter: ring the service bell"
             building = self.current_procedural_town_building()
             if tile == "P" and building and str(building.get("type_id", "")) == "sheriff_office":
                 return "Z/Enter: open bounty board"
             return "Z/Enter: nothing"
+        if self.on_wilderness_outpost():
+            tile = self.active_map()[y][x]
+            if tile == "@":
+                keeper = self.wilderness_outpost_keeper(self.state.wilderness_chunk_x, self.state.wilderness_chunk_y)
+                return f"Z/Enter: talk to {keeper.get('name', 'regional steward')}"
+            if tile == "n":
+                specialist = self.wilderness_specialist_actor(self.state.wilderness_chunk_x, self.state.wilderness_chunk_y)
+                return f"Z/Enter: talk to {specialist.get('name', 'regional specialist')}"
+            return {"D": "Walk into door: return to wilderness", "b": "Z/Enter: rest at outpost", "P": "Z/Enter: review regional records", "&": "Z/Enter: check outpost supplies", "s": "Z/Enter: check weekly supply locker"}.get(tile, "Z/Enter: inspect outpost")
+        if self.on_wilderness_structure():
+            tile = self.active_map()[y][x]
+            return {"D": "Walk into door: return to wilderness", "b": "Z/Enter: rest here", "P": "Z/Enter: review structure records", "&": "Z/Enter: use restored service counter", "s": "Z/Enter: check regional supplies", "@": "Z/Enter: talk to caretaker", "+": "Z/Enter: visit wayside shrine"}.get(tile, "Z/Enter: inspect structure")
 
         if self.on_town_interior():
             return self.town_interior_tile_hint(x, y)
@@ -16878,6 +20549,10 @@ class FarmGame(
 
         if self.on_town():
             tile = self.active_map()[y][x]
+            residence_id = AUTHORED_TOWN_RESIDENCE_ID_BY_DOOR.get((int(x), int(y)), "")
+            if residence_id:
+                residence = AUTHORED_TOWN_RESIDENCE_DATA.get(residence_id, {})
+                return f"Walk into door: enter {str(residence.get('label', 'town residence')).lower()}"
             door_building_id = TOWN_BUILDING_ID_BY_DOOR.get((x, y), "")
             if door_building_id:
                 if not self.is_town_building_unlocked(door_building_id):
@@ -16938,6 +20613,53 @@ class FarmGame(
 
         if self.on_wilderness():
             tile = self.active_map()[y][x]
+            # Hostile actors take interaction priority over any site, event, or
+            # traveler that happens to share their generated coordinate.
+            if self.bounty_target_at(x, y):
+                return "Bump/approach: start bounty combat"
+            if self.wilderness_stronghold_enemy_at(x, y):
+                return "Bump/approach: start combat"
+            if self.wilderness_random_combat_enemy_at(x, y):
+                return "Bump/approach: engage on the wilderness map"
+            if self.wilderness_random_combat_visual_at(x, y):
+                return "Z/Enter: inspect encounter site"
+            if self.dungeon_floor_loot_at(x, y):
+                return "Z: search remains | I: inspect"
+            consequence_kind = self.wilderness_vitality_consequence_at(x, y)
+            if consequence_kind:
+                return f"Z/Enter: join weekly {consequence_kind.replace('_', ' ')} activity"
+            if self.wilderness_water_salvage_at(x, y):
+                return "Z/Enter: recover floating salvage"
+            if self.wilderness_expedition_camp_visual_at(x, y):
+                return "Z/Enter: use temporary ranger camp"
+            event_visual = self.wilderness_event_visual_at(x, y)
+            if event_visual:
+                return {
+                    "Fresh Rockfall": "Z/Enter: clear rockfall with Pickaxe",
+                    "High-Water Pulse": "Z/Enter: inspect floodwater",
+                    "Mass Wildflower Bloom": "Z/Enter: gather bloom sample",
+                    "Fruiting Surge": "Z/Enter: gather fungal sample",
+                    "Desert Bloom": "Z/Enter: gather desert bloom sample",
+                    "Sandstorm Drifts": "Z/Enter: clear sandstorm drift",
+                    "Whiteout Drifts": "Z/Enter: clear whiteout drift",
+                }.get(str(event_visual.get("event", "")), "Z/Enter: inspect regional event")
+            seasonal_surface = self.wilderness_seasonal_surface_at(x, y)
+            if seasonal_surface:
+                return {
+                    "spring_bloom": "Z/Enter: gather spring bloom",
+                    "autumn_leaves": "Z/Enter: collect autumn leaves",
+                    "snow_drift": "Z/Enter: clear snow drift",
+                    "storm_debris": "Z/Enter: clear storm debris",
+                    "spring_high_water": "Z/Enter: inspect seasonal high water",
+                    "cracking_ice": "Z/Enter: inspect thawing ice",
+                    "ice_floes": "Z/Enter: inspect spring ice floes",
+                }.get(str(seasonal_surface.get("kind", "")), "Z/Enter: inspect seasonal change")
+            objective = self.wilderness_expedition_objective_at(x, y)
+            if objective:
+                return "Z/Enter: review surveyed point" if objective.get("surveyed") else f"Z/Enter: {objective.get('action', 'survey expedition point')} (survey expedition point {objective.get('index')}/{objective.get('total')})"
+            traveler = self.wilderness_traveler_at(x, y)
+            if traveler:
+                return f"Z/Enter: talk to {traveler.get('name', 'traveler')}"
             if self.bounty_target_at(x, y):
                 return "Bump/approach: start bounty combat"
             if self.wilderness_stronghold_enemy_at(x, y):
@@ -16968,6 +20690,10 @@ class FarmGame(
             if building:
                 if str(building.get("type_id", "")) in PROCEDURAL_TOWN_OPEN_BUILDINGS:
                     return f"Z/Enter: visit {str(building.get('name', 'town place')).lower()}"
+                if not self.procedural_town_building_is_open(building):
+                    hours = self.procedural_town_building_hours(building)
+                    opens = self.procedural_town_format_hour(hours[0]) if hours else "later"
+                    return f"Closed; opens at {opens}"
                 return f"Walk into door: enter {str(building.get('name', 'building')).lower()}"
             building = self.procedural_town_building_at(x, y)
             if building:
@@ -16982,7 +20708,7 @@ class FarmGame(
                 return "F: farm tools | I: inspect soil"
             if tile == "S": return "Walk south: return to town"
             if tile == "=": return "Bridge: cross the river"
-            if tile == "~": return "Equip Fishing Rod and press F to fish"
+            if tile == "~": return self.wilderness_water_description(x, y)
             if tile in WILDERNESS_BIOME_TILES: return f"I: inspect {wilderness_biome_name(tile)}"
             if tile == "W": return "Z/Enter: gather Watercress"
             if tile == "N": return "Z/Enter: gather Pine Nuts"
@@ -16994,12 +20720,20 @@ class FarmGame(
             if tile == "G": return "Z/Enter: gather wild roots"
             if tile == "Z": return "Z/Enter: gather mushroom log"
             if tile == "M": return "F with Pickaxe: break mineral outcrop"
+            if tile == WILDERNESS_OUTPOST_SYMBOL: return "Z/Enter: open outpost door"
+            if tile == WILDERNESS_STRUCTURE_SYMBOL and self.wilderness_structure_marker_at(x, y): return "Z/Enter: open building door"
+            if tile == WILDERNESS_LANDSCAPE_SYMBOL: return "Z/Enter: use major landscape route, work, or charting"
+            if tile == WILDERNESS_DOCK_SYMBOL: return "Z/Enter: ferries, rentals, skiffs, and Explorer Raft plans"
+            if tile == WILDERNESS_FISHING_SETTLEMENT_SYMBOL: return "Z/Enter: visit and develop island harbor"
+            if tile == FIELD_SITE_SYMBOL: return "Z/Enter: conduct regional fieldwork"
             if tile == "X": return "Z/Enter: enter ruined dungeon"
             if tile == "!": return "Z/Enter: inspect stronghold"
             if tile == "R": return "Z/Enter: ranger camp services"
-            if tile == "Q": return "Z/Enter: wilderness shelter"
-            if tile == "K": return "Z/Enter: scout nearby routes"
-            if tile in ["H", "B", "J", "P", "?"]: return "Z/Enter: inspect landmark"
+            if tile == "Q": return "Z/Enter: rest, supplies, or maintenance"
+            if tile == "K": return "Z/Enter: survey or wildlife watch"
+            if tile in ["J", "P"]: return "Z/Enter: excavate, restore, or chart"
+            if tile == "?": return "Z/Enter: use this landmark"
+            if tile in ["H", "B"]: return "Z/Enter: use landmark facility"
             if tile == "Y": return "Z/Enter: gather berries"
             if tile == "u": return "Z/Enter: gather mushrooms"
             if tile in WILDERNESS_FORAGE_SYMBOLS: return f"Z/Enter: forage {forage_item_for_symbol(tile)}"
@@ -17012,16 +20746,21 @@ class FarmGame(
         if self.on_wilderness_dungeon():
             enemy = self.wilderness_dungeon_enemy_at(x, y)
             if enemy:
-                return "Bump/approach: start combat"
+                enemy = self.ensure_dungeon_roguelike_enemy(enemy)
+                return f"Bump: melee attack | F: aim | HP {enemy['hp']}/{enemy['max_hp']}"
+            if self.dungeon_floor_loot_at(x, y):
+                return "Z: search remains | I: inspect"
             tile = self.active_map()[y][x]
             if tile in {"<", "U"}: return "Walk/Z: exit ruins"
             if tile == ">": return "Walk/Z: descend deeper"
-            if tile == "+": return "Walk/Z: doorway"
+            if tile == "+": return "Walk/Z: open door" if self.dungeon_door_closed(x, y) else "Z/Enter: close door"
             if tile == "$": return "Z/Enter: open chest"
             if tile == "P": return "Z/Enter: inspect final chamber"
             if tile == "S": return "Z/Enter: use cracked shrine"
             if tile == "?": return "Z/Enter: read inscription"
-            if tile == "!": return "Z/Enter: spring old trap plate"
+            if tile == "!":
+                if self.dungeon_trap_disarmed(x, y): return "Disarmed trap: safe to cross"
+                return "Z/Enter: disarm revealed trap" if self.dungeon_trap_revealed(x, y) else "Z/Enter: inspect suspicious floor"
             return "Z/Enter: inspect dungeon"
 
         if self.on_general_store():
@@ -17107,8 +20846,9 @@ class FarmGame(
         if tile == "*": return "Z/Enter: chop wood/stump" if self.owns_tool("Axe") else "Z/Enter: need Axe"
         if self.near_shipping_bin(x, y): return "Z/Enter: open shipping bin"
         if self.is_farmhouse_door(x, y): return "Walk into door: enter house"
-        if tile == "E": return "Z/Enter: go to town"
-        if tile == "N": return "Z/Enter: go to mine"
+        if x <= 0 and 8 <= y <= 12: return "Walk into lane: go to town"
+        if y <= 0 and 25 <= x <= 29: return "Walk into entrance: go to mine"
+        if x >= self.farm_width() - 1 and 8 <= y <= 12: return "Walk into lane: enter the open world"
         obj = self.get_placed_object(x, y)
         if obj:
             if obj == "Chest": return "Z/Enter: open chest"
@@ -17359,7 +21099,7 @@ class FarmGame(
                 "lines": [
                     "QUICK START",
                     "",
-                    "- Use WASD or arrow keys to move.",
+                    "- Use WASD, arrow keys, or the numpad to move. Numpad diagonals use 7/9/1/3.",
                     "- Use F with your selected farm tool.",
                     "- Q and E cycle tools.",
                     "- 1 and 2 cycle owned seed types.",
@@ -17376,7 +21116,8 @@ class FarmGame(
                     "CONTROLS, MENUS, AND INSPECTION",
                     "",
                     "Movement and action:",
-                    "- WASD or arrows move. Z or Enter interacts with the tile in front of you.",
+                    "- WASD, arrows, or numpad move. Numpad 7/9/1/3 move diagonally without cutting blocked corners.",
+                    "- Numpad 5 waits during dungeon combat. The number-row 1/2 seed shortcuts remain unchanged.",
                     "- F uses the selected tool. Q/E cycle tools; 1/2 cycle seed types.",
                     "- I inspects the target tile. L opens a movable look cursor for distant inspection.",
                     "- Tab opens the player menu. H opens help. K opens the calendar. S saves.",
@@ -17426,8 +21167,11 @@ class FarmGame(
                     "- Your primary home's comfort and household bond can raise the cap further.",
                     "- Farm tools, clearing, travel, work, campaigning, and some services spend stamina.",
                     "- Tactical combat uses HP and focus instead; field stamina does not pay for battle actions.",
+                    "- Missing stamina naturally recovers by 1 every 5 in-game minutes, including during long journeys.",
+                    "- Missing HP naturally recovers by 1 every 20 in-game minutes after 30 minutes without taking damage.",
+                    "- Natural HP recovery does not occur during tactical combat; fresh damage restarts its recovery delay.",
                     "- Food, inns, clinics, wells, seating, family meals, camps, and festivals restore stamina up to the cap.",
-                    "- Sleeping restores the complete current cap and restores combat HP/focus.",
+                    "- Food provides immediate recovery, while sleeping restores the complete stamina cap and combat HP/focus.",
                     "- Cooked-meal buffs can reduce the stamina cost of several later actions.",
                     "- Experience comes primarily from tactical victories. Each level also improves combat statistics.",
                 ],
@@ -17472,6 +21216,8 @@ class FarmGame(
                     "- Select the Fishing Rod, face suitable water, and press F to cast.",
                     "- Watch the fishing phase and press F again when a bite arrives to reel in the catch.",
                     "- Fish species and availability vary by water and location.",
+                    "- Coral reefs, open coasts, and strong ocean currents have different saltwater fish pools.",
+                    "- Tropical reefs contain Coral Darts, Parrotfish, Reef Groupers, and nocturnal Angelfish.",
                     "- Wilderness forage regrows over time and changes with biome and season.",
                     "- Caves provide herbs, mushrooms, minerals, and other specialist ingredients.",
                     "- Fish and forage can be sold, cooked, gifted, donated, or used in requests.",
@@ -17486,29 +21232,42 @@ class FarmGame(
                     "INVENTORY, CRAFTING, COOKING, AND FOOD",
                     "",
                     "- Tab > Backpack separates carried goods, food, equipment-related supplies, and storage access.",
+                    "- The starting backpack holds 200 capacity units. Materials and seed packets stack compactly; most objects use one unit each.",
+                    "- The General Store can expand backpack capacity indefinitely. Each expansion adds 50 capacity, with a rising price.",
+                    "- If a direct reward does not fit, it is left safely in a visible Dropped Pack at your location.",
+                    "- Use Z/Enter on shelves, chests, cabinets, ruins, and defeated bodies to browse their contents.",
+                    "- Select an item to inspect or take it. Press R in a container to take everything that currently fits.",
+                    "- Shop displays can be inspected, but purchases go through the shopkeeper responsible for the store.",
                     "- Crafting recipes consume exact materials and create infrastructure, machines, supplies, or furniture.",
                     "- Research, restoration, progression, and discoveries unlock additional recipes.",
                     "- Cooking requires kitchen access and turns crops, fish, and forage into stronger recovery items.",
                     "- Food restores field stamina and may also restore tactical HP or focus.",
                     "- Cooked meals can grant temporary action discounts that reduce later stamina costs.",
                     "- Quality ingredients remain distinct; check recipe requirements before selling premium produce.",
-                    "- Storage keeps long-term materials out of your working inventory without removing them from the dynasty.",
+                    "- Chests, sheds, shelves, wardrobes, dressers, pantries, and keepsake chests are individual physical storage spaces.",
+                    "- Moving player-owned storage furniture preserves its contents; property ownership therefore expands practical storage.",
                     "- Heirs inherit inventory, seeds, tools, storage, and physical farm assets.",
                 ],
             },
             "animals": {
                 "title": "Farm Animals",
-                "hint": "housing and pasture",
+                "hint": "growth, affection, products",
                 "lines": [
-                    "FARM ANIMALS",
-                    "",
-                    "- Buy animals at the restored Animal Store after placing matching housing.",
-                    "- Healthy animals go outside from 7:00 to 18:00 in suitable weather.",
-                    "- They wander near their housing and can graze on grass to become fed for the day.",
-                    "- Ducks tolerate rain. Storms, snow, nighttime, sickness, and very low health keep animals indoors.",
-                    "- Animals block movement and building placement. Bumping one startles it out of your path.",
-                    "- Face an outside animal and use Z or Enter to interact with it.",
-                    "- Housing menus still handle group feeding, products, status, and individual management.",
+                    "FARM ANIMALS", "",
+                    "- Buy animals, Animal Feed, and a reusable Grooming Brush from the restored Animal Store.",
+                    "- Animals begin as babies, become young, and eventually mature. Only adults produce goods.",
+                    "- Fill troughs or hand-feed daily. Grazing on safe grass also counts as feeding.",
+                    "- Pet and brush animals, clean their shelter, and offer one favorite treat per day.",
+                    "- Affection is shown as 0-10 hearts. Personality changes how quickly different care earns trust.",
+                    "- Excellent care builds a streak; three good days allow premium eggs, milk, and fiber.",
+                    "- Chickens, ducks, and cows have daily cycles; rabbits and sheep produce less frequently.",
+                    "- Up to three products wait safely, so missing one collection does not erase everything.",
+                    "- Healthy animals go outside from 7:00 to 18:00 and stay near their assigned shelter.",
+                    "- Use the pasture bell or an individual menu to call animals in or let them out.",
+                    "- Ducks tolerate rain. Storms, snow, sickness, unsafe hours, and blocked doors keep animals inside.",
+                    "- Young animals stay closer to shelter; highly bonded animals greet and follow you.",
+                    "- Neglect lowers mood and health and can cause sickness; medicine and the Clinic provide treatment.",
+                    "- Followers assigned to animal care can feed, pet, brush, and clean using available supplies.",
                 ],
             },
             "farm_buildings": {
@@ -17643,7 +21402,11 @@ class FarmGame(
                     "- Face a visible follower and interact to choose Follow, Wait Here, Return Home, or an available task.",
                     "- Farm tasks include practical chores such as watering, gathering, animal support, or household work.",
                     "- Tasks have locations, schedules, expected contributions, and daily completion limits.",
-                    "- Travel formations determine where companions try to stand around the player.",
+                    "- Adaptive movement spreads companions into rear/flank positions outdoors and forms a line indoors.",
+                    "- Formation and Single File can be selected manually from the Followers & Helpers menu.",
+                    "- Single-file companions follow your recent route around corners instead of cutting through walls.",
+                    "- Following companions yield when you backtrack through them and accelerate briefly if they fall behind.",
+                    "- Regroup Everyone recalls waiting or working followers and safely reforms the group after a transition.",
                     "- Battle-eligible followers can be prioritized when tactical combat begins.",
                     "- Tactical party size is limited; use Party Setup to choose members and tactics.",
                     "- Followers persist across maps and saves, but returning them home prevents crowding and danger.",
@@ -17741,6 +21504,13 @@ class FarmGame(
                     "",
                     "- The wilderness is chunk-based and persistent once discovered.",
                     "- Forage, caves, dungeons, claim signs, and strongholds can appear as you explore.",
+                    "- Weekly hostile encounters can form visible roadblocks, raider camps, monster nests, and hunting packs in otherwise open regions.",
+                    "- Approaching a hostile starts turn-based combat directly on the wilderness terrain; no separate battle map is loaded.",
+                    "- Far coastal provinces contain connected oceans, desert cays, tropical islands, reefs, and currents.",
+                    "- Craft an Explorer Raft with 20 Wood and 10 Fiber; it unfolds automatically when you step into water.",
+                    "- Purchased or rented skiffs also launch automatically, and stepping onto shore returns you to foot travel.",
+                    "- Current arrows show flow direction. Strong favorable currents can carry a raft an extra tile.",
+                    "- Docks always connect to navigable water and provide skiffs, ferries, cargo routes, and harbor services.",
                     "- R emergency-returns you from wilderness areas.",
                     "- Use the look cursor with L to inspect distant objects safely.",
                     "- Bring food, potions, and mana supplies before long trips.",
@@ -17879,7 +21649,18 @@ class FarmGame(
                 "lines": [
                     "MINING AND COMBAT",
                     "",
-                    "- Enemies in mines, dungeons, and strongholds start tactical combat.",
+                    "- Mines and formal missions use the tactical battle system.",
+                    "- Wilderness dungeons, strongholds, bounties, and random field encounters use map-native roguelike combat: every move or action advances one turn while danger is active.",
+                    "- Bump enemies for melee attacks; F aims ranged weapons; V opens your learned class and elemental skills; P uses a quick healing item; ./5 waits.",
+                    "- Map-native skills use the same MP, damage, range, shapes, ranks, statuses, combos, support effects, and custom-content records as tactical combat.",
+                    "- Offensive skills use a map cursor. Area skills can hit clustered enemies, and elemental fields remain visible and active for several turns.",
+                    "- Sound matters: enemies investigate footsteps, weapons, doors, traps, and thrown Stones rather than tracking you through walls.",
+                    "- Open doors display as / and closed doors as +. Bump or use Z to open them; Z closes an unoccupied open door.",
+                    "- Traps begin concealed. Search from the V menu or inspect suspicious floor, then use Z to attempt disarming one.",
+                    "- Enemies can open doors, trigger floor traps, target exposed followers, and telegraph dangerous attacks with a yellow !.",
+                    "- Dungeon companions use their real positions and HP. Knocked-out followers recover safely after the party leaves.",
+                    "- Defeated dungeon enemies leave physical loot piles that persist until collected.",
+                    "- Wilderness enemies also leave physical loot. Put distance between yourself and alerted enemies or cross into the next region to escape.",
                     "- HP and MP persist between fights.",
                     "- Sleeping restores HP and MP to your current maximums.",
                     "- Food, health potions, and mana potions can restore combat resources.",
@@ -17918,8 +21699,11 @@ class FarmGame(
                     "",
                     "- Choose Custom Content on the title menu; the library is shared by every save.",
                     "- The ability maker supports attacks, healing, guard, cleanse, and focus restoration.",
-                    "- Attacks can use point, burst, line, cone, cross, or multishot shapes.",
+                    "- Attacks can use standard shapes or a hand-drawn 13x13 area-of-effect pattern.",
+                    "- Drawn patterns can follow the target or caster and optionally rotate toward the cursor.",
+                    "- Armor piercing, push/pull movement, HP drain, and status/guard combo rewards create attacks beyond the built-in templates.",
                     "- Poison, root, vulnerable, and persistent elemental zones can be added to attacks.",
+                    "- Long lists keep the selected row visible; W/S moves one row and A/D pages.",
                     "- Each value is bounded to combinations the tactical engine can resolve safely.",
                     "- A balance estimate identifies unusually efficient abilities without preventing creative builds.",
                     "- A class combines three starting abilities, an ordered skill tree, a mastery art, and recommended elements.",
@@ -17941,6 +21725,8 @@ class FarmGame(
                     "",
                     "- Wilderness dungeon entrances lead to single-run room-to-room ruins.",
                     "- Dungeons contain enemies, chests, traps, inscriptions, and a final chamber.",
+                    "- Rare mega-dungeons run for 10-15 floors, change strata every three floors, and guard each deeper section with an elite enemy.",
+                    "- Mega-dungeon refuge floors are safe checkpoints. Once reached, later expeditions resume from the deepest secured refuge.",
                     "- Defeating the boss clears the site and pays dungeon-specific rewards.",
                     "- Progress should not depend on a random impassable layout; if a ruin looks dangerous, prepare and return.",
                 ],
@@ -17954,7 +21740,7 @@ class FarmGame(
                     "- The farm mine contains persistent floors, enemies, resources, stair progression, and elevator checkpoints.",
                     "- Clearing required enemies unlocks deeper access and floor rewards.",
                     "- Mine nodes refresh overnight while cleared-floor state remains preserved.",
-                    "- Wilderness strongholds are hostile sites with defenders, tactical battles, and a final cleared state.",
+                    "- Wilderness strongholds are hostile sites with defenders fought directly across their real walls, roads, cover, and courtyards.",
                     "- Reclaimed strongholds become safe waypoints with rest, caches, and overworld-travel benefits.",
                     "- Stronghold rest and supplies have daily or weekly limits.",
                     "- Dungeons emphasize traps, inscriptions, shrines, chests, and bosses; strongholds emphasize conquest and reclamation.",
@@ -17988,6 +21774,7 @@ class FarmGame(
                     "- Save from the player menu and before ending a long session, major expedition, election, or family milestone.",
                     "- Sleeping advances the day but is not a substitute for making a deliberate save.",
                     "- Settings control display behavior, interface preferences, tutorials, and whether characters age beyond adulthood.",
+                    "- Wake-up time defaults to 7:00 AM and can be changed from 4:00 AM through noon in Settings.",
                     "- The menu hint area appears outside the active menu frame so guidance does not cover choices.",
                     "- Most menus support arrows or W/S, Z or Enter to confirm, and X or Escape to go back.",
                     "- Inspect mode identifies terrain and interactable objects without committing to an action.",
@@ -18196,15 +21983,18 @@ class FarmGame(
     def farm_building_status_lines(self, obj_name: str, key: str) -> List[str]:
         collected = self.farm_building_collected_today(key)
         boost = self.state.farm_building_boosts.get(key)
+        animal_building = obj_name in ["Chicken Coop", "Animal Pen", "Fish Pond"]
         lines = [
             obj_name.upper(),
             "",
             INFRASTRUCTURE_DATA.get(obj_name, {}).get("description", "Farm building."),
             "",
             f"Footprint: {self.footprint_label(obj_name)}",
-            f"Checked today: {'yes' if collected else 'no'}",
+            f"Checked today: {'n/a - use Animal Care' if animal_building else ('yes' if collected else 'no')}",
         ]
-        if boost:
+        if animal_building:
+            lines.append("Prepared bonus: replaced by individual care")
+        elif boost:
             lines.append(f"Prepared bonus: {boost}")
         else:
             lines.append("Prepared bonus: none")
@@ -18219,13 +22009,13 @@ class FarmGame(
         elif obj_name == "Well":
             lines.extend(["Function:", "- Draw water to restore a little stamina.", "- Also serves as a reliable farm water source."])
         elif obj_name == "Chicken Coop":
-            lines.extend(["Function:", "- Collect Bird Eggs once per day.", "- Scatter Mixed Seeds to improve the next collection."])
+            lines.extend(["Function:", "- Houses chickens through growth and daily care.", "- Eggs come from mature, healthy, fed chickens."])
         elif obj_name == "Animal Pen":
-            lines.extend(["Function:", "- Collect Fiber and sometimes Basic Fertilizer once per day.", "- Grooming improves today's collection."])
+            lines.extend(["Function:", "- Houses rabbits, sheep, and cows.", "- Grooming, clean bedding, feeding, and affection improve real animal products."])
         elif obj_name == "Tool Shed":
             lines.extend(["Function:", "- Check tool status.", "- Maintain tools once per day to restore a little stamina."])
         elif obj_name == "Fish Pond":
-            lines.extend(["Function:", "- Collect a fish once per day.", "- Toss bait to improve the next collection."])
+            lines.extend(["Function:", "- Houses ducks and supports a stocked fish population.", "- Duck products use Animal Care; fish use Fish Stocking."])
         return lines
 
     def show_farm_building_status(self, obj_name: str, key: str):
@@ -18325,14 +22115,13 @@ class FarmGame(
             elif obj_name == "Tool Shed":
                 items.append(MenuItem(label="Tool status", value="tools", enabled=True))
                 items.append(MenuItem(label="Maintain tools", value="collect", enabled=not self.farm_building_collected_today(key), hint="daily"))
+            elif obj_name in ["Chicken Coop", "Animal Pen", "Fish Pond"]:
+                animal_count = len(self.farm_animals_in_building(key))
+                items.append(MenuItem(label="Animal care", value="animals", enabled=True, hint=f"{animal_count} animal(s)"))
+                if obj_name == "Fish Pond":
+                    items.append(MenuItem(label="Fish stocking", value="fish_pond", enabled=True, hint="stock, feed, harvest"))
             else:
-                if obj_name in ["Chicken Coop", "Animal Pen", "Fish Pond"]:
-                    animal_count = len(self.farm_animals_in_building(key))
-                    items.append(MenuItem(label="Animal care", value="animals", enabled=True, hint=f"{animal_count} animal(s)"))
                 items.append(MenuItem(label="Collect/check building", value="collect", enabled=not self.farm_building_collected_today(key), hint="daily"))
-                if obj_name in ["Chicken Coop", "Animal Pen", "Fish Pond"]:
-                    prep_hint = self.state.farm_building_boosts.get(key, "optional")
-                    items.append(MenuItem(label="Prepare/boost building", value="prepare", enabled=True, hint=prep_hint))
             items.append(MenuItem(label="Status", value="status", enabled=True))
             items.append(MenuItem(label="Back", value=MENU_BACK, enabled=True))
 
@@ -18353,6 +22142,10 @@ class FarmGame(
                 return
             if choice.value == "animals":
                 self.farm_animal_care_menu(key)
+                return
+            if choice.value == "fish_pond":
+                pond_key = self.fish_pond_key_at(*self.parse_object_key(key)[1:]) if self.parse_object_key(key) else key
+                self.safe_menu(lambda: self.fish_pond_menu(pond_key), "Fish Pond closed.")
                 return
             if choice.value == "collect":
                 self.collect_farm_building_output(obj_name, key)
@@ -19080,11 +22873,14 @@ class FarmGame(
             self.use_weeds(x, y)
             return
 
-        if self.on_farm() and tile == "E":
+        if self.on_farm() and x <= 0 and 8 <= y <= 12:
             self.transition_to_town()
             return
-        if self.on_farm() and tile == "N":
+        if self.on_farm() and y <= 0 and 25 <= x <= 29:
             self.transition_to_mine()
+            return
+        if self.on_farm() and x >= self.active_map_width() - 1 and 8 <= y <= 12:
+            self.transition_from_farm_to_origin_world()
             return
 
         if self.near_shipping_bin(x, y):
@@ -19105,6 +22901,10 @@ class FarmGame(
         x, y = self.interaction_target_pos()
 
         if not self.in_active_bounds(x, y):
+            if self.on_wilderness():
+                if self.is_interactable_tile(x, y):
+                    self.use_wilderness_action(x, y)
+                    return
             self.set_message("There is nothing to interact with.")
             return
 
@@ -19126,15 +22926,24 @@ class FarmGame(
             self.use_procedural_town_interior_action(x, y)
             return
 
-        if self.on_town_interior() or self.on_house():
+        if self.on_town_interior() or self.on_house() or self.on_farm() or self.on_mine():
             npc = self.town_npc_at(x, y)
             if npc:
                 self.town_npc_face_player(npc)
                 self.town_npc_menu(npc)
                 return
 
+        if self.open_world_container_at(x, y):
+            if self.on_wilderness_dungeon() or self.wilderness_field_combat_active():
+                self.advance_dungeon_roguelike_turn("search container")
+            return
+
         if self.on_town():
             self.use_town_action(x, y)
+            return
+
+        if self.on_authored_town_residence():
+            self.use_authored_town_residence_action(x, y)
             return
 
         if self.on_general_store():
@@ -19183,6 +22992,14 @@ class FarmGame(
 
         if self.on_museum():
             self.use_museum_action(x, y)
+            return
+
+        if self.on_wilderness_outpost():
+            self.use_wilderness_outpost_action(x, y)
+            return
+
+        if self.on_wilderness_structure():
+            self.use_wilderness_structure_action(x, y)
             return
 
         if self.on_wilderness():
@@ -19377,6 +23194,12 @@ class FarmGame(
         stamina_cost = 5 if self.tool_level("Pickaxe") >= 2 else 8
         if tile in ["G", "M", "g"]:
             stamina_cost += 2
+        mine_safety_active = (
+            str(self.home_region_work_record().get("mine_safety_day", ""))
+            == self.town_npc_day_key()
+        )
+        if mine_safety_active:
+            stamina_cost = max(1, stamina_cost - 2)
         if not self.spend_stamina(stamina_cost):
             return
 
@@ -19385,7 +23208,8 @@ class FarmGame(
         mine_map[y][x] = "."
         self.mine_maps[str(self.state.mine_floor)] = mine_map
         self.mine_map = mine_map
-        self.autosave_with_message(f"Mined {mine_node_label(tile)} on floor {self.state.mine_floor} and found {format_drops(drops)}.")
+        safety_text = " Garrick's support review reduced the exertion." if mine_safety_active else ""
+        self.autosave_with_message(f"Mined {mine_node_label(tile)} on floor {self.state.mine_floor} and found {format_drops(drops)}.{safety_text}")
 
     def respawn_mine_nodes(self) -> Tuple[int, int, int]:
         """Respawn mine nodes overnight on discovered floors. Returns rock/ore/crystal-ish counts."""
@@ -20426,6 +24250,7 @@ class FarmGame(
         vendor = self.daily_market_vendor_name()
         project_note = f"Town projects funded: {self.completed_town_project_count()}." if self.has_town_project("inn_notice_corner") else "The official town project notice corner has not been funded yet."
         festival_note = self.festival_status_line()
+        guest_count = len(self.regional_town_visitors())
         return [
             "INN GOSSIP",
             "",
@@ -20434,6 +24259,7 @@ class FarmGame(
             f"Your mailbox has {unread} unread letter(s).",
             project_note,
             festival_note,
+            f"Regional guests registered tonight: {guest_count}.",
             "",
             "Rumors:",
             "- Mae says the north market street is busiest before noon.",
@@ -20453,6 +24279,7 @@ class FarmGame(
                 MenuItem(label="Eat hearty meal", value="meal", enabled=self.state.money >= 80 and missing_stamina > 0, hint="$80 +35 stamina"),
                 MenuItem(label=f"Daily special: {special['item']}", value="special", enabled=self.state.money >= int(special["price"]) and missing_stamina > 0, hint=f"${special['price']} +{special['stamina']} stamina"),
                 MenuItem(label="Buy packed lunch", value="lunch", enabled=self.state.money >= lunch_cost, hint=f"${lunch_cost} x{lunch_max}"),
+                MenuItem(label="Read guest register", value="guest_register", enabled=True, hint=f"{len(self.regional_town_visitors())} regional guest(s)"),
                 MenuItem(label="Listen to gossip", value="gossip", enabled=True, hint="free"),
                 MenuItem(label="Back", value=MENU_BACK, enabled=True),
             ]
@@ -20500,6 +24327,9 @@ class FarmGame(
             if choice.value == "gossip":
                 self.vertical_panel_view("Inn Gossip", self.inn_gossip_lines(), LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
                 continue
+            if choice.value == "guest_register":
+                self.vertical_panel_view("Inn Guest Register", self.inn_guest_register_lines(), LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
+                continue
 
     def use_inn_action(self, x: int, y: int):
         tile = self.active_map()[y][x] if 0 <= x < WIDTH and 0 <= y < HEIGHT else "#"
@@ -20513,8 +24343,8 @@ class FarmGame(
             self.set_message("The inn counter is tidy and open. Talk to the innkeeper for meals, rooms, and gossip.")
             return
         if tile == "P":
-            self.vertical_panel_view("Inn Notice", self.inn_gossip_lines(), LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
-            self.set_message("Read: Inn Notice.")
+            self.vertical_panel_view("Inn Guest Register", self.inn_guest_register_lines(), LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
+            self.set_message("Read the inn guest register.")
             return
         self.set_message("Nothing here needs your attention.")
 
@@ -20596,16 +24426,34 @@ class FarmGame(
         return sum(1 for row in self.wilderness_map for ch in row if ch in WILDERNESS_FORAGE_SYMBOLS and ch != "!")
 
     def clear_out_of_season_wilderness_forage(self) -> int:
-        """Remove forage from prior seasons, preserving persistent terrain and player changes."""
+        """Hibernate stale forage across every generated persistent chunk."""
         allowed = set(self.wilderness_seasonal_forage_symbols())
         removed = 0
-        for y, row in enumerate(self.wilderness_map):
-            for x, ch in enumerate(row):
-                if ch == "!" and self.wilderness_chunk_has_stronghold():
-                    continue
-                if ch in WILDERNESS_FORAGE_SYMBOLS and ch not in allowed:
-                    self.wilderness_map[y][x] = "."
-                    removed += 1
+        maps: List[Tuple[int, int, List[List[str]]]] = []
+        seen_ids = set()
+        for key, grid in (getattr(self, "wilderness_maps", {}) or {}).items():
+            if not isinstance(grid, list) or id(grid) in seen_ids:
+                continue
+            try:
+                chunk_x, chunk_y = [int(value) for value in str(key).split(",", 1)]
+            except (TypeError, ValueError):
+                continue
+            maps.append((chunk_x, chunk_y, grid))
+            seen_ids.add(id(grid))
+        if isinstance(getattr(self, "wilderness_map", None), list) and id(self.wilderness_map) not in seen_ids:
+            maps.append((int(self.state.wilderness_chunk_x), int(self.state.wilderness_chunk_y), self.wilderness_map))
+
+        for chunk_x, chunk_y, grid in maps:
+            for y, row in enumerate(grid):
+                for x, ch in enumerate(row):
+                    # '!' is shared with strongholds/events, so never reinterpret it here.
+                    if ch == "!":
+                        continue
+                    if ch in WILDERNESS_FORAGE_SYMBOLS and ch not in allowed:
+                        wx, wy = self.wilderness_world_coords(chunk_x, chunk_y, x, y)
+                        replacement = self.wilderness_world_biome_tile(wx, wy)
+                        grid[y][x] = replacement if replacement in WILDERNESS_BIOME_TILES else "."
+                        removed += 1
         return removed
 
     def regrow_wilderness_forage(self, force: bool = False) -> int:
@@ -20798,7 +24646,76 @@ class FarmGame(
         self.set_message("Nothing to interact with here. Press I to inspect the cave.")
 
     def use_wilderness_action(self, x: int, y: int):
+        if self.on_wilderness() and not self.in_active_bounds(x, y):
+            chunk_x, chunk_y, local_x, local_y = self.wilderness_stream_resolve(x, y)
+            dx = int(chunk_x) - int(self.state.wilderness_chunk_x)
+            dy = int(chunk_y) - int(self.state.wilderness_chunk_y)
+            if abs(dx) + abs(dy) == 1:
+                if self.transition_wilderness_chunk(dx, dy, interaction_target=True):
+                    self.use_wilderness_action(local_x, local_y)
+                return
         if self.in_active_bounds(x, y):
+            if self.on_wilderness() and self.dungeon_floor_loot_at(x, y):
+                loot_record = self.world_container_at(x, y)
+                if loot_record:
+                    self.show_world_container(loot_record)
+                if self.wilderness_field_combat_active():
+                    self.advance_dungeon_roguelike_turn("search remains")
+                return
+            if self.on_wilderness() and self.wilderness_random_combat_visual_at(x, y):
+                visual = self.wilderness_random_combat_visual_at(x, y)
+                encounter = self.wilderness_random_combat_record(
+                    self.state.wilderness_chunk_x, self.state.wilderness_chunk_y, create=False
+                )
+                self.set_message(
+                    f"{visual.get('name', 'Encounter site')}: {encounter.get('description', 'Signs of nearby danger.')}"
+                )
+                if self.wilderness_field_combat_active():
+                    self.advance_dungeon_roguelike_turn("inspect encounter site")
+                return
+            resident = self.procedural_town_resident_at(x, y)
+            if resident:
+                if resident.get("procedural_caravan"):
+                    self.procedural_caravan_menu(resident)
+                elif resident.get("household_town_resident"):
+                    self.town_npc_menu(resident)
+                else:
+                    self.procedural_town_resident_menu(resident)
+                return
+            home_gateway = self.origin_world_gateway_at(x, y)
+            if home_gateway:
+                self.enter_origin_world_gateway(home_gateway)
+                return
+            home_sign = self.origin_world_sign_at(x, y)
+            if home_sign:
+                self.read_origin_world_sign(home_sign)
+                return
+            consequence_kind = self.wilderness_vitality_consequence_at(x, y)
+            if consequence_kind:
+                self.use_wilderness_vitality_consequence(consequence_kind)
+                return
+            if self.procedural_town_hinterland_at(x, y):
+                self.work_procedural_town_hinterland()
+                return
+            if self.wilderness_maritime_encounter_at(x, y):
+                self.resolve_wilderness_maritime_encounter()
+                return
+            if self.wilderness_water_salvage_at(x, y):
+                self.collect_wilderness_water_salvage()
+                return
+            if self.wilderness_island_site_at(x, y):
+                self.show_wilderness_island_site()
+                return
+            if self.wilderness_expedition_camp_visual_at(x, y):
+                self.show_wilderness_expedition_camp()
+                return
+            if self.wilderness_expedition_objective_at(x, y):
+                self.survey_wilderness_expedition_objective(x, y)
+                return
+            traveler = self.wilderness_traveler_at(x, y)
+            if traveler:
+                self.show_wilderness_traveler(traveler)
+                return
             bounty = self.bounty_target_at(x, y)
             if bounty:
                 self.start_bounty_combat_encounter(bounty, reason="interact")
@@ -20807,9 +24724,20 @@ class FarmGame(
             if enemy:
                 self.start_wilderness_stronghold_combat_encounter(enemy, reason="interact")
                 return
+            enemy = self.wilderness_random_combat_enemy_at(x, y)
+            if enemy:
+                if self.begin_wilderness_field_combat(enemy, reason="interact"):
+                    self.dungeon_player_melee_attack(enemy)
+                return
             animal = self.animal_at(x, y)
             if animal:
                 self.observe_wilderness_animal(animal)
+                return
+            if self.wilderness_event_visual_at(x, y):
+                self.interact_with_wilderness_event_feature(x, y)
+                return
+            if self.wilderness_seasonal_surface_at(x, y):
+                self.interact_with_wilderness_seasonal_surface(x, y)
                 return
         civic_overlay = self.procedural_town_civic_overlay_at(x, y)
         if civic_overlay:
@@ -20866,13 +24794,28 @@ class FarmGame(
             self.set_message("A simple wooden bridge crosses the river.")
             return
         if tile == "~":
-            self.set_message("Moving water. Equip the Fishing Rod and press F to fish.")
+            self.set_message(self.wilderness_water_description(x, y))
             return
         if tile == "V":
             self.enter_wilderness_cave(x, y)
             return
         if tile == "X":
             self.enter_wilderness_dungeon(x, y)
+            return
+        if tile == WILDERNESS_OUTPOST_SYMBOL:
+            self.enter_wilderness_outpost(x, y)
+            return
+        if tile == WILDERNESS_STRUCTURE_SYMBOL and self.wilderness_structure_marker_at(x, y):
+            self.show_wilderness_structure_exterior(x, y)
+            return
+        if tile == WILDERNESS_LANDSCAPE_SYMBOL:
+            self.open_wilderness_landscape_site()
+            return
+        if tile == WILDERNESS_DOCK_SYMBOL:
+            self.show_wilderness_dock(x, y)
+            return
+        if tile == WILDERNESS_FISHING_SETTLEMENT_SYMBOL:
+            self.show_wilderness_fishing_settlement(x, y)
             return
         if tile == WILDERNESS_CLAIM_SYMBOL:
             self.wilderness_claim_menu(x, y)
@@ -20897,6 +24840,9 @@ class FarmGame(
         if tile == "M":
             self.set_message("A mineral outcrop. Use F with the Pickaxe selected to break it.")
             return
+        if tile == FIELD_SITE_SYMBOL:
+            self.show_wilderness_field_site(x, y)
+            return
         if tile == "R":
             self.show_wilderness_ranger_camp(x, y)
             return
@@ -20912,7 +24858,8 @@ class FarmGame(
             self.autosave_with_message(f"Searched the supply crate and found {format_drops(drops)}.")
             return
         if tile in ["J", "P"]:
-            self.search_wilderness_ruin(x, y)
+            anchor_x, anchor_y = self.wilderness_ruin_anchor(x, y)
+            self.open_wilderness_ruin_site(anchor_x, anchor_y)
             return
         if tile == "Y":
             self.active_map()[y][x] = "."
@@ -22526,6 +26473,9 @@ class FarmGame(
                 "", "Healthy animals roam near home by day in good weather.",
                 "They graze on grass, react when bumped, and return at night.",
                 "Face an outside animal and use Z/Enter to interact.",
+                "Animal Feed and a Grooming Brush are sold here.",
+                "Hand-feeding, petting, and brushing build affection hearts.",
+                "Young animals need time to mature before producing.",
                 "", "Housing menus still handle group care and products.",
             ]
             self.vertical_panel_view("Animal Store Notice", rows, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
@@ -22561,6 +26511,20 @@ class FarmGame(
             animal.setdefault("fed", False)
             animal.setdefault("petted_today", False)
             animal.setdefault("treat_today", False)
+            animal.setdefault("brushed_today", False)
+            animal.setdefault("hand_fed_today", False)
+            animal.setdefault("shelter_cleaned_today", False)
+            animal.setdefault("care_streak", 0)
+            animal.setdefault("neglect_days", 0)
+            animal.setdefault("product_progress", 0)
+            if "product_ready_count" not in animal:
+                maturity = {"Chicken": 7, "Duck": 7, "Rabbit": 10, "Sheep": 14, "Cow": 14}.get(species, 7)
+                animal["product_ready_count"] = (
+                    1 if int(animal.get("age", 0) or 0) >= maturity
+                    and str(animal.get("last_product_day", "")) != self.farm_animal_day_key()
+                    else 0
+                )
+            animal.setdefault("pasture_mode", "Auto")
             animal.setdefault("last_product_day", "")
             animal.setdefault("last_grazed_day", "")
             animal.setdefault("outside", False)
@@ -22577,7 +26541,61 @@ class FarmGame(
                 animal["outside"] = False
                 animal["x"], animal["y"] = -1, -1
             animal["activity"] = str(animal.get("activity", "resting indoors") or "resting indoors")[:80]
+            for field in (
+                "age", "happiness", "affection", "health", "care_streak", "neglect_days",
+                "product_progress", "product_ready_count",
+            ):
+                try:
+                    animal[field] = max(0, int(animal.get(field, 0)))
+                except (TypeError, ValueError):
+                    animal[field] = 0
+            animal["happiness"] = min(100, animal["happiness"])
+            animal["affection"] = min(100, animal["affection"])
+            animal["health"] = min(100, animal["health"])
+            animal["product_ready_count"] = min(3, animal["product_ready_count"])
+            if str(animal.get("pasture_mode", "Auto")) not in {"Auto", "Inside"}:
+                animal["pasture_mode"] = "Auto"
         self.state.next_farm_animal_id = max(int(getattr(self.state, "next_farm_animal_id", 1)), max_id + 1)
+
+    def farm_animal_maturity_days(self, animal: Dict[str, object]) -> int:
+        return {"Chicken": 7, "Duck": 7, "Rabbit": 10, "Sheep": 14, "Cow": 14}.get(
+            str(animal.get("species", "Chicken")), 7
+        )
+
+    def farm_animal_growth_stage(self, animal: Dict[str, object]) -> str:
+        age = max(0, int(animal.get("age", 0)))
+        maturity = self.farm_animal_maturity_days(animal)
+        if age < max(3, maturity // 2):
+            return "Baby"
+        if age < maturity:
+            return "Young"
+        return "Adult"
+
+    def farm_animal_product_cycle_days(self, animal: Dict[str, object]) -> int:
+        return {"Chicken": 1, "Duck": 1, "Rabbit": 3, "Sheep": 5, "Cow": 1}.get(
+            str(animal.get("species", "Chicken")), 1
+        )
+
+    def farm_animal_affection_hearts(self, animal: Dict[str, object]) -> int:
+        return max(0, min(10, int(animal.get("affection", 0)) // 10))
+
+    def animal_feed_available(self) -> int:
+        return max(0, int(self.state.inventory.get("Animal Feed", 0))) + max(
+            0, int(self.state.inventory.get("Mixed Seeds", 0))
+        )
+
+    def consume_animal_feed(self, quantity: int = 1) -> bool:
+        remaining = max(0, int(quantity))
+        if self.animal_feed_available() < remaining:
+            return False
+        for item in ("Animal Feed", "Mixed Seeds"):
+            used = min(remaining, max(0, int(self.state.inventory.get(item, 0))))
+            if used:
+                self.state.inventory[item] = int(self.state.inventory.get(item, 0)) - used
+                remaining -= used
+            if remaining <= 0:
+                break
+        return True
 
     def animal_mood(self, animal: Dict[str, object]) -> str:
         if animal.get("sick"):
@@ -22585,8 +26603,13 @@ class FarmGame(
         happiness = int(animal.get("happiness", 50))
         affection = int(animal.get("affection", 0))
         health = int(animal.get("health", 100))
+        neglect = int(animal.get("neglect_days", 0))
         if health < 35:
             return "Weak"
+        if neglect >= 3:
+            return "Neglected"
+        if animal.get("hand_fed_today") and animal.get("petted_today"):
+            return "Loved"
         if happiness >= 85 and affection >= 50:
             return "Adoring"
         if happiness >= 70:
@@ -22620,6 +26643,9 @@ class FarmGame(
         return None
 
     def give_treat_to_animal(self, animal: Dict[str, object]) -> bool:
+        if animal.get("treat_today"):
+            self.set_message(f"{animal.get('name', 'The animal')} has already had a treat today.")
+            return False
         species = str(animal.get("species", "Chicken"))
         treat = FARM_ANIMAL_TREATS.get(species, "Mixed Seeds")
         fallback = "Mixed Seeds"
@@ -22689,7 +26715,8 @@ class FarmGame(
         health = int(animal.get("health", 100))
         if animal.get("sick") or health < 40:
             return product
-        if happiness >= 80 and affection >= 35 and product in FARM_ANIMAL_LARGE_PRODUCTS:
+        care_streak = int(animal.get("care_streak", 0))
+        if happiness >= 80 and affection >= 35 and care_streak >= 3 and product in FARM_ANIMAL_LARGE_PRODUCTS:
             return FARM_ANIMAL_LARGE_PRODUCTS[product]
         return product
 
@@ -22703,10 +26730,31 @@ class FarmGame(
                 building = data["building"]
                 hint = f"${price} -> {building}" if self.state.money >= price else f"${price} no"
                 items.append(MenuItem(label=species, value=species, enabled=self.state.money >= price, hint=hint))
+            items.extend([
+                MenuItem(
+                    label="Animal Feed x10", value="supply:feed", enabled=self.state.money >= 120,
+                    hint="$120 | dedicated daily feed",
+                ),
+                MenuItem(
+                    label="Grooming Brush", value="supply:brush",
+                    enabled=self.state.money >= 250 and int(self.state.inventory.get("Grooming Brush", 0)) <= 0,
+                    hint="owned" if int(self.state.inventory.get("Grooming Brush", 0)) > 0 else "$250 | reusable",
+                ),
+            ])
             items.append(MenuItem(label="Back", value=MENU_BACK, enabled=True))
             choice = self.vertical_panel_select("Animal Store", items, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT, return_back=True)
             if choice is None or choice.value == MENU_BACK:
                 self.set_message("Animal Store closed.")
+                return
+            if choice.value == "supply:feed":
+                self.state.money -= 120
+                self.state.inventory["Animal Feed"] = int(self.state.inventory.get("Animal Feed", 0)) + 10
+                self.autosave_with_message("Bought 10 Animal Feed for $120.")
+                return
+            if choice.value == "supply:brush":
+                self.state.money -= 250
+                self.state.inventory["Grooming Brush"] = 1
+                self.autosave_with_message("Bought a reusable Grooming Brush for $250.")
                 return
             self.purchase_farm_animal(str(choice.value))
             return
@@ -22747,6 +26795,14 @@ class FarmGame(
             "fed": False,
             "petted_today": False,
             "treat_today": False,
+            "brushed_today": False,
+            "hand_fed_today": False,
+            "shelter_cleaned_today": False,
+            "care_streak": 0,
+            "neglect_days": 0,
+            "product_progress": 0,
+            "product_ready_count": 0,
+            "pasture_mode": "Auto",
             "last_product_day": "",
             "last_grazed_day": "",
             "outside": False,
@@ -22781,7 +26837,51 @@ class FarmGame(
         return f"{self.state.year}-{self.state.month}-{self.state.day}"
 
     def farm_animal_product_ready(self, animal: Dict[str, object]) -> bool:
-        return animal.get("last_product_day") != self.farm_animal_day_key()
+        return (
+            self.farm_animal_growth_stage(animal) == "Adult"
+            and int(animal.get("product_ready_count", 0)) > 0
+        )
+
+    def farm_animal_collectable_drops(self, animal: Dict[str, object]) -> Dict[str, int]:
+        if not self.farm_animal_product_ready(animal):
+            return {}
+        if animal.get("sick") or int(animal.get("health", 100)) < 25:
+            return {}
+        species = str(animal.get("species", "Chicken"))
+        product = str(FARM_ANIMAL_DATA.get(species, {}).get("product", "") or "")
+        ready = max(1, int(animal.get("product_ready_count", 0)))
+        drops: Dict[str, int] = {}
+        if product:
+            product_name = self.animal_product_name_for_quality(product, animal)
+            drops[product_name] = ready
+        affection = int(animal.get("affection", 0))
+        happiness = int(animal.get("happiness", 50))
+        if species == "Sheep" and happiness >= 80 and animal.get("brushed_today"):
+            drops["Soft Fiber"] = drops.get("Soft Fiber", 0) + 1
+        if species == "Rabbit" and random.random() < (0.40 if affection >= 50 else 0.18):
+            drops["Fiber"] = drops.get("Fiber", 0) + 1
+        if species == "Duck" and random.random() < (0.40 if happiness >= 70 else 0.18):
+            drops["Feather"] = drops.get("Feather", 0) + 1
+        animal["product_ready_count"] = 0
+        animal["last_product_day"] = self.farm_animal_day_key()
+        animal["activity"] = "relaxed after product collection"
+        return drops
+
+    def collect_single_animal_product(self, animal: Dict[str, object]) -> bool:
+        drops = self.farm_animal_collectable_drops(animal)
+        if not drops:
+            stage = self.farm_animal_growth_stage(animal)
+            if stage != "Adult":
+                self.set_message(f"{animal.get('name')} is still {stage.lower()} and does not produce yet.")
+            elif animal.get("sick"):
+                self.set_message(f"{animal.get('name')} needs treatment before producing safely.")
+            else:
+                cycle = self.farm_animal_product_cycle_days(animal)
+                self.set_message(f"No product is ready. This species has a {cycle}-day care cycle.")
+            return False
+        add_inventory_items(self.state.inventory, drops)
+        self.autosave_with_message(f"Collected from {animal.get('name')}: {format_drops(drops)}.")
+        return True
 
     def feed_animals_in_building(self, building_key: str) -> bool:
         self.normalize_farm_animals()
@@ -22789,18 +26889,22 @@ class FarmGame(
         if not animals:
             self.set_message("There are no animals here to feed.")
             return False
-        feed_cost = len(animals)
-        if self.state.inventory.get("Mixed Seeds", 0) < feed_cost:
-            self.set_message(f"Need {feed_cost} Mixed Seeds to feed all animals here.")
+        hungry = [animal for animal in animals if not animal.get("fed")]
+        if not hungry:
+            self.set_message("Every animal here has already eaten today.")
             return False
-        self.state.inventory["Mixed Seeds"] -= feed_cost
-        for animal in animals:
+        feed_cost = len(hungry)
+        if self.animal_feed_available() < feed_cost:
+            self.set_message(f"Need {feed_cost} Animal Feed or Mixed Seeds to feed everyone here.")
+            return False
+        self.consume_animal_feed(feed_cost)
+        for animal in hungry:
             trait = str(animal.get("trait", "Gentle"))
             gain = 10 if trait == "Greedy" else 8
             animal["fed"] = True
             animal["happiness"] = min(100, int(animal.get("happiness", 50)) + gain)
             animal["health"] = min(100, int(animal.get("health", 100)) + 2)
-        self.autosave_with_message(f"Fed {len(animals)} animal(s).")
+        self.autosave_with_message(f"Filled the troughs for {len(hungry)} animal(s).")
         return True
 
 
@@ -22810,6 +26914,7 @@ class FarmGame(
         if not animals:
             self.set_message("There are no animals here to pet.")
             return False
+        petted = 0
         for animal in animals:
             if not animal.get("petted_today"):
                 trait = str(animal.get("trait", "Gentle"))
@@ -22818,7 +26923,73 @@ class FarmGame(
                 animal["happiness"] = min(100, int(animal.get("happiness", 50)) + happy_gain)
                 animal["affection"] = min(100, int(animal.get("affection", 0)) + affection_gain)
                 animal["petted_today"] = True
-        self.autosave_with_message(f"Pet {len(animals)} animal(s).")
+                petted += 1
+        if not petted:
+            self.set_message("Every animal here has already been petted today.")
+            return False
+        self.autosave_with_message(f"Pet {petted} animal(s).")
+        return True
+
+    def brush_animals_in_building(self, building_key: str) -> bool:
+        self.normalize_farm_animals()
+        if int(self.state.inventory.get("Grooming Brush", 0)) <= 0:
+            self.set_message("Buy a Grooming Brush from the Animal Store first.")
+            return False
+        animals = [animal for animal in self.farm_animals_in_building(building_key) if not animal.get("brushed_today")]
+        if not animals:
+            self.set_message("Every animal here has already been brushed today.")
+            return False
+        for animal in animals:
+            species = str(animal.get("species", "Chicken"))
+            animal["brushed_today"] = True
+            animal["happiness"] = min(100, int(animal.get("happiness", 50)) + (8 if species in {"Cow", "Sheep"} else 5))
+            animal["affection"] = min(100, int(animal.get("affection", 0)) + 3)
+            animal["health"] = min(100, int(animal.get("health", 100)) + 1)
+            animal["activity"] = "freshly groomed"
+        self.autosave_with_message(f"Brushed {len(animals)} animal(s).")
+        return True
+
+    def clean_animal_shelter(self, building_key: str) -> bool:
+        self.normalize_farm_animals()
+        animals = self.farm_animals_in_building(building_key)
+        if not animals:
+            self.set_message("There are no animals living here yet.")
+            return False
+        if all(bool(animal.get("shelter_cleaned_today")) for animal in animals):
+            self.set_message("This shelter already has clean bedding and water today.")
+            return False
+        for animal in animals:
+            animal["shelter_cleaned_today"] = True
+            animal["health"] = min(100, int(animal.get("health", 100)) + 2)
+            animal["happiness"] = min(100, int(animal.get("happiness", 50)) + 2)
+        self.autosave_with_message("You replace the bedding, clear the floor, and refill clean water.")
+        return True
+
+    def toggle_animals_in_building_pasture(self, building_key: str) -> bool:
+        self.normalize_farm_animals()
+        animals = self.farm_animals_in_building(building_key)
+        if not animals:
+            self.set_message("There are no animals here to call.")
+            return False
+        if any(self.farm_animal_actor_position(animal) for animal in animals):
+            for animal in animals:
+                animal["pasture_mode"] = "Inside"
+                self.set_farm_animal_inside(animal, "resting after the pasture bell")
+            self.autosave_with_message("You ring the pasture bell and the animals return to shelter.")
+            return True
+        if not (7 <= int(self.state.hour) < 18):
+            self.set_message("The animals should only be let out between 7:00 AM and 6:00 PM.")
+            return False
+        eligible = 0
+        for animal in animals:
+            if not self.farm_animal_weather_allows_outside(animal) or animal.get("sick"):
+                continue
+            animal["pasture_mode"] = "Auto"
+            eligible += 1 if self.spawn_farm_animal_outside(animal) else 0
+        if not eligible:
+            self.set_message("Weather, health, or a blocked doorway keeps the animals inside.")
+            return False
+        self.autosave_with_message(f"You ring the pasture bell and let {eligible} animal(s) outside.")
         return True
 
 
@@ -22829,35 +27000,14 @@ class FarmGame(
             self.set_message("There are no animals here.")
             return False
         drops: Dict[str, int] = {}
-        today = self.farm_animal_day_key()
         skipped_sick = 0
         for animal in animals:
-            if animal.get("last_product_day") == today:
-                continue
-            species = str(animal.get("species"))
-            happy = int(animal.get("happiness", 50))
             health = int(animal.get("health", 100))
-            affection = int(animal.get("affection", 0))
-            fed = bool(animal.get("fed"))
             if animal.get("sick") or health < 25:
-                skipped_sick += 1
+                skipped_sick += 1 if int(animal.get("product_ready_count", 0)) > 0 else 0
                 continue
-            if not fed and random.random() < 0.75:
-                continue
-            if happy < 25 and random.random() < 0.60:
-                continue
-            product = FARM_ANIMAL_DATA.get(species, {}).get("product")
-            qty = 1
-            if species == "Sheep" and happy >= 70:
-                qty = 2
-            if species == "Rabbit" and random.random() < (0.35 if affection >= 40 else 0.20):
-                qty += 1
-            if species == "Duck" and random.random() < (0.35 if happy >= 70 else 0.20):
-                drops["Feather"] = drops.get("Feather", 0) + 1
-            if product:
-                product_name = self.animal_product_name_for_quality(product, animal)
-                drops[product_name] = drops.get(product_name, 0) + qty
-            animal["last_product_day"] = today
+            for item, quantity in self.farm_animal_collectable_drops(animal).items():
+                drops[item] = drops.get(item, 0) + quantity
         if drops:
             add_inventory_items(self.state.inventory, drops)
             extra = f" {skipped_sick} sick/weak animal(s) produced nothing." if skipped_sick else ""
@@ -22882,16 +27032,68 @@ class FarmGame(
             mood = self.animal_mood(animal)
             favorite = FARM_ANIMAL_TREATS.get(str(species), "Mixed Seeds")
             lines.append(f"{animal.get('name')} the {species} [{trait}]")
-            lines.append(f"  Age: {animal.get('age', 0)} days | Mood: {mood}")
+            lines.append(
+                f"  Stage: {self.farm_animal_growth_stage(animal)} | Age: {animal.get('age', 0)} days | Mood: {mood}"
+            )
             lines.append(f"  Happiness: {animal.get('happiness', 0)} | Affection: {animal.get('affection', 0)} | Health: {animal.get('health', 0)} ({self.animal_health_label(animal)})")
-            lines.append(f"  Fed: {'yes' if animal.get('fed') else 'no'} | Petted: {'yes' if animal.get('petted_today') else 'no'} | Treat: {'yes' if animal.get('treat_today') else 'no'}")
-            lines.append(f"  Favorite treat: {favorite} | Product ready: {'yes' if self.farm_animal_product_ready(animal) else 'no'}")
+            lines.append(
+                f"  Bond: {self.farm_animal_affection_hearts(animal)}/10 hearts | Care streak: {animal.get('care_streak', 0)} days | Neglect: {animal.get('neglect_days', 0)}"
+            )
+            lines.append(
+                f"  Fed: {'yes' if animal.get('fed') else 'no'} | Hand-fed: {'yes' if animal.get('hand_fed_today') else 'no'} | "
+                f"Petted: {'yes' if animal.get('petted_today') else 'no'} | Brushed: {'yes' if animal.get('brushed_today') else 'no'}"
+            )
+            lines.append(
+                f"  Treat: {'yes' if animal.get('treat_today') else 'no'} | Clean shelter: {'yes' if animal.get('shelter_cleaned_today') else 'no'} | Favorite: {favorite}"
+            )
+            cycle = self.farm_animal_product_cycle_days(animal)
+            lines.append(
+                f"  Products ready: {animal.get('product_ready_count', 0)}/3 | Cycle: {animal.get('product_progress', 0)}/{cycle} cared days"
+            )
             location = f"outside at {animal.get('x')},{animal.get('y')}" if animal.get("outside") else "inside housing"
-            lines.append(f"  Location: {location} | Activity: {animal.get('activity', 'resting')}")
+            lines.append(f"  Location: {location} | Pasture: {animal.get('pasture_mode', 'Auto')} | Activity: {animal.get('activity', 'resting')}")
             if animal.get("last_grazed_day") == self.farm_animal_day_key():
                 lines.append("  Grazed today: yes")
             if animal.get("sick"):
                 lines.append("  Needs treatment.")
+        return lines
+
+    def farm_animal_detail_lines(self, animal: Dict[str, object]) -> List[str]:
+        self.normalize_farm_animals()
+        name = str(animal.get("name", "Animal"))
+        species = str(animal.get("species", "Animal"))
+        trait = str(animal.get("trait", "Gentle"))
+        stage = self.farm_animal_growth_stage(animal)
+        cycle = self.farm_animal_product_cycle_days(animal)
+        personality = {
+            "Gentle": "Trust grows quickly through quiet daily attention.",
+            "Skittish": "Calm routines and patient brushing help build confidence.",
+            "Playful": "Enjoys attention and moves around the pasture frequently.",
+            "Greedy": "Responds especially well to hand-feeding and favorite treats.",
+            "Calm": "Handles routine changes and pasture life steadily.",
+            "Stubborn": "Warms up slowly, but sustained care earns lasting trust.",
+            "Curious": "Often approaches you and enjoys varied attention.",
+            "Sleepy": "Prefers gentle care and spends more time resting.",
+        }.get(trait, "Responds to consistent daily care.")
+        lines = [
+            f"{name.upper()} THE {species.upper()}", "",
+            f"Life stage: {stage} ({animal.get('age', 0)} days old)",
+            f"Personality: {trait}", personality, "",
+            f"Mood: {self.animal_mood(animal)} | Health: {animal.get('health', 0)} ({self.animal_health_label(animal)})",
+            f"Happiness: {animal.get('happiness', 0)}/100",
+            f"Affection: {animal.get('affection', 0)}/100 ({self.farm_animal_affection_hearts(animal)}/10 hearts)",
+            f"Care streak: {animal.get('care_streak', 0)} day(s) | Neglect: {animal.get('neglect_days', 0)} day(s)", "",
+            "Today:",
+            f"- Fed: {'yes' if animal.get('fed') else 'no'} | Hand-fed: {'yes' if animal.get('hand_fed_today') else 'no'}",
+            f"- Petted: {'yes' if animal.get('petted_today') else 'no'} | Brushed: {'yes' if animal.get('brushed_today') else 'no'}",
+            f"- Treat: {'yes' if animal.get('treat_today') else 'no'} | Clean shelter: {'yes' if animal.get('shelter_cleaned_today') else 'no'}",
+            f"- Grazed: {'yes' if animal.get('last_grazed_day') == self.farm_animal_day_key() else 'no'}", "",
+            f"Product cycle: {animal.get('product_progress', 0)}/{cycle} cared day(s)",
+            f"Products waiting: {animal.get('product_ready_count', 0)}/3",
+            "Production begins at adulthood." if stage != "Adult" else "Three excellent-care days unlock premium products.",
+        ]
+        if animal.get("sick"):
+            lines.extend(["", "Needs Animal Medicine or clinic treatment."])
         return lines
 
 
@@ -22924,7 +27126,11 @@ class FarmGame(
             items = [
                 MenuItem(label="Inspect", value="inspect", enabled=True, hint=self.animal_mood(animal)),
                 MenuItem(label="Pet", value="pet", enabled=not bool(animal.get("petted_today")), hint="daily affection"),
-                MenuItem(label="Give treat", value="treat", enabled=True, hint=FARM_ANIMAL_TREATS.get(str(species), "Mixed Seeds")),
+                MenuItem(label="Hand-feed", value="feed", enabled=not bool(animal.get("hand_fed_today")) and self.animal_feed_available() > 0, hint="Animal Feed/Mixed Seeds"),
+                MenuItem(label="Brush", value="brush", enabled=not bool(animal.get("brushed_today")) and int(self.state.inventory.get("Grooming Brush", 0)) > 0, hint="daily grooming"),
+                MenuItem(label="Give treat", value="treat", enabled=not bool(animal.get("treat_today")), hint=FARM_ANIMAL_TREATS.get(str(species), "Mixed Seeds")),
+                MenuItem(label="Collect product", value="collect", enabled=self.farm_animal_product_ready(animal), hint=f"{animal.get('product_ready_count', 0)} ready"),
+                MenuItem(label="Call inside" if animal.get("outside") else "Let outside", value="pasture", enabled=True, hint=str(animal.get("pasture_mode", "Auto"))),
                 MenuItem(label="Treat sickness", value="medicine", enabled=True, hint="Animal Medicine/$"),
                 MenuItem(label="Cycle name", value="rename", enabled=True, hint="next preset"),
                 MenuItem(label="Sell animal", value="sell", enabled=True, hint=f"${self.animal_sell_value(animal)}"),
@@ -22935,12 +27141,20 @@ class FarmGame(
                 self.set_message("Closed animal menu.")
                 return
             if choice.value == "inspect":
-                self.vertical_panel_view(f"{name} the {species}", self.farm_animal_status_lines(str(animal.get("building_key", ""))), LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
+                self.vertical_panel_view(f"{name} the {species}", self.farm_animal_detail_lines(animal), LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
                 continue
             if choice.value == "pet":
                 self.pet_single_farm_animal(animal); return
+            if choice.value == "feed":
+                self.hand_feed_single_farm_animal(animal); return
+            if choice.value == "brush":
+                self.brush_single_farm_animal(animal); return
             if choice.value == "treat":
                 self.give_treat_to_animal(animal); return
+            if choice.value == "collect":
+                self.collect_single_animal_product(animal); return
+            if choice.value == "pasture":
+                self.set_single_farm_animal_pasture_mode(animal, not bool(animal.get("outside"))); return
             if choice.value == "medicine":
                 self.treat_sick_animal(animal); return
             if choice.value == "rename":
@@ -22953,11 +27167,15 @@ class FarmGame(
         while True:
             animals = self.farm_animals_in_building(building_key)
             sick_count = sum(1 for a in animals if a.get("sick"))
+            ready_count = sum(int(a.get("product_ready_count", 0)) for a in animals if self.farm_animal_product_ready(a))
             items = [
                 MenuItem(label="View herd/flock", value="view", enabled=True, hint=str(len(animals))),
-                MenuItem(label="Feed all", value="feed", enabled=bool(animals), hint="Mixed Seeds"),
+                MenuItem(label="Feed all", value="feed", enabled=bool(animals), hint="Animal Feed/Mixed Seeds"),
                 MenuItem(label="Pet all", value="pet", enabled=bool(animals), hint="daily"),
-                MenuItem(label="Collect products", value="collect", enabled=bool(animals), hint="daily"),
+                MenuItem(label="Brush all", value="brush", enabled=bool(animals) and int(self.state.inventory.get("Grooming Brush", 0)) > 0, hint="daily grooming"),
+                MenuItem(label="Clean shelter", value="clean", enabled=bool(animals), hint="bedding and water"),
+                MenuItem(label="Ring pasture bell", value="pasture", enabled=bool(animals), hint="call in / let out"),
+                MenuItem(label="Collect products", value="collect", enabled=ready_count > 0, hint=f"{ready_count} ready"),
                 MenuItem(label="Manage individual", value="manage", enabled=bool(animals), hint=f"{sick_count} sick" if sick_count else ""),
                 MenuItem(label="Back", value=MENU_BACK, enabled=True),
             ]
@@ -22972,6 +27190,12 @@ class FarmGame(
                 self.feed_animals_in_building(building_key); return
             if choice.value == "pet":
                 self.pet_animals_in_building(building_key); return
+            if choice.value == "brush":
+                self.brush_animals_in_building(building_key); return
+            if choice.value == "clean":
+                self.clean_animal_shelter(building_key); return
+            if choice.value == "pasture":
+                self.toggle_animals_in_building_pasture(building_key); return
             if choice.value == "collect":
                 self.collect_animal_products(building_key); return
             if choice.value == "manage":
@@ -22986,7 +27210,11 @@ class FarmGame(
             door = TOWN_DOORS.get(building_id, ("?", "?"))
             label = self.town_building_label(building_id)
             status = self.town_building_status_label(building_id)
-            return f"- {label}: {status} | door at {door[0]},{door[1]}"
+            location = str(data.get("location", ""))
+            staff = self.authored_town_staff_names(location, present_only=True)
+            staff_note = f"on duty: {', '.join(staff)}" if staff else "staff away/self-service"
+            hours = self.authored_town_service_hours(location)
+            return f"- {label}: {status} | {hours} | {staff_note} | door {door[0]},{door[1]}"
 
         active_npcs = self.active_town_npcs()
         inactive_count = len(self.inactive_town_npcs())
@@ -23014,6 +27242,13 @@ class FarmGame(
             "South Civic Walk:",
             building_line("clinic"),
             building_line("market_row"),
+            "",
+            "South Residential Row:",
+            *[
+                f"- {residence.get('label')}: {residence.get('style')} | door {residence['door'][0]},{residence['door'][1]} | "
+                f"{', '.join(str(self.town_npc_definition(npc_id).get('name', npc_id)) for npc_id in residence.get('residents', ())) }"
+                for residence in AUTHORED_TOWN_RESIDENCE_DATA.values()
+            ],
             "",
             "Districts:",
             "- Central Park: fountain near 49,29",
@@ -23273,6 +27508,10 @@ class FarmGame(
         if npc:
             self.town_npc_menu(npc)
             return
+        public_feature = self.town_public_event_feature_at(x, y)
+        if public_feature:
+            self.interact_town_public_event_feature(public_feature)
+            return
         tile = self.active_map()[y][x] if self.in_active_bounds(x, y) else "#"
         if self.in_seed_shop(x, y): self.transition_to_general_store(); return
         if self.in_blacksmith(x, y): self.transition_to_blacksmith_interior(); return
@@ -23283,6 +27522,10 @@ class FarmGame(
         if tile == "E": self.transition_to_farm(); return
         if tile == "W":
             self.transition_to_wilderness()
+            return
+        residence_id = AUTHORED_TOWN_RESIDENCE_ID_BY_DOOR.get((int(x), int(y)), "")
+        if residence_id:
+            self.enter_authored_town_residence(residence_id)
             return
         if tile == "D" and (x, y) in TOWN_DIRECTORY_TILES:
             self.read_town_directory()
@@ -23329,6 +27572,25 @@ class FarmGame(
         if tile == "N":
             self.town_notice_board_menu()
             return
+        if tile == "h":
+            residence_id = next(
+                (
+                    key for key, residence in AUTHORED_TOWN_RESIDENCE_DATA.items()
+                    if abs(int(residence["door"][0]) - int(x)) <= 5
+                    and int(residence["door"][1]) - 5 <= int(y) <= int(residence["door"][1])
+                ),
+                "",
+            )
+            residence = AUTHORED_TOWN_RESIDENCE_DATA.get(residence_id, {})
+            residents = [
+                self.town_npc_definition(npc_id).get("name", npc_id)
+                for npc_id in residence.get("residents", ())
+            ]
+            self.set_message(
+                f"{residence.get('label', 'Town residence')}: {residence.get('style', 'private home')}. "
+                f"Residents: {', '.join(str(name) for name in residents)}."
+            )
+            return
         if tile in ["G", "X", "L", "M", "I", "Y", "C", "A", "H", "R", "P", "U"]:
             building_id = self.town_building_id_at(x, y)
             self.set_message(self.town_building_exterior_message(building_id) if building_id else self.describe_tile(x, y))
@@ -23374,6 +27636,9 @@ class FarmGame(
 
     def water_tile_at(self, x: int, y: int) -> bool:
         if not self.in_active_bounds(x, y):
+            if self.on_wilderness():
+                chunk_x, chunk_y, local_x, local_y = self.wilderness_stream_resolve(x, y)
+                return self.wilderness_stream_preview_tile(chunk_x, chunk_y, local_x, local_y) == "~"
             return False
         return self.active_map()[y][x] == "~"
 
@@ -23381,6 +27646,12 @@ class FarmGame(
         if self.on_farm():
             return "Farm"
         if self.on_wilderness():
+            profile = self.wilderness_region_profile(
+                self.state.wilderness_chunk_x,
+                self.state.wilderness_chunk_y,
+            )
+            if profile.get("biome") == "[":
+                return "Coast"
             return "Wilderness"
         if self.on_mine():
             return "Mine"
@@ -23402,11 +27673,53 @@ class FarmGame(
             return False
         return True
 
-    def available_fish_here(self) -> List[str]:
+    def wilderness_coastal_fishing_habitat(
+        self,
+        x: Optional[int] = None,
+        y: Optional[int] = None,
+    ) -> str:
+        if not self.on_wilderness() or self.fishing_location_name() != "Coast":
+            return ""
+        local_x = int(self.state.player_x if x is None else x)
+        local_y = int(self.state.player_y if y is None else y)
+        chunk_x, chunk_y = int(self.state.wilderness_chunk_x), int(self.state.wilderness_chunk_y)
+        if not self.in_active_bounds(local_x, local_y):
+            chunk_x, chunk_y, local_x, local_y = self.wilderness_stream_resolve(local_x, local_y)
+        wx, wy = self.wilderness_world_coords(chunk_x, chunk_y, local_x, local_y)
+        if self.wilderness_world_reef_at(wx, wy):
+            return "Reef"
+        current = self.wilderness_world_current(wx, wy)
+        if int(current.get("strength", 0)) >= 2:
+            return "Current"
+        return "Open Coast"
+
+    def available_fish_here(
+        self,
+        target_x: Optional[int] = None,
+        target_y: Optional[int] = None,
+    ) -> List[str]:
         weighted: List[str] = []
         for fish_name, data in FISH_DATA.items():
             if self.fish_matches_conditions(fish_name, data):
                 weighted.extend([fish_name] * int(data.get("weight", 1)))
+        if self.fishing_location_name() == "Coast":
+            habitat = self.wilderness_coastal_fishing_habitat(target_x, target_y)
+            tropical = {
+                "Coral Dart", "Parrotfish", "Reef Grouper", "Lantern Angelfish",
+            }
+            if habitat != "Reef":
+                weighted = [fish_name for fish_name in weighted if fish_name not in tropical]
+            else:
+                weighted.extend(["Coral Dart"] * 8)
+                weighted.extend(["Parrotfish"] * 5)
+                weighted.extend(["Reef Grouper"] * 3)
+                if fishing_time_bucket(self.state.hour) == "Night":
+                    weighted.extend(["Lantern Angelfish"] * 4)
+            if habitat == "Current":
+                weighted.extend(["Mackerel"] * 5)
+                weighted.extend(["Sunfin Tuna"] * 4)
+            elif habitat != "Reef":
+                weighted = [fish_name for fish_name in weighted if fish_name != "Sunfin Tuna"]
         if self.on_mine() and self.state.mine_floor == 10:
             weighted.extend(["Cave Carp"] * 4)
             weighted.extend(["Blind Minnow"] * 3)
@@ -23478,13 +27791,19 @@ class FarmGame(
         if not self.water_tile_at(x, y):
             self.set_message("Cast the Fishing Rod into water.")
             return
+        if self.on_wilderness() and self.in_active_bounds(x, y) and self.active_map()[y][x] == "~" and self.wilderness_water_is_frozen_at(x, y):
+            self.set_message("The freshwater is frozen solid. Coastal water remains fishable in winter.")
+            return
+        if self.on_farm() and self.in_active_bounds(x, y) and self.active_map()[y][x] == "~" and self.state.season == "Winter":
+            self.set_message("The farm pond is frozen solid. It will be fishable again after the spring thaw.")
+            return
         if self.state.fishing_active:
             self.set_message("You already have a line in the water. Press F when the bobber goes under.")
             return
         if not self.spend_stamina(4):
             return
 
-        pool = self.available_fish_here()
+        pool = self.available_fish_here(x, y)
         seed = (
             int(self.state.wilderness_seed)
             + self.state.year * 1000000
@@ -23629,8 +27948,15 @@ class FarmGame(
             return
         x, y = self.target_tile_pos()
         if not self.in_active_bounds(x, y):
-            self.set_message("There is nothing to use the tool on.")
-            return
+            chunk_x, chunk_y, local_x, local_y = self.wilderness_stream_resolve(x, y)
+            dx = int(chunk_x) - int(self.state.wilderness_chunk_x)
+            dy = int(chunk_y) - int(self.state.wilderness_chunk_y)
+            if abs(dx) + abs(dy) != 1:
+                self.set_message("There is nothing to use the tool on.")
+                return
+            if not self.transition_wilderness_chunk(dx, dy, interaction_target=True):
+                return
+            x, y = local_x, local_y
 
         tool = self.state.selected_tool
         tile = self.active_map()[y][x]
@@ -23695,8 +28021,20 @@ class FarmGame(
         x, y = self.target_tile_pos()
 
         if not self.in_active_bounds(x, y):
-            self.set_message("There is nothing to use the tool on.")
-            return
+            if self.on_wilderness():
+                chunk_x, chunk_y, local_x, local_y = self.wilderness_stream_resolve(x, y)
+                dx = int(chunk_x) - int(self.state.wilderness_chunk_x)
+                dy = int(chunk_y) - int(self.state.wilderness_chunk_y)
+                if abs(dx) + abs(dy) == 1:
+                    if not self.transition_wilderness_chunk(dx, dy, interaction_target=True):
+                        return
+                    x, y = local_x, local_y
+                else:
+                    self.set_message("There is nothing to use the tool on.")
+                    return
+            else:
+                self.set_message("There is nothing to use the tool on.")
+                return
 
         tool = s.selected_tool
 
@@ -23945,13 +28283,22 @@ class FarmGame(
             return
         quality = crop.projected_quality()
         item_name = quality_item_name(crop.name, quality)
-        self.state.inventory[item_name] = self.state.inventory.get(item_name, 0) + 1
+        harvest_qty = 1
+        work_record = self.home_region_work_record()
+        if (
+            str(work_record.get("crop_bonus_day", "")) == self.town_npc_day_key()
+            and not bool(work_record.get("crop_bonus_used", False))
+        ):
+            harvest_qty += 1
+            work_record["crop_bonus_used"] = True
+        self.state.inventory[item_name] = self.state.inventory.get(item_name, 0) + harvest_qty
         self.remove_crop(x, y)
         self.active_farm_work_map()[y][x] = ","
+        bonus_text = " Rowan's field review produced one extra." if harvest_qty > 1 else ""
         if quality == "Normal":
-            self.set_message(f"You harvested 1 {crop.name}.")
+            self.set_message(f"You harvested {harvest_qty} {crop.name}.{bonus_text}")
         else:
-            self.set_message(f"You harvested 1 {quality} {crop.name}.")
+            self.set_message(f"You harvested {harvest_qty} {quality} {crop.name}.{bonus_text}")
 
     def owns_tool(self, tool_name: str) -> bool:
         return self.tool_level(tool_name) > 0
@@ -24435,10 +28782,17 @@ class FarmGame(
         while True:
             if page == "main":
                 ring_ok, ring_hint = self.can_purchase_wedding_ring()
+                pack_price = self.backpack_upgrade_price()
                 main_items = [
                     MenuItem(label="Buy seeds", value="seeds", enabled=True, hint=f"${s.money}"),
                     MenuItem(label="Buy combat supplies", value="combat_supplies", enabled=True, hint="HP/focus"),
                     MenuItem(label="Buy infrastructure", value="infrastructure", enabled=True, hint="farm items"),
+                    MenuItem(
+                        label="Expand backpack",
+                        value="backpack_upgrade",
+                        enabled=s.money >= pack_price,
+                        hint=f"${pack_price} | {self.backpack_capacity()} -> {self.backpack_capacity() + 50}",
+                    ),
                     MenuItem(
                         label="Buy wedding ring",
                         value="wedding_ring",
@@ -24472,6 +28826,13 @@ class FarmGame(
 
                 if selected_main.value == "combat_supplies":
                     page = "combat_supplies"
+                    continue
+
+                if selected_main.value == "backpack_upgrade":
+                    if self.purchase_backpack_upgrade():
+                        if auto_opened:
+                            s.shop_menu_suppressed_until_exit = True
+                        return
                     continue
 
                 if selected_main.value == "wedding_ring":
@@ -25331,6 +29692,16 @@ class FarmGame(
                 else:
                     happy -= 2
 
+                if animal.get("brushed_today"):
+                    happy += 2
+                    health += 1
+
+                if animal.get("shelter_cleaned_today"):
+                    happy += 2
+                    health += 2
+                elif not animal.get("outside"):
+                    health -= 1
+
                 if animal.get("treat_today"):
                     happy += 2
                     health += 1
@@ -25348,12 +29719,40 @@ class FarmGame(
                     happy -= 4
                     health -= 2
 
+                received_attention = bool(animal.get("petted_today") or animal.get("brushed_today"))
+                well_cared = bool(animal.get("fed") and received_attention and animal.get("shelter_cleaned_today"))
+                if well_cared:
+                    animal["care_streak"] = min(999, int(animal.get("care_streak", 0)) + 1)
+                    animal["neglect_days"] = 0
+                elif animal.get("fed") and received_attention:
+                    animal["care_streak"] = max(0, int(animal.get("care_streak", 0)) - 1)
+                    animal["neglect_days"] = 0
+                else:
+                    animal["care_streak"] = 0
+                    animal["neglect_days"] = min(999, int(animal.get("neglect_days", 0)) + 1)
+
+                if (
+                    self.farm_animal_growth_stage(animal) == "Adult"
+                    and animal.get("fed")
+                    and not sick
+                    and health >= 40
+                ):
+                    progress = int(animal.get("product_progress", 0)) + 1
+                    cycle = self.farm_animal_product_cycle_days(animal)
+                    while progress >= cycle and int(animal.get("product_ready_count", 0)) < 3:
+                        progress -= cycle
+                        animal["product_ready_count"] = int(animal.get("product_ready_count", 0)) + 1
+                    animal["product_progress"] = min(cycle - 1, progress)
+
                 animal["happiness"] = max(0, min(100, happy))
                 animal["health"] = max(0, min(100, health))
                 animal["sick"] = bool(sick)
                 animal["fed"] = False
                 animal["petted_today"] = False
                 animal["treat_today"] = False
+                animal["brushed_today"] = False
+                animal["hand_fed_today"] = False
+                animal["shelter_cleaned_today"] = False
                 self.set_farm_animal_inside(animal, "sleeping indoors")
             except Exception:
                 continue
@@ -25894,14 +30293,18 @@ class FarmGame(
         s.month, s.day, s.year = advance_date(s.month, s.day, s.year)
         new_season = s.season
 
-        s.hour = 6
+        s.hour = self.wake_time_hour()
         s.minute = 0
         self.reset_travel_follower_work_day()
         s.active_food_buffs = {}
         residence_cap_bonus = self.residence_stamina_bonus()
         family_sleep_bonus = self.family_sleep_bonus()
         s.stamina = self.max_stamina()
+        s.natural_stamina_recovery_minutes = 0
+        s.natural_health_recovery_minutes = 0
+        s.natural_health_recovery_delay_minutes = 0
         s.weather = forecast_weather_for_date(s.month, s.day, s.year)
+        freeze_thaw_msg = self.resolve_wilderness_freeze_thaw(old_season, new_season)
         civic_income = self.process_civic_economy()
         restore_combat_state_after_sleep(s)
         self.update_farm_animals_overnight()
@@ -25972,6 +30375,7 @@ class FarmGame(
 
         if old_season != new_season:
             season_msg += f" The season changed to {new_season}."
+            season_msg += freeze_thaw_msg
 
         if sprinkler_watered:
             season_msg += f" Sprinklers watered {sprinkler_watered} tile(s)."
@@ -26118,6 +30522,8 @@ class FarmGame(
         panel_width: int = LEFT_PANEL_WIDTH,
         panel_height: int = LEFT_PANEL_HEIGHT,
         return_back: bool = False,
+        hotkeys: Optional[Dict[str, object]] = None,
+        hotkey_footer: str = "",
     ) -> Optional[MenuItem]:
         """
         Vertical sidebar menu with scrolling and dynamic width.
@@ -26126,12 +30532,26 @@ class FarmGame(
         if not items:
             return MenuItem(label="Back", value=MENU_BACK) if return_back else None
 
-        back_label = " X/Esc back" if return_back else " X/Esc close"
+        # Every nested gameplay menu needs a visible, selectable way out.  Key
+        # cancellation still works, but it should never be the only exit.
+        items = list(items)
+        if return_back and not any(item.value == MENU_BACK for item in items):
+            items.append(MenuItem(
+                label="Back",
+                value=MENU_BACK,
+                enabled=True,
+                hint="Return to the previous screen without taking an action.",
+            ))
+
+        back_label = " B/X/Esc back" if return_back else " B/X/Esc close"
+        select_footer = " Z/Enter select"
+        if hotkey_footer:
+            select_footer += f" | {hotkey_footer}"
         panel_width = self.dynamic_menu_panel_width(
             title,
             items,
             panel_width,
-            footer_lines=[" Z/Enter select", back_label],
+            footer_lines=[select_footer, back_label],
         )
         inner_width = panel_width - 2
 
@@ -26154,11 +30574,11 @@ class FarmGame(
             visible = items[scroll_top:scroll_top + visible_rows]
 
             panel_lines: List[str] = []
-            panel_lines.append("+" + "-" * inner_width + "+")
-            panel_lines.append("|" + pad_to(fit_text(f" {title} ", inner_width), inner_width) + "|")
+            panel_lines.append(colorize("+" + "-" * inner_width + "+", C.UI_BORDER))
+            panel_lines.append("|" + pad_to(colorize(fit_text(f" {title} ", inner_width), C.UI_TITLE), inner_width) + "|")
 
             range_text = f"{selected + 1}/{len(items)}" if len(items) > visible_rows else ""
-            panel_lines.append("+" + "-" * inner_width + "+")
+            panel_lines.append(colorize("+" + "-" * inner_width + "+", C.UI_BORDER))
 
             panel_lines.append("|" + pad_to(" ^ more" if scroll_top > 0 else "", inner_width) + "|")
 
@@ -26177,6 +30597,8 @@ class FarmGame(
 
                 if disabled:
                     raw = colorize(raw, C.DIM)
+                elif actual_index == selected:
+                    raw = colorize(raw, C.UI_SELECTED)
 
                 panel_lines.append("|" + pad_to(raw, inner_width) + "|")
 
@@ -26185,10 +30607,10 @@ class FarmGame(
 
             panel_lines.append("|" + pad_to(" v more" if scroll_top + visible_rows < len(items) else "", inner_width) + "|")
             selected_hint = items[selected].hint if 0 <= selected < len(items) else ""
-            panel_lines.append("+" + "-" * inner_width + "+")
-            panel_lines.append("|" + pad_to(" Z/Enter select", inner_width) + "|")
+            panel_lines.append(colorize("+" + "-" * inner_width + "+", C.UI_BORDER))
+            panel_lines.append("|" + pad_to(select_footer, inner_width) + "|")
             panel_lines.append("|" + pad_to(back_label, inner_width) + "|")
-            panel_lines.append("+" + "-" * inner_width + "+")
+            panel_lines.append(colorize("+" + "-" * inner_width + "+", C.UI_BORDER))
 
             self.draw_with_left_panel(
                 panel_lines,
@@ -26197,7 +30619,9 @@ class FarmGame(
             )
 
             key = normalize_key(read_key())
-            if key in ["\t", "\x1b", "q", "x"]:
+            if hotkeys and key in hotkeys:
+                return MenuItem(label=str(key), value=hotkeys[key], enabled=True)
+            if key in ["\t", "\x1b", "q", "x", "b"]:
                 return MenuItem(label="Back", value=MENU_BACK) if return_back else None
             elif key in ["w", "UP"]:
                 selected = (selected - 1) % len(items)
@@ -26224,7 +30648,7 @@ class FarmGame(
             title,
             rows,
             panel_width,
-            footer_lines=[" W/S scroll", " X/Esc back"],
+            footer_lines=[" W/S scroll", " B/X/Esc back"],
         )
         inner_width = panel_width - 2
         visible_rows = max(4, panel_height - 6)
@@ -26234,9 +30658,9 @@ class FarmGame(
         while True:
             visible = display_rows[scroll_top:scroll_top + visible_rows]
             panel_lines: List[str] = []
-            panel_lines.append("+" + "-" * inner_width + "+")
-            panel_lines.append("|" + pad_to(fit_text(f" {title} ", inner_width), inner_width) + "|")
-            panel_lines.append("+" + "-" * inner_width + "+")
+            panel_lines.append(colorize("+" + "-" * inner_width + "+", C.UI_BORDER))
+            panel_lines.append("|" + pad_to(colorize(fit_text(f" {title} ", inner_width), C.UI_TITLE), inner_width) + "|")
+            panel_lines.append(colorize("+" + "-" * inner_width + "+", C.UI_BORDER))
 
             panel_lines.append("|" + pad_to(" ^ more" if scroll_top > 0 else "", inner_width) + "|")
 
@@ -26247,15 +30671,15 @@ class FarmGame(
                 panel_lines.append("|" + pad_to("", inner_width) + "|")
 
             panel_lines.append("|" + pad_to(" v more" if scroll_top + visible_rows < len(display_rows) else "", inner_width) + "|")
-            panel_lines.append("+" + "-" * inner_width + "+")
+            panel_lines.append(colorize("+" + "-" * inner_width + "+", C.UI_BORDER))
             panel_lines.append("|" + pad_to(" W/S scroll", inner_width) + "|")
-            panel_lines.append("|" + pad_to(" X/Esc back", inner_width) + "|")
-            panel_lines.append("+" + "-" * inner_width + "+")
+            panel_lines.append("|" + pad_to(" B/X/Esc back", inner_width) + "|")
+            panel_lines.append(colorize("+" + "-" * inner_width + "+", C.UI_BORDER))
 
             self.draw_with_left_panel(panel_lines, panel_width)
 
             key = normalize_key(read_key())
-            if key in ["\t", "\x1b", "q", "x"] + MENU_CONFIRM_KEYS:
+            if key in ["\t", "\x1b", "q", "x", "b"] + MENU_CONFIRM_KEYS:
                 return
             elif key in ["w", "UP"]:
                 scroll_top = max(0, scroll_top - 1)
@@ -26297,7 +30721,7 @@ class FarmGame(
             "A/D: -/+ 1",
             "W/S: +/- 5",
             "Z/Enter confirm",
-            "X/Esc back",
+            "B/X/Esc back",
         ])
         panel_width = self.dynamic_view_panel_width(title, base_rows, panel_width)
         inner_width = panel_width - 2
@@ -26332,13 +30756,13 @@ class FarmGame(
 
             panel_lines.append("+" + "-" * inner_width + "+")
             panel_lines.append("|" + pad_to(" Z/Enter confirm", inner_width) + "|")
-            panel_lines.append("|" + pad_to(" X/Esc back", inner_width) + "|")
+            panel_lines.append("|" + pad_to(" B/X/Esc back", inner_width) + "|")
             panel_lines.append("+" + "-" * inner_width + "+")
 
             self.draw_with_left_panel(panel_lines, panel_width)
 
             key = normalize_key(read_key())
-            if key in ["\t", "\x1b", "q", "x"]:
+            if key in ["\t", "\x1b", "q", "x", "b"]:
                 return MENU_BACK if return_back else 0
             elif key in ["a", "LEFT"]:
                 qty = max(1, qty - 1)
@@ -26500,6 +30924,21 @@ class FarmGame(
         self.state.time_speed = TIME_SPEED_OPTIONS[(index + 1) % len(TIME_SPEED_OPTIONS)]
         self.autosave_with_message(f"Clock speed: {self.time_speed_label()}.")
 
+    def wake_time_hour(self) -> int:
+        try:
+            return max(4, min(12, int(getattr(self.state, "wake_hour", 7))))
+        except (TypeError, ValueError):
+            return 7
+
+    def wake_time_label(self) -> str:
+        hour = self.wake_time_hour()
+        return f"{hour}:00 AM" if hour < 12 else "12:00 PM"
+
+    def cycle_wake_time_setting(self):
+        hour = self.wake_time_hour()
+        self.state.wake_hour = 4 if hour >= 12 else hour + 1
+        self.autosave_with_message(f"Wake-up time: {self.wake_time_label()}.")
+
     def game_minute_real_seconds(self) -> float:
         speed = self.time_speed_key()
         return max(0.1, float(TIME_SPEED_REAL_SECONDS.get(speed, GAME_MINUTE_REAL_SECONDS)))
@@ -26507,10 +30946,14 @@ class FarmGame(
     def startup_settings_snapshot(self) -> Dict[str, object]:
         return {
             "color_enabled": bool(self.state.color_enabled),
+            "ambient_visuals_enabled": bool(self.state.ambient_visuals_enabled),
+            "high_contrast_enabled": bool(self.state.high_contrast_enabled),
+            "detailed_glyphs_enabled": bool(self.state.detailed_glyphs_enabled),
             "show_target_info": bool(self.state.show_target_info),
             "show_control_hints": bool(self.state.show_control_hints),
             "live_time_enabled": bool(self.state.live_time_enabled),
             "time_speed": self.time_speed_key(),
+            "wake_hour": self.wake_time_hour(),
             "aging_and_death_enabled": bool(
                 self.state.aging_and_death_enabled
             ),
@@ -26522,11 +30965,24 @@ class FarmGame(
     def apply_startup_settings_snapshot(self, settings: Dict[str, object]):
         self.state.color_enabled = bool(settings.get("color_enabled", self.state.color_enabled))
         set_color_enabled(self.state.color_enabled)
+        self.state.ambient_visuals_enabled = bool(
+            settings.get("ambient_visuals_enabled", self.state.ambient_visuals_enabled)
+        )
+        self.state.high_contrast_enabled = bool(
+            settings.get("high_contrast_enabled", self.state.high_contrast_enabled)
+        )
+        self.state.detailed_glyphs_enabled = bool(
+            settings.get("detailed_glyphs_enabled", self.state.detailed_glyphs_enabled)
+        )
         self.state.show_target_info = bool(settings.get("show_target_info", self.state.show_target_info))
         self.state.show_control_hints = bool(settings.get("show_control_hints", self.state.show_control_hints))
         self.state.live_time_enabled = bool(settings.get("live_time_enabled", self.state.live_time_enabled))
         speed = str(settings.get("time_speed", getattr(self.state, "time_speed", DEFAULT_TIME_SPEED)))
         self.state.time_speed = speed if speed in TIME_SPEED_OPTIONS else DEFAULT_TIME_SPEED
+        try:
+            self.state.wake_hour = max(4, min(12, int(settings.get("wake_hour", getattr(self.state, "wake_hour", 7)))))
+        except (TypeError, ValueError):
+            self.state.wake_hour = 7
         self.state.aging_and_death_enabled = bool(
             settings.get(
                 "aging_and_death_enabled",
@@ -26546,8 +31002,12 @@ class FarmGame(
                 MenuItem(label="Target info line", value="target_info", enabled=True, hint=self.on_off(self.state.show_target_info)),
                 MenuItem(label="Control hint line", value="control_hints", enabled=True, hint=self.on_off(self.state.show_control_hints)),
                 MenuItem(label="Color display", value="color", enabled=True, hint=self.on_off(self.state.color_enabled)),
+                MenuItem(label="Ambient animation/lighting", value="ambient_visuals", enabled=True, hint=self.on_off(self.state.ambient_visuals_enabled)),
+                MenuItem(label="High-contrast palette", value="high_contrast", enabled=True, hint=self.on_off(self.state.high_contrast_enabled)),
+                MenuItem(label="Detailed map glyphs", value="detailed_glyphs", enabled=True, hint=self.on_off(self.state.detailed_glyphs_enabled)),
                 MenuItem(label="Live time/weather", value="live", enabled=True, hint=self.on_off(self.state.live_time_enabled)),
                 MenuItem(label="Clock speed", value="time_speed", enabled=True, hint=self.time_speed_label()),
+                MenuItem(label="Wake-up time", value="wake_time", enabled=True, hint=self.wake_time_label()),
                 MenuItem(label="Aging & natural death", value="aging", enabled=True, hint=self.on_off(self.state.aging_and_death_enabled)),
                 MenuItem(label="Auto-open shop/bin", value="auto_open", enabled=True, hint=self.on_off(self.state.shop_auto_open_enabled and self.state.bin_auto_open_enabled)),
                 MenuItem(label="Tool targeting", value="target_mode", enabled=True, hint=self.target_mode_label()),
@@ -26568,12 +31028,20 @@ class FarmGame(
             elif choice.value == "color":
                 set_color_enabled(not get_color_enabled())
                 self.state.color_enabled = get_color_enabled()
+            elif choice.value == "ambient_visuals":
+                self.state.ambient_visuals_enabled = not self.state.ambient_visuals_enabled
+            elif choice.value == "high_contrast":
+                self.state.high_contrast_enabled = not self.state.high_contrast_enabled
+            elif choice.value == "detailed_glyphs":
+                self.state.detailed_glyphs_enabled = not self.state.detailed_glyphs_enabled
             elif choice.value == "live":
                 self.state.live_time_enabled = not self.state.live_time_enabled
             elif choice.value == "time_speed":
                 current = self.time_speed_key()
                 index = TIME_SPEED_OPTIONS.index(current) if current in TIME_SPEED_OPTIONS else 0
                 self.state.time_speed = TIME_SPEED_OPTIONS[(index + 1) % len(TIME_SPEED_OPTIONS)]
+            elif choice.value == "wake_time":
+                self.state.wake_hour = 4 if self.wake_time_hour() >= 12 else self.wake_time_hour() + 1
             elif choice.value == "aging":
                 self.state.aging_and_death_enabled = (
                     not self.state.aging_and_death_enabled
@@ -26941,14 +31409,36 @@ class FarmGame(
         state = "shown" if self.state.show_control_hints else "hidden"
         self.autosave_with_message(f"Control hint line {state}.")
 
+    def toggle_ambient_visuals_setting(self):
+        self.state.ambient_visuals_enabled = not self.state.ambient_visuals_enabled
+        state = "enabled" if self.state.ambient_visuals_enabled else "disabled"
+        self.invalidate_draw_cache()
+        self.autosave_with_message(f"Ambient animation and lighting {state}.")
+
+    def toggle_high_contrast_setting(self):
+        self.state.high_contrast_enabled = not self.state.high_contrast_enabled
+        state = "enabled" if self.state.high_contrast_enabled else "disabled"
+        self.invalidate_draw_cache()
+        self.autosave_with_message(f"High-contrast palette {state}.")
+
+    def toggle_detailed_glyphs_setting(self):
+        self.state.detailed_glyphs_enabled = not self.state.detailed_glyphs_enabled
+        state = "enabled" if self.state.detailed_glyphs_enabled else "disabled"
+        self.invalidate_draw_cache()
+        self.autosave_with_message(f"Detailed map glyphs {state}.")
+
     def show_settings_menu(self):
         while True:
             items = [
                 MenuItem(label="Target info line", value="target_info", enabled=True, hint=self.on_off(self.state.show_target_info)),
                 MenuItem(label="Control hint line", value="control_hints", enabled=True, hint=self.on_off(self.state.show_control_hints)),
                 MenuItem(label="Color display", value="color", enabled=True, hint=self.on_off(self.state.color_enabled)),
+                MenuItem(label="Ambient animation/lighting", value="ambient_visuals", enabled=True, hint=self.on_off(self.state.ambient_visuals_enabled)),
+                MenuItem(label="High-contrast palette", value="high_contrast", enabled=True, hint=self.on_off(self.state.high_contrast_enabled)),
+                MenuItem(label="Detailed map glyphs", value="detailed_glyphs", enabled=True, hint=self.on_off(self.state.detailed_glyphs_enabled)),
                 MenuItem(label="Live time/weather", value="live", enabled=True, hint=self.on_off(self.state.live_time_enabled)),
                 MenuItem(label="Clock speed", value="time_speed", enabled=True, hint=self.time_speed_label()),
+                MenuItem(label="Wake-up time", value="wake_time", enabled=True, hint=self.wake_time_label()),
                 MenuItem(label="Aging & natural death", value="aging", enabled=True, hint=self.on_off(self.state.aging_and_death_enabled)),
                 MenuItem(label="Auto-open shop/bin", value="auto_open", enabled=True, hint=self.on_off(self.state.shop_auto_open_enabled and self.state.bin_auto_open_enabled)),
                 MenuItem(label="Tool targeting", value="target_mode", enabled=True, hint=self.target_mode_label()),
@@ -26972,10 +31462,18 @@ class FarmGame(
                 self.toggle_control_hints_setting()
             elif choice.value == "color":
                 self.toggle_color_setting()
+            elif choice.value == "ambient_visuals":
+                self.toggle_ambient_visuals_setting()
+            elif choice.value == "high_contrast":
+                self.toggle_high_contrast_setting()
+            elif choice.value == "detailed_glyphs":
+                self.toggle_detailed_glyphs_setting()
             elif choice.value == "live":
                 self.toggle_live_time()
             elif choice.value == "time_speed":
                 self.cycle_time_speed_setting()
+            elif choice.value == "wake_time":
+                self.cycle_wake_time_setting()
             elif choice.value == "aging":
                 self.set_aging_and_death_enabled(
                     not self.state.aging_and_death_enabled
@@ -27087,6 +31585,15 @@ class FarmGame(
         )
 
     def show_chest_storage_menu(self):
+        target_x, target_y = self.interaction_target_pos()
+        target_container = self.world_container_at(target_x, target_y)
+        if target_container and str(target_container.get("take_policy", "")) == "player":
+            self.show_world_container(target_container)
+            return "opened"
+        return self.show_player_storage_index()
+
+        # Retained below for save/API compatibility with older extensions. New
+        # gameplay uses individually persistent physical containers above.
         if not self.has_chest_on_farm():
             self.set_message("Place a Chest in the farmhouse/farm, or build a Storage Shed outside first.")
             return MENU_BACK
@@ -27400,12 +31907,16 @@ class FarmGame(
         return ""
 
     def is_inventory_consumable_item(self, item_name: str) -> bool:
+        if item_name == "Regional Chart":
+            return True
         if is_food_item(item_name):
             return True
         effect = str(FARMSTEAD_COMBAT_ITEM_DATA.get(item_name, {}).get("effect", ""))
         return effect in {"heal", "mp"}
 
     def consumable_item_hint(self, item_name: str) -> str:
+        if item_name == "Regional Chart":
+            return "reveals the current named wilderness region, whatever its shape or size"
         parts: List[str] = []
         stamina = food_stamina_value(item_name)
         if stamina > 0:
@@ -27418,6 +31929,8 @@ class FarmGame(
     def consumable_can_help_now(self, item_name: str) -> bool:
         if not self.is_inventory_consumable_item(item_name):
             return False
+        if item_name == "Regional Chart":
+            return (self.on_wilderness() or self.on_procedural_town()) and self.current_wilderness_region_has_unknown_chunks()
         stamina = food_stamina_value(item_name)
         buff = self.food_buff_for_item(item_name)
         _effect, _amount, combat_recovery = self.food_combat_recovery(item_name)
@@ -27433,6 +31946,19 @@ class FarmGame(
         if not self.is_inventory_consumable_item(item_name):
             self.set_message(f"{item_name} is not usable from inventory.")
             return False
+
+        if item_name == "Regional Chart":
+            if not (self.on_wilderness() or self.on_procedural_town()):
+                self.set_message("Regional Charts can be studied in the wilderness or in a wilderness town.")
+                return False
+            revealed = self.map_current_wilderness_region()
+            if revealed <= 0:
+                self.set_message("This entire region is already known.")
+                return False
+            self.state.inventory[item_name] = qty_owned - 1
+            region = self.wilderness_region_profile(self.state.wilderness_chunk_x, self.state.wilderness_chunk_y)
+            self.autosave_with_message(f"Studied a Regional Chart of {region['name']}: {revealed} chunk(s) added to the overworld map.")
+            return True
 
         requested_qty = max(1, min(qty_owned, int(qty or 1)))
 
@@ -27797,28 +32323,29 @@ class FarmGame(
             f"Bond: {self.travel_follower_bond_rank(follower_id)} ({self.travel_follower_bond_points(follower_id)})",
             f"Status: {str(record.get('mode', 'home')).title()}",
             f"Formation: {self.travel_follower_formation_label(follower_id)}",
+            f"Movement: {self.travel_follower_movement_style()} "
+            f"({self.travel_follower_effective_movement_style().lower()} here)",
             f"Expedition role: {self.travel_follower_expedition_role(follower_id)}",
             f"Location: {record.get('location', 'Home')}",
             f"Activity: {record.get('activity', 'at home')}",
             f"Tactical combat: {'eligible' if self.travel_follower_combat_eligible(follower_id) else 'not eligible'}",
             f"Natural farm strength: {self.travel_follower_task_label(self.travel_follower_preferred_task(follower_id))}",
-            "",
-            "Allowed travel:",
         ]
         task = str(record.get("task", "") or "")
         job_profile = self.travel_follower_job_profile(follower_id, task or self.travel_follower_preferred_task(follower_id))
-        lines[13:13] = [
+        lines.extend([
             f"Follower job: {job_profile['quality']} {job_profile['title']}",
             f"Job morale: {job_profile['morale']}/100",
             f"Job benefit: {job_profile['benefit']}",
-        ]
+        ])
         if task:
             task_xp = int((record.get("task_xp", {}) or {}).get(task, 0))
-            lines[16:16] = [
+            lines.extend([
                 f"Farm task: {self.travel_follower_task_label(task)}",
                 f"Daily work: {int(record.get('work_units', 0))}/{self.travel_follower_work_limit(follower_id)}",
                 f"Task proficiency: {self.travel_follower_task_experience_label(follower_id, task)} ({task_xp} xp)",
-            ]
+            ])
+        lines.extend(["", "Allowed travel:"])
         if allowed <= set(self.TRAVEL_FOLLOWER_SAFE_LOCATIONS):
             lines.append("- Farm, town, farmhouse, and town interiors")
         elif "Mine" not in allowed:
@@ -27958,6 +32485,38 @@ class FarmGame(
             return MENU_BACK
         return "changed" if self.set_travel_follower_formation_slot(follower_id, int(choice.value)) else MENU_BACK
 
+    def travel_follower_movement_style_menu(self):
+        current = self.travel_follower_movement_style()
+        descriptions = {
+            "Adaptive": "formation outdoors; single file indoors",
+            "Formation": "rear guard and flank positions everywhere",
+            "Single File": "follow your exact route in a compact line",
+        }
+        items = [
+            MenuItem(
+                label=style,
+                value=style,
+                enabled=style != current,
+                hint="current" if style == current else description,
+            )
+            for style, description in descriptions.items()
+        ]
+        items.append(MenuItem(label="Back", value=MENU_BACK, enabled=True))
+        choice = self.vertical_panel_select(
+            "Companion Movement",
+            items,
+            LEFT_PANEL_WIDTH,
+            LEFT_PANEL_HEIGHT,
+            return_back=True,
+        )
+        if choice is None or choice.value == MENU_BACK:
+            return MENU_BACK
+        return (
+            "changed"
+            if self.set_travel_follower_movement_style(str(choice.value))
+            else MENU_BACK
+        )
+
     def travel_follower_connection_menu(self, follower_id: str):
         while follower_id in self.active_travel_follower_ids():
             data = self.travel_follower_data(follower_id)
@@ -27969,7 +32528,7 @@ class FarmGame(
             relationship_label = "Family options" if kind in {"spouse", "child"} else "Relationship options"
             items = [
                 MenuItem(
-                    label="Check in",
+                    label="Check In",
                     value="checkin",
                     enabled=True,
                     hint="bond gained today" if checked_in else "listen and connect",
@@ -27991,7 +32550,7 @@ class FarmGame(
                 ))
             items.extend([
                 MenuItem(
-                    label="Bond & memories",
+                    label="Bond & Memories",
                     value="memories",
                     enabled=True,
                     hint=self.travel_follower_bond_rank(follower_id),
@@ -28028,6 +32587,49 @@ class FarmGame(
                     LEFT_PANEL_WIDTH,
                     LEFT_PANEL_HEIGHT,
                 )
+                response_npc = {
+                    "name": str(data.get("name", "Follower")),
+                    "role": str(data.get("role", "Companion")),
+                    "personality": self.travel_follower_personality_label(follower_id),
+                }
+                response = self.npc_dialogue_response_choice(
+                    response_npc,
+                    influence_available=not checked_in,
+                    title=f"Respond to {data.get('name', 'Them')}",
+                )
+                response_effect = int(response.get("effect", 0) or 0) if not checked_in else 0
+                if response_effect:
+                    self.adjust_travel_follower_bond(follower_id, response_effect)
+                    kind, source_id = self.travel_follower_identity_kind(follower_id)
+                    if kind == "child":
+                        child = self.travel_follower_child(follower_id)
+                        if child:
+                            self.adjust_child_affection(child, response_effect)
+                    else:
+                        npc_id = str(data.get("npc_id", source_id))
+                        if npc_id:
+                            self.adjust_town_npc_relationship(npc_id, response_effect)
+                        if kind == "spouse":
+                            self.adjust_family_bond(response_effect)
+                self.vertical_panel_view(
+                    f"{data.get('name', 'Follower')} Responds",
+                    [
+                        str(response.get("reaction", "Your companion turns their attention back to the road.")),
+                        "",
+                        f"Bond influence: {response_effect:+}"
+                        if response_effect
+                        else "You already had a meaningful check-in today."
+                        if checked_in
+                        else "No bond change.",
+                    ],
+                    LEFT_PANEL_WIDTH,
+                    LEFT_PANEL_HEIGHT,
+                )
+                if response_effect:
+                    self.autosave_with_message(
+                        f"Checked in with {data.get('name', 'your follower')}. "
+                        f"Bond influence {response_effect:+}."
+                    )
                 continue
             if choice.value == "moment":
                 changed, detail = self.share_travel_follower_moment(follower_id)
@@ -28159,6 +32761,15 @@ class FarmGame(
             if active:
                 items.extend([
                     MenuItem(
+                        label="Companion movement",
+                        value="__MOVEMENT__",
+                        enabled=True,
+                        hint=(
+                            f"{self.travel_follower_movement_style()}; "
+                            f"{self.travel_follower_effective_movement_style().lower()} here"
+                        ),
+                    ),
+                    MenuItem(
                         label="Regroup everyone",
                         value="__REGROUP__",
                         enabled=True,
@@ -28215,8 +32826,10 @@ class FarmGame(
                     f"Active slots: {len(active)}/{self.state.max_travel_followers}",
                     "",
                     "Up to three followers can travel with you at once.",
-                    "They hold rear, left-flank, and right-flank positions and",
-                    "automatically reform when the group changes.",
+                    "Adaptive movement uses rear/flank positions in open areas",
+                    "and follows your exact path in a line through confined maps.",
+                    "Followers yield when you backtrack through them, catch up",
+                    "without teleporting at short range, and reform after transitions.",
                     "",
                     "Followers build an individual bond through travel, conversation,",
                     "shared moments, and dependable work.",
@@ -28257,6 +32870,9 @@ class FarmGame(
                 continue
             if choice.value == "__REGROUP__":
                 self.regroup_travel_followers()
+                continue
+            if choice.value == "__MOVEMENT__":
+                self.travel_follower_movement_style_menu()
                 continue
             if choice.value == "__HOME__":
                 self.send_all_travel_followers_home()
@@ -29353,7 +33969,7 @@ class FarmGame(
     def apply_combat_time_cost(self, result: object, source: str = "mine") -> int:
         minutes = self.combat_time_cost_minutes(result, source)
         if minutes > 0:
-            self.advance_time(minutes)
+            self.advance_time(minutes, allow_natural_recovery=False)
         return minutes
 
     def combat_summary_text(
@@ -30841,7 +35457,8 @@ class FarmGame(
         crop_name, quality = parse_quality_item(item_name)
         if crop_name and quality:
             return quality_sell_price(crop_name, quality)
-        return int(ITEM_SELL_PRICES.get(item_name, 0))
+        ordinary_price = int(ITEM_SELL_PRICES.get(item_name, 0))
+        return ordinary_price if ordinary_price > 0 else self.container_item_sell_price(item_name)
 
     def shipping_protected_materials(self) -> set[str]:
         safe_resource_goods = {
@@ -31611,6 +36228,7 @@ class FarmGame(
         lines.extend(f"- {line}" for line in notices[:6])
         if not notices:
             lines.append("- No special notices.")
+        lines.extend(["", *self.home_region_journey_lines()])
         lines.extend([
             "",
             "Today's priorities:",
@@ -32296,12 +36914,21 @@ class FarmGame(
             goods_hint = f"{non_seed_count} goods"
             if seed_type_count:
                 goods_hint += f", {seed_type_count} seeds"
-            stored_count = sum(qty for qty in self.state.storage_inventory.values() if qty > 0)
+            storage_records = self.player_storage_records()
+            stored_count = sum(
+                self.container_used(self.normalize_container_record(record)[0])
+                for record in storage_records
+            )
             food_count = sum(qty for _name, qty, _stamina in self.edible_items_in_inventory())
             items = [
-                MenuItem(label="Carried goods", value="goods", enabled=True, hint=goods_hint),
+                MenuItem(
+                    label=f"Carried goods ({self.backpack_used()}/{self.backpack_capacity()})",
+                    value="goods",
+                    enabled=True,
+                    hint=goods_hint,
+                ),
                 MenuItem(label="Food", value="food", enabled=food_count > 0, hint=f"x{food_count}" if food_count else "none"),
-                MenuItem(label="Storage", value="storage", enabled=self.has_chest_on_farm(), hint=f"x{stored_count}" if self.has_chest_on_farm() else "place chest"),
+                MenuItem(label="Owned storage", value="storage", enabled=bool(storage_records), hint=f"x{stored_count}" if storage_records else "interact with a container"),
                 MenuItem(label="Back", value=MENU_BACK, enabled=True),
             ]
             choice = self.vertical_panel_select("Backpack", items, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT, return_back=True)
@@ -32312,7 +36939,7 @@ class FarmGame(
             elif choice.value == "food":
                 self.show_food_menu()
             elif choice.value == "storage":
-                self.show_chest_storage_menu()
+                self.show_player_storage_index()
 
     def show_farm_home_menu(self):
         while True:
@@ -32580,6 +37207,10 @@ class FarmGame(
         market_day = self.market_day_label_for_date(month, day, year)
         if market_day:
             events.append(market_day)
+        public_occasion = self.public_occasion_calendar_label_for_date(month, day, year)
+        if public_occasion:
+            events.append(public_occasion)
+        events.extend(self.regional_circulation_calendar_events_for_date(month, day, year))
         mine_hazard = self.mine_hazard_label_for_date(month, day, year)
         if mine_hazard:
             events.append(f"Mine hazard day: {mine_hazard}")
@@ -32971,7 +37602,7 @@ class FarmGame(
                 print(f"  {season_name}: " + ", ".join(crop_bits))
         print()
         print("Controls:")
-        print("  WASD / Arrow Keys  Move")
+        print("  WASD / Arrows / Numpad  Move; numpad 7/9/1/3 move diagonally")
         print("  F                  Use selected farm/mine tool on the current target tile")
         print("  Z / Enter          General interaction / place held object / open shipping bin")
         print("  Q / E              Cycle selected tool")
@@ -32985,7 +37616,7 @@ class FarmGame(
         print("  K                  Calendar")
         print("  B                  Reopen shop menu while already standing in shop")
         print("  N                  Sleep when inside farmhouse")
-        print("  Menus              Arrow keys/WASD move, Z/Enter select, X/Esc/Q cancel/back")
+        print("  Menus              Arrow keys/WASD/numpad move, Z/Enter select, X/Esc/Q cancel/back")
         print("  Tip                Press T if you prefer old-style standing-tile tool use.")
         print("  Tip                Face the shipping bin and press Z/Enter to ship crops.")
         print("  X                  Quick-pick simple front object / store held object")
@@ -33045,7 +37676,9 @@ class FarmGame(
         print("  Fall: September-November, cooler growing season.")
         print("  Winter: December-February, snow; hardy crops available.")
         print("  Weather visuals: rain, snow, storms, and blizzards appear on the map.")
+        print("  Wilderness terrain changes palette with the season; inland freshwater freezes in winter.")
         print("  Live time: the world keeps ticking while you stand still. Clock speed is adjustable from Tab > System > Settings.")
+        print("  Wake-up time is adjustable from 4:00 AM through noon in the same Settings menu.")
         print()
         print("Clearing:")
         print("  Weeds tool/action removes weeds by hand.")
@@ -33088,22 +37721,32 @@ class FarmGame(
             self.handle_overworld_key(key)
             return
         try:
-            if key in ["w", "UP"]:
-                self.move(0, -1)
-                return
-            elif key in ["s", "DOWN"]:
-                self.move(0, 1)
-                return
-            elif key in ["a", "LEFT"]:
-                self.move(-1, 0)
-                return
-            elif key in ["d", "RIGHT"]:
-                self.move(1, 0)
+            movement = movement_delta_for_key(key)
+            if movement:
+                self.move(*movement)
                 return
         except Exception as exc:
             append_debug_log(f"Movement error: {type(exc).__name__}: {exc}")
             write_debug_report(self, exc, "handle_key movement")
             self.set_message(f"Movement error logged to {CRASH_REPORT_PATH.name}: {exc}")
+            return
+
+        if self.map_native_combat_active():
+            if key == "f":
+                self.dungeon_basic_ranged_attack()
+                return
+            if key == "v":
+                self.safe_menu(self.dungeon_combat_ability_menu, "Combat skill menu closed.")
+                return
+            if key == "p":
+                self.dungeon_quick_potion()
+                return
+            if key in {".", "5", "NUM5"}:
+                self.dungeon_wait_turn()
+                return
+
+        if key == "NUM5":
+            self.set_message("You wait in place while the world continues around you.")
             return
 
         if key == "e":

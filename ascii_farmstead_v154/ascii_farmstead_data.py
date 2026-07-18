@@ -34,6 +34,67 @@ TOWN_DOORS = {
     "museum": (73, 8),
 }
 
+AUTHORED_TOWN_RESIDENCE_DATA = {
+    "meadow_cottage": {
+        "label": "Meadow Cottage",
+        "door": (8, 43),
+        "symbol": "h",
+        "style": "garden cottage",
+        "residents": ("mira_seed", "old_jun", "rowan_orchard", "theo_beekeeper"),
+    },
+    "forge_house": {
+        "label": "Forge House",
+        "door": (24, 43),
+        "symbol": "h",
+        "style": "workshop house",
+        "residents": ("brom_smith", "garrick_miner", "jules_mechanic", "otto_retiree"),
+    },
+    "canal_house": {
+        "label": "Canal House",
+        "door": (40, 43),
+        "symbol": "h",
+        "style": "waterside row house",
+        "residents": ("finn_fisher", "cora_courier", "penny_artist"),
+    },
+    "cedar_house": {
+        "label": "Cedar House",
+        "door": (56, 43),
+        "symbol": "h",
+        "style": "quiet cedar home",
+        "residents": ("eli_carpenter", "silas_recluse", "niko_traveler"),
+    },
+    "market_house": {
+        "label": "Market House",
+        "door": (72, 43),
+        "symbol": "h",
+        "style": "merchant townhouse",
+        "residents": ("vera_vendor", "sable_tailor", "poppy_rancher"),
+    },
+    "scholar_house": {
+        "label": "Scholar House",
+        "door": (88, 43),
+        "symbol": "h",
+        "style": "book-lined shared house",
+        "residents": ("tess_reader", "hana_botanist", "marisol_scholar", "dr_ivy"),
+    },
+}
+
+AUTHORED_TOWN_RESIDENCE_ID_BY_DOOR = {
+    tuple(data["door"]): residence_id
+    for residence_id, data in AUTHORED_TOWN_RESIDENCE_DATA.items()
+}
+
+AUTHORED_TOWN_RESIDENCE_ID_BY_NPC = {
+    str(npc_id): residence_id
+    for residence_id, data in AUTHORED_TOWN_RESIDENCE_DATA.items()
+    for npc_id in data.get("residents", ())
+}
+
+AUTHORED_TOWN_RESIDENCE_ID_BY_NAME = {
+    str(data["label"]).strip().lower(): residence_id
+    for residence_id, data in AUTHORED_TOWN_RESIDENCE_DATA.items()
+}
+
 TOWN_INTERIOR_LOCATION_BY_NAME = {
     "general store": "GeneralStoreInterior",
     "blacksmith": "BlacksmithInterior",
@@ -6907,6 +6968,9 @@ RESOURCE_ITEMS = [
     "Stone",
     "Fiber",
     "Mixed Seeds",
+    "Animal Feed",
+    "Grooming Brush",
+    "Explorer Raft",
     "Wild Herbs",
     "Cave Mushroom",
     "Wild Honey",
@@ -6961,6 +7025,7 @@ RESOURCE_ITEMS = [
 
 CRAFTABLE_ITEMS = [
     "Basic Fertilizer",
+    "Explorer Raft",
 ]
 
 CRAFTING_RECIPES = {
@@ -6980,6 +7045,12 @@ CRAFTING_RECIPES = {
         "output": ("Chest", 1),
         "cost": {"Wood": 12},
         "description": "Placeable shared storage chest.",
+        "requires_bench": False,
+    },
+    "Explorer Raft": {
+        "output": ("Explorer Raft", 1),
+        "cost": {"Wood": 20, "Fiber": 10},
+        "description": "A reusable portable raft that automatically unfolds when you step into open water.",
         "requires_bench": False,
     },
     "Furnace": {
@@ -7131,6 +7202,9 @@ ITEM_SELL_PRICES = {
     "Stone": 2,
     "Fiber": 1,
     "Mixed Seeds": 3,
+    "Animal Feed": 5,
+    "Grooming Brush": 100,
+    "Explorer Raft": 240,
     "Sap": 2,
     "Hardwood": 10,
 
@@ -7666,7 +7740,7 @@ WILDERNESS_FORAGE_DATA = {
 
 WILDERNESS_FORAGE_SYMBOLS = set(WILDERNESS_FORAGE_DATA.keys())
 
-WILDERNESS_BIOME_TILES = set([";", "%", "l", "r", "x"])
+WILDERNESS_BIOME_TILES = set([";", "%", "l", "r", "x", "`", '"', "["])
 
 WILDERNESS_BIOME_NAMES = {
     ";": "Sun Meadow",
@@ -7674,6 +7748,9 @@ WILDERNESS_BIOME_NAMES = {
     "l": "Mushroom Hollow",
     "r": "Riverbank Wetland",
     "x": "Rocky Ridge",
+    "`": "Sunscoured Desert",
+    '"': "Frozen Tundra",
+    "[": "Saltwind Coast",
 }
 
 WILDERNESS_BIOME_DESCRIPTIONS = {
@@ -7707,6 +7784,24 @@ WILDERNESS_BIOME_DESCRIPTIONS = {
         "Fall": "A wind-scoured ridge with dry brush and scattered rocks.",
         "Winter": "A slick winter ridge of cold stone and frozen soil.",
     },
+    "`": {
+        "Spring": "A dry desert plain briefly softened by scattered spring growth.",
+        "Summer": "A sunscoured desert of pale sand, heat haze, and exposed stone.",
+        "Fall": "A cool desert basin crossed by long shadows and dry wind.",
+        "Winter": "A stark cold desert where frost settles between dunes and badland shelves.",
+    },
+    '"': {
+        "Spring": "A thawing tundra of wet snow, hardy moss, and returning birds.",
+        "Summer": "A brief tundra summer bright with low flowers beneath snowbound ridges.",
+        "Fall": "A frozen heath under sharp wind and rapidly shortening daylight.",
+        "Winter": "A deep snowfield of wind-packed drifts and dark exposed rock.",
+    },
+    "[": {
+        "Spring": "A rain-bright salt coast of tidal pools, low islands, and nesting birds.",
+        "Summer": "A warm saltwind coast where broad water glitters around rocky islands.",
+        "Fall": "A stormy coast of dark surf, migrating birds, and exposed tidal flats.",
+        "Winter": "A cold salt coast with hard wind, gray water, and frost on the strand.",
+    },
 }
 
 FISH_DATA = {
@@ -7725,7 +7820,19 @@ FISH_DATA = {
     "River Chub": {"price": 75, "stamina": 10, "locations": ["Wilderness"], "seasons": ["Spring", "Summer", "Fall"], "weather": ["Any"], "time": "Any", "weight": 5},
     "Brook Trout": {"price": 125, "stamina": 14, "locations": ["Wilderness"], "seasons": ["Spring", "Fall", "Winter"], "weather": ["Sunny", "Cloudy"], "time": "Morning", "weight": 4},
     "Rain Pike": {"price": 190, "stamina": 18, "locations": ["Wilderness"], "seasons": ["Spring", "Summer", "Fall"], "weather": ["Rain", "Storm"], "time": "Any", "weight": 2},
-    "Old Boot": {"price": 1, "stamina": 0, "locations": ["Farm", "Wilderness", "Mine"], "seasons": ["Spring", "Summer", "Fall", "Winter"], "weather": ["Any"], "time": "Any", "weight": 2, "junk": True},    "Pale Koi": {"price": 320, "stamina": 28, "locations": ["Mine"], "seasons": ["Spring", "Summer", "Fall", "Winter"], "weather": ["Any"], "time": "Any", "weight": 0},
+    "Tide Sardine": {"price": 65, "stamina": 8, "locations": ["Coast"], "seasons": ["Spring", "Summer", "Fall", "Winter"], "weather": ["Any"], "time": "Any", "weight": 7},
+    "Mackerel": {"price": 105, "stamina": 12, "locations": ["Coast"], "seasons": ["Spring", "Summer", "Fall"], "weather": ["Sunny", "Cloudy"], "time": "Day", "weight": 5},
+    "Sea Bass": {"price": 145, "stamina": 16, "locations": ["Coast"], "seasons": ["Summer", "Fall"], "weather": ["Any"], "time": "Day", "weight": 4},
+    "Silver Salmon": {"price": 210, "stamina": 20, "locations": ["Coast"], "seasons": ["Spring", "Fall"], "weather": ["Any"], "time": "Morning", "weight": 3},
+    "Storm Cod": {"price": 190, "stamina": 18, "locations": ["Coast"], "seasons": ["Spring", "Fall", "Winter"], "weather": ["Rain", "Storm", "Cloudy"], "time": "Any", "weight": 3},
+    "Moon Eel": {"price": 240, "stamina": 22, "locations": ["Coast"], "seasons": ["Summer", "Fall"], "weather": ["Any"], "time": "Night", "weight": 2},
+    "Coral Dart": {"price": 90, "stamina": 9, "locations": ["Coast"], "seasons": ["Spring", "Summer", "Fall", "Winter"], "weather": ["Any"], "time": "Day", "weight": 5},
+    "Parrotfish": {"price": 165, "stamina": 16, "locations": ["Coast"], "seasons": ["Spring", "Summer", "Fall"], "weather": ["Sunny", "Cloudy"], "time": "Day", "weight": 4},
+    "Reef Grouper": {"price": 195, "stamina": 19, "locations": ["Coast"], "seasons": ["Summer", "Fall"], "weather": ["Any"], "time": "Any", "weight": 3},
+    "Sunfin Tuna": {"price": 285, "stamina": 25, "locations": ["Coast"], "seasons": ["Spring", "Summer", "Fall"], "weather": ["Sunny", "Cloudy"], "time": "Day", "weight": 2},
+    "Lantern Angelfish": {"price": 230, "stamina": 21, "locations": ["Coast"], "seasons": ["Summer", "Fall", "Winter"], "weather": ["Any"], "time": "Night", "weight": 2},
+    "Old Boot": {"price": 1, "stamina": 0, "locations": ["Farm", "Wilderness", "Coast", "Mine"], "seasons": ["Spring", "Summer", "Fall", "Winter"], "weather": ["Any"], "time": "Any", "weight": 2, "junk": True},
+    "Pale Koi": {"price": 320, "stamina": 28, "locations": ["Mine"], "seasons": ["Spring", "Summer", "Fall", "Winter"], "weather": ["Any"], "time": "Any", "weight": 0},
 
 }
 
@@ -8077,6 +8184,10 @@ __all__ = [
     'TOWN_WIDTH',
     'TOWN_HEIGHT',
     'TOWN_DOORS',
+    'AUTHORED_TOWN_RESIDENCE_DATA',
+    'AUTHORED_TOWN_RESIDENCE_ID_BY_DOOR',
+    'AUTHORED_TOWN_RESIDENCE_ID_BY_NPC',
+    'AUTHORED_TOWN_RESIDENCE_ID_BY_NAME',
     'TOWN_INTERIOR_LOCATION_BY_NAME',
     'TOWN_INTERIOR_NAME_BY_LOCATION',
     'TOWN_DIRECTORY_TILES',

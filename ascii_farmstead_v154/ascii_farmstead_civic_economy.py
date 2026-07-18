@@ -3133,6 +3133,18 @@ class CivicEconomyMixin:
             "caravan_sales": {},
             "caravan_journeys": 0,
             "caravan_last_journey_day": "",
+            "route_reliability": 82,
+            "route_development_points": 0,
+            "delivery_streak": 0,
+            "missed_deliveries": 0,
+            "last_delivery_ordinal": 0,
+            "incident_cycle_key": "",
+            "caravan_incident": {},
+            "crew_assignments": {},
+            "crew_work_counters": {},
+            "route_event_log": [],
+            "roadwork_day": "",
+            "waystation_use_day": "",
             "active": True,
         }
         self.ensure_player_trade_route_caravan(
@@ -5051,6 +5063,12 @@ class CivicEconomyMixin:
                     hint=f"Level {escort}/3",
                 ),
                 MenuItem(
+                    label="Assign follower crew",
+                    value="crew",
+                    enabled=bool(self.active_travel_follower_ids()),
+                    hint="Guards, drivers, couriers, and trade representatives.",
+                ),
+                MenuItem(
                     label="Pause route" if route.get("active") else "Resume route",
                     value="toggle",
                     enabled=True,
@@ -5076,6 +5094,9 @@ class CivicEconomyMixin:
                         f"Escort: {route.get('escort_level', 0)}/3",
                         f"Daily income: {self.procedural_trade_route_daily_income(route)}g",
                         f"Lifetime income: {route.get('lifetime_income', 0)}g",
+                        f"Reliability: {route.get('route_reliability', 82)}/100",
+                        f"Route development: {self.player_trade_route_development_name(route)} ({route.get('route_development_points', 0)} points)",
+                        f"Deliveries: {route.get('caravan_deliveries', 0)} | streak {route.get('delivery_streak', 0)} | missed {route.get('missed_deliveries', 0)}",
                         f"Status: {'active' if route.get('active') else 'paused'}",
                     ],
                     LEFT_PANEL_WIDTH,
@@ -5086,6 +5107,8 @@ class CivicEconomyMixin:
                     str(route["id"]),
                     str(choice.value),
                 )
+            elif choice.value == "crew":
+                self.trade_route_crew_menu(route)
             elif choice.value == "toggle":
                 self.set_player_trade_route_active(
                     str(route["id"]),

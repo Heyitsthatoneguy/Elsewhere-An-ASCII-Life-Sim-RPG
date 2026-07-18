@@ -7,14 +7,14 @@ import sys
 import time
 import traceback
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 
 ENABLE_COLOR = True
 
 GAME_TITLE = "Elsewhere: an ASCII Life-Sim RPG"
 GAME_SHORT_TITLE = "Elsewhere"
-GAME_VERSION = "0.9.0-beta.2"
+GAME_VERSION = "0.9.0-beta.3"
 GAME_DISPLAY_TITLE = f"{GAME_TITLE} {GAME_VERSION}"
 SAVE_SCHEMA_VERSION = 1
 SAVE_BACKUP_COUNT = 3
@@ -29,6 +29,65 @@ class C:
     NIGHT = "\033[38;5;238m"
     LAMP = "\033[93;1m"
     LIT = "\033[38;5;229m"
+
+    # Semantic visual palette. These names describe presentation roles rather
+    # than game systems so terminal and future graphical renderers can share
+    # one art direction.
+    FLOOR = "\033[38;5;250m"
+    FLOOR_WARM = "\033[38;5;223m"
+    FLOOR_SHADOW = "\033[38;5;245m"
+    ROAD = "\033[38;5;244m"
+    PATH = "\033[38;5;180m"
+    DOOR = "\033[38;5;130m"
+    RUG = "\033[38;5;131m"
+    SERVICE = "\033[38;5;220m"
+    FOREST = "\033[38;5;28m"
+    FUNGAL = "\033[38;5;135m"
+    WETLAND = "\033[38;5;30m"
+    HIGHLAND = "\033[38;5;247m"
+    DESERT = "\033[38;5;173m"
+    TUNDRA = "\033[38;5;255m"
+    COAST = "\033[38;5;38m"
+    WATER_DEEP = "\033[38;5;31m"
+    UI_TITLE = "\033[38;5;229;1m"
+    UI_BORDER = "\033[38;5;244m"
+    UI_SELECTED = "\033[38;5;220;1m"
+    UI_MUTED = "\033[38;5;245m"
+    ACTOR_NPC = "\033[38;5;252;1m"
+    ACTOR_FOLLOWER = "\033[96;1m"
+    ACTOR_FAMILY = "\033[38;5;229;1m"
+    ACTOR_TRAVELER = "\033[38;5;45;1m"
+    ACTOR_RANGER = "\033[38;5;112;1m"
+    ACTOR_WILDLIFE = "\033[38;5;180m"
+    ACTOR_BOUNTY = "\033[38;5;201;1m"
+    LANDMARK_ACTIVE = "\033[38;5;220;1m"
+    LANDMARK_NATURAL = "\033[38;5;51;1m"
+    LANDMARK_SHELTER = "\033[38;5;229;1m"
+    LANDMARK_RESEARCH = "\033[38;5;141;1m"
+    ROOF_GREEN = "\033[38;5;65m"
+    ROOF_FORGE = "\033[38;5;240m"
+    ROOF_BLUE = "\033[38;5;67m"
+    ROOF_PURPLE = "\033[38;5;97m"
+    ROOF_CREAM = "\033[38;5;180m"
+    ROOF_RED = "\033[38;5;131m"
+    ROOF_CIVIC = "\033[38;5;247m"
+    ROOF_COPPER = "\033[38;5;172m"
+    ROOF_CEDAR = "\033[38;5;130m"
+    ROOF_CLINIC = "\033[38;5;117m"
+    CAVE_FLOOR = "\033[38;5;244m"
+    CAVE_WALL = "\033[38;5;240m"
+    MINE_FLOOR = "\033[38;5;246m"
+    DUNGEON_FLOOR = "\033[38;5;248m"
+    DUNGEON_WALL = "\033[38;5;243m"
+    ORE_COPPER = "\033[38;5;172m"
+    ORE_IRON = "\033[38;5;252m"
+    ORE_GOLD = "\033[38;5;220;1m"
+    ORE_COAL = "\033[38;5;241m"
+    CRYSTAL = "\033[38;5;81;1m"
+    GEM = "\033[38;5;177;1m"
+    UNDERGROUND_EXIT = "\033[38;5;229;1m"
+    UNDERGROUND_RELIC = "\033[38;5;141;1m"
+    UNDERGROUND_GLOW = "\033[38;5;153m"
 
     GRASS = "\033[32m"
     SOIL_DRY = "\033[38;5;94m"
@@ -90,6 +149,7 @@ VALID_GAME_LOCATIONS = (
     "WildernessOverworld",
     "WildernessCave",
     "WildernessDungeon",
+    "WildernessOutpost",
     "ProceduralSettlementInterior",
     "HouseInterior",
     "GeneralStoreInterior",
@@ -104,12 +164,17 @@ VALID_GAME_LOCATIONS = (
     "TownHallInterior",
     "MarketRowInterior",
     "MuseumInterior",
+    "TownResidenceInterior",
 )
 
 VALID_TOOL_TARGET_MODES = ("FRONT", "STANDING")
 
 LOADED_STATE_DEFAULTS = {
+    "wake_hour": 7,
     "color_enabled": True,
+    "ambient_visuals_enabled": True,
+    "high_contrast_enabled": False,
+    "detailed_glyphs_enabled": True,
     "shop_auto_open_enabled": True,
     "shop_menu_suppressed_until_exit": False,
     "bin_auto_open_enabled": True,
@@ -130,6 +195,7 @@ LOADED_STATE_DEFAULTS = {
     "house_upgrades": [],
     "held_object": None,
     "wilderness_seed": 1337,
+    "mine_return_location": "Farm",
     "wilderness_chunk_x": 0,
     "wilderness_chunk_y": 0,
     "wilderness_chunks_visited": 1,
@@ -317,9 +383,49 @@ def pad_visual(text: str, width: int) -> str:
 
 def normalize_key(key: str) -> str:
     """Normalize single-letter keys while preserving special keys."""
+    numpad_cardinals = {
+        "NUM8": "UP", "NUM2": "DOWN", "NUM4": "LEFT", "NUM6": "RIGHT",
+    }
+    if key in numpad_cardinals:
+        return numpad_cardinals[key]
     if len(key) == 1 and key.isalpha():
         return key.lower()
     return key
+
+
+NUMPAD_DIRECTION_DELTAS: Dict[str, Tuple[int, int]] = {
+    "NUM7": (-1, -1), "NUM8": (0, -1), "NUM9": (1, -1),
+    "NUM4": (-1, 0),                       "NUM6": (1, 0),
+    "NUM1": (-1, 1),  "NUM2": (0, 1),  "NUM3": (1, 1),
+}
+
+
+def movement_delta_for_key(key: str) -> Optional[Tuple[int, int]]:
+    """Return an eight-direction gameplay/cursor delta for a movement key."""
+    key = normalize_key(str(key or ""))
+    cardinal = {
+        "w": (0, -1), "UP": (0, -1),
+        "s": (0, 1), "DOWN": (0, 1),
+        "a": (-1, 0), "LEFT": (-1, 0),
+        "d": (1, 0), "RIGHT": (1, 0),
+    }
+    return cardinal.get(key) or NUMPAD_DIRECTION_DELTAS.get(key)
+
+
+def _windows_pressed_numpad_key(decoded: str = "") -> str:
+    """Distinguish NumLock-on numpad digits from the number row on Windows."""
+    if os.name != "nt":
+        return ""
+    try:
+        import ctypes
+
+        digits = [int(decoded)] if len(decoded) == 1 and decoded.isdigit() else list(range(10))
+        for digit in digits:
+            if int(ctypes.windll.user32.GetAsyncKeyState(0x60 + digit)) & 0x8001:
+                return f"NUM{digit}"
+    except Exception:
+        return ""
+    return ""
 
 
 def source_directory() -> Path:
@@ -603,11 +709,23 @@ def read_key_timeout(timeout: float) -> str:
             if msvcrt.kbhit():
                 ch = msvcrt.getch()
                 if ch in [b"\x00", b"\xe0"]:
+                    prefix = ch
                     while not msvcrt.kbhit() and time.time() < deadline:
                         time.sleep(0.005)
                     if not msvcrt.kbhit():
                         return ""
                     ch2 = msvcrt.getch()
+                    numpad_key = _windows_pressed_numpad_key()
+                    if numpad_key:
+                        return numpad_key
+                    if prefix == b"\x00":
+                        numpad_scan = {
+                            b"G": "NUM7", b"H": "NUM8", b"I": "NUM9",
+                            b"K": "NUM4", b"L": "NUM5", b"M": "NUM6",
+                            b"O": "NUM1", b"P": "NUM2", b"Q": "NUM3",
+                        }
+                        if ch2 in numpad_scan:
+                            return numpad_scan[ch2]
                     return {
                         b"H": "UP",
                         b"P": "DOWN",
@@ -615,7 +733,8 @@ def read_key_timeout(timeout: float) -> str:
                         b"M": "RIGHT",
                     }.get(ch2, "")
                 try:
-                    return ch.decode("utf-8")
+                    decoded = ch.decode("utf-8")
+                    return _windows_pressed_numpad_key(decoded) or decoded
                 except UnicodeDecodeError:
                     return ""
             time.sleep(0.01)
@@ -642,11 +761,28 @@ def read_key_timeout(timeout: float) -> str:
                     readable, _, _ = select.select([sys.stdin], [], [], 0.01)
                     if readable:
                         ch3 = sys.stdin.read(1)
+                        if ch3 in {"5", "6"}:
+                            readable, _, _ = select.select([sys.stdin], [], [], 0.01)
+                            if readable and sys.stdin.read(1) == "~":
+                                return "NUM9" if ch3 == "5" else "NUM3"
                         return {
                             "A": "UP",
                             "B": "DOWN",
                             "C": "RIGHT",
                             "D": "LEFT",
+                            "H": "NUM7",
+                            "F": "NUM1",
+                        }.get(ch3, "\x1b")
+                if ch2 == "O":
+                    readable, _, _ = select.select([sys.stdin], [], [], 0.01)
+                    if readable:
+                        ch3 = sys.stdin.read(1)
+                        return {
+                            "A": "UP", "B": "DOWN", "C": "RIGHT", "D": "LEFT",
+                            "H": "NUM7", "F": "NUM1",
+                            "q": "NUM1", "r": "NUM2", "s": "NUM3",
+                            "t": "NUM4", "u": "NUM5", "v": "NUM6",
+                            "w": "NUM7", "x": "NUM8", "y": "NUM9",
                         }.get(ch3, "\x1b")
             return "\x1b"
         return ch
@@ -661,7 +797,19 @@ def read_key() -> str:
 
         ch = msvcrt.getch()
         if ch in [b"\x00", b"\xe0"]:
+            prefix = ch
             ch2 = msvcrt.getch()
+            numpad_key = _windows_pressed_numpad_key()
+            if numpad_key:
+                return numpad_key
+            if prefix == b"\x00":
+                numpad_scan = {
+                    b"G": "NUM7", b"H": "NUM8", b"I": "NUM9",
+                    b"K": "NUM4", b"L": "NUM5", b"M": "NUM6",
+                    b"O": "NUM1", b"P": "NUM2", b"Q": "NUM3",
+                }
+                if ch2 in numpad_scan:
+                    return numpad_scan[ch2]
             return {
                 b"H": "UP",
                 b"P": "DOWN",
@@ -669,7 +817,8 @@ def read_key() -> str:
                 b"M": "RIGHT",
             }.get(ch2, "")
         try:
-            return ch.decode("utf-8")
+            decoded = ch.decode("utf-8")
+            return _windows_pressed_numpad_key(decoded) or decoded
         except UnicodeDecodeError:
             return ""
 
@@ -685,11 +834,24 @@ def read_key() -> str:
             ch2 = sys.stdin.read(1)
             if ch2 == "[":
                 ch3 = sys.stdin.read(1)
+                if ch3 in {"5", "6"} and sys.stdin.read(1) == "~":
+                    return "NUM9" if ch3 == "5" else "NUM3"
                 return {
                     "A": "UP",
                     "B": "DOWN",
                     "C": "RIGHT",
                     "D": "LEFT",
+                    "H": "NUM7",
+                    "F": "NUM1",
+                }.get(ch3, "\x1b")
+            if ch2 == "O":
+                ch3 = sys.stdin.read(1)
+                return {
+                    "A": "UP", "B": "DOWN", "C": "RIGHT", "D": "LEFT",
+                    "H": "NUM7", "F": "NUM1",
+                    "q": "NUM1", "r": "NUM2", "s": "NUM3",
+                    "t": "NUM4", "u": "NUM5", "v": "NUM6",
+                    "w": "NUM7", "x": "NUM8", "y": "NUM9",
                 }.get(ch3, "\x1b")
             return "\x1b"
         return ch

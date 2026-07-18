@@ -36,7 +36,7 @@ from ascii_farmstead_ui import MenuItem
 
 
 Position = Tuple[int, int]
-PROCEDURAL_TOWN_RUNTIME_VERSION = 12
+PROCEDURAL_TOWN_RUNTIME_VERSION = 13
 PROCEDURAL_TOWN_GRID_SIZE = 13
 PROCEDURAL_TOWN_MIN_DISTANCE = 8
 PROCEDURAL_TOWN_OVERWORLD_SYMBOL = "t"
@@ -168,6 +168,7 @@ PROCEDURAL_LOCAL_STOCK = {
         ("Mixed Seeds", 30),
         ("Basic Fertilizer", 25),
         ("Field Snack", 45),
+        ("Regional Chart", 180),
         ("Wood", 55),
         ("Stone", 40),
     ),
@@ -245,24 +246,30 @@ class ProceduralTownRuntimeMixin:
         chunk_x: int,
         chunk_y: int,
     ) -> Position:
-        cell_x, cell_y = self.procedural_town_region_origin(chunk_x, chunk_y)
+        region = self.wilderness_region_profile(chunk_x, chunk_y)
+        anchor_x, anchor_y = int(region["rx"]), int(region["ry"])
         cache = getattr(self, "_procedural_town_site_cache", None)
         if not isinstance(cache, dict):
             cache = {}
             self._procedural_town_site_cache = cache
-        cache_key = (int(getattr(self.state, "wilderness_seed", 0)), cell_x, cell_y)
+        cache_key = (int(getattr(self.state, "wilderness_seed", 0)), str(region["key"]))
         if cache_key in cache:
             return cache[cache_key]
 
-        size = PROCEDURAL_TOWN_GRID_SIZE
-        total = size * size
-        start = int(self.wilderness_hash01(cell_x, cell_y, 33001) * total) % total
-        step = 71  # Coprime to 13 * 13, so every cell position is visited.
+        # Existing saved towns are authoritative even if this region's new
+        # geography would choose another site.
+        settlements = getattr(self.state, "wilderness_settlements", {}) or {}
+        for existing in settlements.values():
+            if not isinstance(existing, dict) or str(existing.get("source", "")) != "procedural_wilderness":
+                continue
+            existing_point = (int(existing.get("chunk_x", 0)), int(existing.get("chunk_y", 0)))
+            if self.wilderness_region_coords(*existing_point) == (anchor_x, anchor_y):
+                cache[cache_key] = existing_point
+                return existing_point
+
+        scored: List[Tuple[float, int, int]] = []
         fallback: Optional[Position] = None
-        for offset in range(total):
-            index = (start + offset * step) % total
-            candidate_x = cell_x + index % size
-            candidate_y = cell_y + index // size
+        for candidate_x, candidate_y in self.wilderness_region_chunks(chunk_x, chunk_y):
             if candidate_x == 0 and candidate_y == 0:
                 continue
             if abs(candidate_x) + abs(candidate_y) < PROCEDURAL_TOWN_MIN_DISTANCE:
@@ -276,10 +283,205 @@ class ProceduralTownRuntimeMixin:
             if fallback is None:
                 fallback = (candidate_x, candidate_y)
             if self.procedural_town_terrain_is_eligible(candidate_x, candidate_y):
-                cache[cache_key] = (candidate_x, candidate_y)
-                return cache[cache_key]
-        cache[cache_key] = fallback or (cell_x + size - 1, cell_y + size - 1)
+                geography = self.procedural_town_geography(candidate_x, candidate_y)
+                scored.append((float(geography["site_score"]), candidate_x, candidate_y))
+        if scored:
+            scored.sort(key=lambda value: (-value[0], value[2], value[1]))
+            cache[cache_key] = (scored[0][1], scored[0][2])
+            return cache[cache_key]
+        cache[cache_key] = fallback or (int(region["center_x"]), int(region["center_y"]))
         return cache[cache_key]
+
+    def procedural_town_region_selected(self, chunk_x: int, chunk_y: int) -> bool:
+        region = self.wilderness_region_profile(chunk_x, chunk_y)
+        anchor = (int(region["rx"]), int(region["ry"]))
+        settlements = getattr(self.state, "wilderness_settlements", {}) or {}
+        for existing in settlements.values():
+            if isinstance(existing, dict) and str(existing.get("source", "")) == "procedural_wilderness":
+                point = (int(existing.get("chunk_x", 0)), int(existing.get("chunk_y", 0)))
+                if self.wilderness_region_coords(*point) == anchor:
+                    return True
+        # About one town per six organic regions: uncommon but reachable.
+        return self.wilderness_hash01(anchor[0], anchor[1], 33000) < 0.17
+
+    def procedural_town_geography(self, chunk_x: int, chunk_y: int) -> Dict[str, object]:
+        samples = [(x, y) for y in (5, 12, 19, 26, 33) for x in (8, 25, 43, 61, 78)]
+        water = ridge = coast = buildable = 0
+        biomes: Dict[str, int] = {}
+        for x, y in samples:
+            wx, wy = self.wilderness_world_coords(chunk_x, chunk_y, x, y)
+            biome = self.wilderness_world_biome_tile(wx, wy)
+            biomes[biome] = biomes.get(biome, 0) + 1
+            if self.wilderness_world_water_tile(wx, wy): water += 1
+            elif biome == "x": ridge += 1
+            else: buildable += 1
+            if biome == "[": coast += 1
+        region = self.wilderness_region_profile(chunk_x, chunk_y)
+        distance = abs(int(chunk_x) - int(region["center_x"])) + abs(int(chunk_y) - int(region["center_y"]))
+        hydrology = self.wilderness_chunk_hydrology_features(chunk_x, chunk_y)
+        water_access = "waterfront" if water else ("near watershed" if hydrology else "inland")
+        dominant = max(biomes, key=biomes.get) if biomes else ";"
+        setting = {
+            ";": "open grassland", "%": "woodland clearing", "l": "sheltered fungal vale",
+            "r": "raised wetland bank", "x": "highland shelf", "`": "desert crossing",
+            '"': "tundra shelter", "[": "coastal island",
+        }.get(dominant, "mixed frontier")
+        score = buildable * 5 - ridge * 7 - max(0, water - 4) * 12 - distance * 2
+        if 1 <= water <= 4: score += 24
+        if hydrology: score += 10
+        if coast and water <= 4: score += 8
+        return {
+            "region_key": region["key"], "region_name": region["name"], "region_size": region["size"],
+            "dominant_biome": dominant, "setting": setting, "water_access": water_access,
+            "water_samples": water, "ridge_samples": ridge, "buildable_samples": buildable,
+            "hydrology": list(hydrology), "site_score": score,
+        }
+
+    def procedural_town_hinterland_chunks(self, chunk_x: int, chunk_y: int) -> List[Position]:
+        """Choose a small persistent working hinterland around a regional town."""
+        if not self.procedural_town_region_selected(chunk_x, chunk_y):
+            return []
+        town_x, town_y = self.procedural_town_site_for_region(chunk_x, chunk_y)
+        region = self.wilderness_region_profile(town_x, town_y)
+        signature = (int(self.state.wilderness_seed), str(region["key"]), town_x, town_y)
+        cache = getattr(self, "_procedural_town_hinterland_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._procedural_town_hinterland_cache = cache
+        if signature in cache:
+            return list(cache[signature])
+        candidates = []
+        reserved = {self.wilderness_region_outpost_chunk(town_x, town_y), self.wilderness_region_structure_chunk(town_x, town_y)}
+        for cx, cy in self.wilderness_region_chunks(town_x, town_y):
+            distance = abs(cx - town_x) + abs(cy - town_y)
+            if not 1 <= distance <= 2:
+                continue
+            if (cx, cy) in reserved:
+                continue
+            if self.is_claimable_wilderness_chunk(cx, cy) or self.wilderness_chunk_has_dungeon_site(cx, cy) or self.wilderness_chunk_has_stronghold(cx, cy):
+                continue
+            geography = self.procedural_town_geography(cx, cy)
+            if int(geography["buildable_samples"]) < 11:
+                continue
+            priority = self.wilderness_hash01(cx, cy, 33120) + int(geography["buildable_samples"]) / 100.0
+            candidates.append((priority, cx, cy))
+        candidates.sort(key=lambda value: (-value[0], value[2], value[1]))
+        cache[signature] = [(cx, cy) for _priority, cx, cy in candidates[:3]]
+        return list(cache[signature])
+
+    def procedural_town_hinterland_profile(self, chunk_x: Optional[int] = None, chunk_y: Optional[int] = None) -> Dict[str, object]:
+        cx = int(getattr(self.state, "wilderness_chunk_x", 0) if chunk_x is None else chunk_x)
+        cy = int(getattr(self.state, "wilderness_chunk_y", 0) if chunk_y is None else chunk_y)
+        signature = (int(self.state.wilderness_seed), cx, cy)
+        cache = getattr(self, "_procedural_town_hinterland_profile_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._procedural_town_hinterland_profile_cache = cache
+        if signature in cache:
+            return dict(cache[signature])
+        if not self.procedural_town_region_selected(cx, cy):
+            cache[signature] = {}
+            return {}
+        town_site = self.procedural_town_site_for_region(cx, cy)
+        if (cx, cy) not in self.procedural_town_hinterland_chunks(*town_site):
+            cache[signature] = {}
+            return {}
+        geography = self.procedural_town_geography(cx, cy)
+        biome = str(geography["dominant_biome"])
+        if int(geography["water_samples"]) > 0 or geography.get("hydrology"):
+            type_id = "fishery"
+        else:
+            type_id = {";": "orchard", "%": "woodlot", "l": "mushroom_croft", "r": "reed_croft", "x": "quarry", "`": "oasis_garden", '"': "herding_station", "[": "fishery"}.get(biome, "grazing_common")
+        profiles = {
+            "orchard": ("Town Orchard", "a", {"Wild Apple": 2, "Fiber": 1}, 45, "tend the shared trees and carry sorted fruit to town"),
+            "woodlot": ("Managed Woodlot", "w", {"Wood": 3, "Pine Nuts": 1}, 35, "clear deadfall and mark the next careful cutting area"),
+            "mushroom_croft": ("Mushroom Croft", "m", {"Mushrooms": 3, "Fiber": 1}, 40, "turn the shaded beds and pack the safe harvest"),
+            "reed_croft": ("Reed Croft", "r", {"Marsh Reed": 3, "Clay": 1}, 40, "cut mature reeds while preserving the wet bank"),
+            "quarry": ("Town Quarry Camp", "q", {"Stone": 3, "Coal": 1}, 50, "dress road stone and secure the worked ledge"),
+            "fishery": ("Town Fishery", "f", {"Tide Sardine": 2} if biome == "[" else {"River Chub": 2}, 55, "repair nets and sort the shared catch"),
+            "oasis_garden": ("Irrigated Town Garden", "g", {"Clay": 2, "Wild Herbs": 2}, 45, "clear the channels and tend the drought-hardy beds"),
+            "herding_station": ("Town Herding Station", "h", {"Fiber": 3, "Winter Root": 1}, 45, "repair windbreaks and check the winter herd route"),
+            "grazing_common": ("Town Grazing Common", "p", {"Fiber": 2, "Wild Herbs": 1}, 35, "repair boundary markers and inspect the shared pasture"),
+        }
+        name, symbol, drops, money, work = profiles[type_id]
+        plan = self.procedural_town_plan(*town_site)
+        town_name = str(plan.get("name")) if plan else self.procedural_town_name(*town_site)
+        profile = {"type_id": type_id, "name": name, "symbol": symbol, "drops": drops, "money": money, "work": work, "town_chunk": town_site, "town_name": town_name}
+        cache[signature] = profile
+        return dict(profile)
+
+    def procedural_town_hinterland_position(
+        self,
+        chunk_x: Optional[int] = None,
+        chunk_y: Optional[int] = None,
+        grid: Optional[List[List[str]]] = None,
+    ) -> Position:
+        cx = int(getattr(self.state, "wilderness_chunk_x", 0) if chunk_x is None else chunk_x)
+        cy = int(getattr(self.state, "wilderness_chunk_y", 0) if chunk_y is None else chunk_y)
+        profile = self.procedural_town_hinterland_profile(cx, cy)
+        if not profile or str(getattr(self.state, "location", "")) != "Wilderness":
+            return (-1, -1)
+        signature = (int(self.state.wilderness_seed), cx, cy)
+        cache = getattr(self, "_procedural_town_hinterland_position_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._procedural_town_hinterland_position_cache = cache
+        if signature in cache:
+            return tuple(cache[signature])
+        if grid is None:
+            grid = self.active_map() if (cx, cy) == (int(self.state.wilderness_chunk_x), int(self.state.wilderness_chunk_y)) else self.wilderness_stream_map(cx, cy)
+        if not grid:
+            cache[signature] = (-1, -1)
+            return (-1, -1)
+        open_tiles = {".", ";", "%", "l", "r", "x", "`", '"', "["}
+        candidates = []
+        fallback = []
+        for y in range(4, len(grid) - 4):
+            for x in range(5, len(grid[0]) - 5):
+                if grid[y][x] not in open_tiles:
+                    continue
+                fallback.append((x, y))
+                if any(grid[y + dy][x + dx] == ":" for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1))):
+                    candidates.append((x, y))
+        options = candidates or fallback
+        rng = random.Random(self.wilderness_chunk_seed(cx, cy) + 33121)
+        cache[signature] = rng.choice(options) if options else (-1, -1)
+        return tuple(cache[signature])
+
+    def procedural_town_hinterland_at(self, x: int, y: int) -> Dict[str, object]:
+        profile = self.procedural_town_hinterland_profile()
+        return profile if self.procedural_town_hinterland_position() == (int(x), int(y)) else {}
+
+    def work_procedural_town_hinterland(self) -> bool:
+        profile = self.procedural_town_hinterland_profile()
+        if not profile:
+            self.set_message("There is no town hinterland site here.")
+            return False
+        self.ensure_wilderness_poi_state()
+        key = f"hinterland:{self.wilderness_chunk_key()}"
+        record = self.state.wilderness_poi_state.setdefault(key, {})
+        week = self.stronghold_cache_week_key()
+        if record.get("worked_week") == week:
+            self.set_message(f"This week's work at {profile['name']} is already complete.")
+            return False
+        if int(self.state.stamina) < 6:
+            self.set_message("You need 6 stamina for this hinterland work.")
+            return False
+        self.state.stamina -= 6
+        self.advance_time(45)
+        for item, quantity in profile["drops"].items():
+            self.state.inventory[item] = int(self.state.inventory.get(item, 0)) + int(quantity)
+        self.state.money += int(profile["money"])
+        plan = self.ensure_procedural_town_plan(*profile["town_chunk"])
+        if plan:
+            community = self.ensure_procedural_town_community(plan)
+            community["development_points"] = int(community.get("development_points", 0)) + 2
+            self.adjust_procedural_town_reputation(1, f"Supported {profile['name']}", plan)
+        self.add_wilderness_region_vitality(self.state.wilderness_chunk_x, self.state.wilderness_chunk_y, 2, f"worked at {profile['name']}")
+        record.update({"kind": "town_hinterland", "type_id": profile["type_id"], "town_name": profile["town_name"], "worked_week": week, "weeks_supported": int(record.get("weeks_supported", 0)) + 1})
+        rewards = ", ".join(f"{quantity} {item}" for item, quantity in profile["drops"].items())
+        self.autosave_with_message(f"Helped {profile['work']} at {profile['name']}: {rewards}, {profile['money']}g, and +2 regional vitality. {profile['town_name']} gained development.")
+        return True
 
     def procedural_town_terrain_is_eligible(
         self,
@@ -299,7 +501,7 @@ class ProceduralTownRuntimeMixin:
                 water += 1
             elif self.wilderness_world_biome_tile(world_x, world_y) == "x":
                 ridge += 1
-        return water <= 2 and ridge <= 5
+        return water <= 4 and ridge <= 5
 
     def wilderness_chunk_has_procedural_settlement(
         self,
@@ -316,7 +518,11 @@ class ProceduralTownRuntimeMixin:
             if chunk_y is None
             else chunk_y
         )
-        return (cx, cy) == self.procedural_town_site_for_region(cx, cy)
+        key = settlement_chunk_key(cx, cy)
+        existing = (getattr(self.state, "wilderness_settlements", {}) or {}).get(key)
+        if isinstance(existing, dict) and str(existing.get("source", "")) == "procedural_wilderness":
+            return True
+        return self.procedural_town_region_selected(cx, cy) and (cx, cy) == self.procedural_town_site_for_region(cx, cy)
 
     def procedural_town_plan(
         self,
@@ -368,6 +574,11 @@ class ProceduralTownRuntimeMixin:
             community["identity"] = stored_identity
         for key, value in identity.items():
             stored_identity.setdefault(key, copy.deepcopy(value))
+        geography = plan.get("geography") if isinstance(plan.get("geography"), dict) else self.procedural_town_geography(cx, cy)
+        plan.setdefault("geography", geography)
+        stored_identity.setdefault("region", geography.get("region_name", "the surrounding region"))
+        stored_identity.setdefault("setting", geography.get("setting", "mixed frontier"))
+        stored_identity.setdefault("water_access", geography.get("water_access", "inland"))
         community.setdefault("reputation", 0)
         community.setdefault("development_points", 0)
         community.setdefault("story_stage", 0)
@@ -1118,6 +1329,7 @@ class ProceduralTownRuntimeMixin:
                 existing = self.refreshed_procedural_town_layout(existing)
                 settlements[key] = existing
                 self.generate_procedural_settlement_population(cx, cy, force=False)
+            existing.setdefault("geography", self.procedural_town_geography(cx, cy))
             self.ensure_procedural_town_community(existing)
             return existing
 
@@ -1134,10 +1346,11 @@ class ProceduralTownRuntimeMixin:
         plan["map_applied"] = False
         plan["discovered"] = False
         plan["discovered_day"] = ""
+        plan["geography"] = self.procedural_town_geography(cx, cy)
         plan.setdefault("notes", []).append(
             (
-                "This naturally generated town occupies one deterministic "
-                f"{PROCEDURAL_TOWN_GRID_SIZE}x{PROCEDURAL_TOWN_GRID_SIZE} wilderness region."
+                f"This naturally generated town was founded in {plan['geography']['region_name']} "
+                f"on a {plan['geography']['setting']} site with {plan['geography']['water_access']} access."
             )
         )
         settlements[key] = plan
@@ -1299,26 +1512,63 @@ class ProceduralTownRuntimeMixin:
         plan["runtime_version"] = PROCEDURAL_TOWN_RUNTIME_VERSION
         plan["status"] = "established"
 
+        # Keep surrounding world terrain at the boundary. Regional roads already
+        # reaching an edge become the town's approaches; if none cross this map,
+        # retain one modest southern approach near the designated entrance.
+        approaches = []
         for x in range(width):
-            if grid[0][x] not in {"S"}:
-                grid[0][x] = "#"
-            if grid[height - 1][x] not in {"S"}:
-                grid[height - 1][x] = "#"
+            if grid[0][x] in {":", "="}: approaches.append((x, 0))
+            if grid[height - 1][x] in {":", "="}: approaches.append((x, height - 1))
+        for y in range(1, height - 1):
+            if grid[y][0] in {":", "="}: approaches.append((0, y))
+            if grid[y][width - 1] in {":", "="}: approaches.append((width - 1, y))
+        if not approaches:
+            approaches = [(max(1, min(width - 2, int(entrance.get("x", center_x)))), height - 1)]
+
+        def draw_approach_tile(x: int, y: int) -> None:
+            if not (0 <= x < width and 0 <= y < height) or (x, y) in building_tiles:
+                return
+            grid[y][x] = "=" if grid[y][x] == "~" else ":"
+
+        # Use at most four well-spaced approaches to avoid turning every edge
+        # road pixel into a separate spoke.
+        selected_approaches = []
+        for point in approaches:
+            if all(abs(point[0] - old[0]) + abs(point[1] - old[1]) >= 8 for old in selected_approaches):
+                selected_approaches.append(point)
+            if len(selected_approaches) >= 4:
+                break
+        for approach_x, approach_y in selected_approaches:
+            x, y = approach_x, approach_y
+            while x != center_x:
+                draw_approach_tile(x, y)
+                x += 1 if x < center_x else -1
+            while y != center_y:
+                draw_approach_tile(x, y)
+                y += 1 if y < center_y else -1
+            draw_approach_tile(center_x, center_y)
+
+        # Sparse world-appropriate vegetation makes the developed blocks fade
+        # into their surroundings without adding decorative furniture clutter.
+        outskirts_rng = random.Random(stable_text_seed(f"{plan.get('id')}:{PROCEDURAL_TOWN_RUNTIME_VERSION}:outskirts"))
+        outskirt_symbol = {";": "T", "%": "T", "l": "u", "r": "p", "x": "o", "`": "^", '"': "^", "[": "p"}.get(ground, "T")
+        lot_tiles = {
+            position
+            for lot in plan.get("lots", {}).values()
+            if isinstance(lot, dict)
+            for position in settlement_rect_tiles(int(lot["x"]), int(lot["y"]), int(lot["width"]), int(lot["height"]))
+        }
         for y in range(height):
-            grid[y][0] = "#"
-            grid[y][width - 1] = "#"
-        for x in range(max(1, center_x - 4), min(width - 1, center_x + 5)):
-            grid[0][x] = ":"
-            grid[height - 1][x] = ":"
-            if height > 2:
-                grid[1][x] = ground
-                grid[height - 2][x] = ground
-        for y in range(max(1, center_y - 4), min(height - 1, center_y + 5)):
-            grid[y][0] = ":"
-            grid[y][width - 1] = ":"
-            if width > 2:
-                grid[y][1] = ground
-                grid[y][width - 2] = ground
+            for x in range(width):
+                edge_distance = min(x, y, width - 1 - x, height - 1 - y)
+                if edge_distance > 6 or (x, y) in building_tiles or (x, y) in lot_tiles:
+                    continue
+                if grid[y][x] in {":", "=", "~", "S", PROCEDURAL_TOWN_SIGN_SYMBOL}:
+                    continue
+                if outskirts_rng.random() < 0.035:
+                    grid[y][x] = outskirt_symbol
+        plan["outskirt_style"] = outskirt_symbol
+        plan["regional_approaches"] = [f"{x},{y}" for x, y in selected_approaches]
         return grid
 
     def ensure_procedural_town_applied(
@@ -1434,6 +1684,95 @@ class ProceduralTownRuntimeMixin:
             ) == int(y):
                 return building
         return None
+
+    def procedural_town_building_door_side(self, building: Dict[str, object]) -> str:
+        """Return the exterior wall containing this building's doorway."""
+        left, top = int(building.get("x", 0)), int(building.get("y", 0))
+        right = left + max(1, int(building.get("width", 1))) - 1
+        bottom = top + max(1, int(building.get("height", 1))) - 1
+        door_x = int(building.get("door_x", left))
+        door_y = int(building.get("door_y", bottom))
+        if door_y <= top:
+            return "north"
+        if door_y >= bottom:
+            return "south"
+        if door_x <= left:
+            return "west"
+        if door_x >= right:
+            return "east"
+        access_x = int(building.get("access_x", door_x))
+        access_y = int(building.get("access_y", door_y + 1))
+        dx, dy = access_x - door_x, access_y - door_y
+        if abs(dx) > abs(dy):
+            return "east" if dx > 0 else "west"
+        return "south" if dy >= 0 else "north"
+
+    @staticmethod
+    def procedural_town_orient_position(
+        x: int, y: int, width: int, height: int, side: str
+    ) -> Position:
+        side = str(side or "south")
+        if side == "north":
+            return int(x), int(height) - 1 - int(y)
+        if side == "west":
+            return int(height) - 1 - int(y), int(x)
+        if side == "east":
+            return int(y), int(width) - 1 - int(x)
+        return int(x), int(y)
+
+    def procedural_town_orient_interior_grid(
+        self, grid: List[List[str]], building: Dict[str, object]
+    ) -> List[List[str]]:
+        result = [list(row) for row in grid]
+        side = self.procedural_town_building_door_side(building)
+        if side == "north":
+            return [row[:] for row in reversed(result)]
+        if side == "west":
+            return [list(row) for row in zip(*result[::-1])]
+        if side == "east":
+            return [list(row) for row in zip(*result)][::-1]
+        return result
+
+    def procedural_town_interior_source_dimensions(
+        self, building: Dict[str, object], floor: Optional[int] = None
+    ) -> Tuple[int, int]:
+        plan = self.current_procedural_town_plan() or {}
+        floor_index = self.current_procedural_building_floor(plan, building) if floor is None else int(floor)
+        type_id = str(building.get("type_id", ""))
+        property_record = (
+            self.player_property_for_building(plan, building)
+            if plan and hasattr(self, "player_property_for_building") and type_id == "home"
+            else None
+        )
+        template = self.procedural_town_custom_building_template(plan, building, property_record) if plan else None
+        source_grid = stamp_custom_building_template(template, floor_index) if template else []
+        if source_grid and source_grid[0]:
+            return len(source_grid[0]), len(source_grid)
+        return 64, 28
+
+    def procedural_town_display_to_source_position(
+        self, x: int, y: int, building: Dict[str, object], floor: Optional[int] = None
+    ) -> Position:
+        width, height = self.procedural_town_interior_source_dimensions(building, floor)
+        side = self.procedural_town_building_door_side(building)
+        if side == "north":
+            return int(x), height - 1 - int(y)
+        if side == "west":
+            return int(y), height - 1 - int(x)
+        if side == "east":
+            return width - 1 - int(y), int(x)
+        return int(x), int(y)
+
+    def procedural_town_interior_entry_landing(
+        self, grid: List[List[str]], building: Dict[str, object]
+    ) -> Position:
+        doors = [(x, y) for y, row in enumerate(grid) for x, tile in enumerate(row) if tile == "D"]
+        if not doors:
+            return len(grid[0]) // 2, max(1, len(grid) - 3)
+        door_x, door_y = doors[0]
+        side = self.procedural_town_building_door_side(building)
+        outward = {"north": (0, -1), "south": (0, 1), "west": (-1, 0), "east": (1, 0)}[side]
+        return door_x - outward[0], door_y - outward[1]
 
     def procedural_town_map_tile_passable(
         self,
@@ -2211,6 +2550,7 @@ class ProceduralTownRuntimeMixin:
         if custom_template:
             custom_grid = stamp_custom_building_template(custom_template, floor_index)
             if custom_grid:
+                custom_grid = self.procedural_town_orient_interior_grid(custom_grid, building)
                 cache[cache_key] = custom_grid
                 return custom_grid
 
@@ -2221,6 +2561,7 @@ class ProceduralTownRuntimeMixin:
                 floor_index,
                 floor_count,
             )
+            upper_grid = self.procedural_town_orient_interior_grid(upper_grid, building)
             cache[cache_key] = upper_grid
             return upper_grid
 
@@ -2234,6 +2575,7 @@ class ProceduralTownRuntimeMixin:
             layout_variant,
             fixture_variant,
         )
+        generated_grid = self.procedural_town_orient_interior_grid(generated_grid, building)
         cache[cache_key] = generated_grid
         return generated_grid
 
@@ -2648,6 +2990,13 @@ class ProceduralTownRuntimeMixin:
         if type_id in PROCEDURAL_TOWN_OPEN_BUILDINGS:
             self.procedural_town_building_service(building)
             return False
+        if not self.procedural_town_building_is_open(building):
+            hours = self.procedural_town_building_hours(building)
+            opens = self.procedural_town_format_hour(hours[0]) if hours else "later"
+            self.set_message(
+                f"{building.get('name', 'The building')} is closed. It opens at {opens}."
+            )
+            return False
         self.state.current_procedural_settlement_key = settlement_chunk_key(
             int(plan["chunk_x"]),
             int(plan["chunk_y"]),
@@ -2658,9 +3007,9 @@ class ProceduralTownRuntimeMixin:
         self.state.procedural_settlement_return_y = int(building["access_y"])
         self.state.location = PROCEDURAL_TOWN_INTERIOR_LOCATION
         interior = self.procedural_town_interior_map(building)
-        self.state.player_x = len(interior[0]) // 2
-        self.state.player_y = len(interior) - 3
-        self.state.facing = "UP"
+        side = self.procedural_town_building_door_side(building)
+        self.state.player_x, self.state.player_y = self.procedural_town_interior_entry_landing(interior, building)
+        self.state.facing = {"north": "DOWN", "south": "UP", "west": "RIGHT", "east": "LEFT"}[side]
         self.set_message(f"You entered {building.get('name', 'the building')}.")
         return True
 
@@ -2690,7 +3039,8 @@ class ProceduralTownRuntimeMixin:
                 int(getattr(self.state, "procedural_settlement_return_y", 1)),
             ),
         )
-        self.state.facing = "DOWN"
+        side = self.procedural_town_building_door_side(building) if building else "south"
+        self.state.facing = {"north": "UP", "south": "DOWN", "west": "LEFT", "east": "RIGHT"}.get(side, "DOWN")
         self.state.current_procedural_building_id = ""
         self.state.current_procedural_building_floor = 0
         self.set_message(
@@ -2704,6 +3054,8 @@ class ProceduralTownRuntimeMixin:
         plan: Optional[Dict[str, object]] = None,
     ) -> List[str]:
         plan = plan or self.current_procedural_town_plan() or {}
+        if plan is self.current_procedural_town_plan():
+            self.ensure_procedural_town_resident_runtime()
         population = self.procedural_settlement_population(
             int(plan.get("chunk_x", 0)),
             int(plan.get("chunk_y", 0)),
@@ -2713,17 +3065,111 @@ class ProceduralTownRuntimeMixin:
             for resident in population.get("residents", {}).values()
             if str(resident.get("workplace_building_id", "")) == str(building.get("id"))
         ]
+        occupants = [
+            str(resident.get("name"))
+            for resident in population.get("residents", {}).values()
+            if (
+                not bool(resident.get("deceased", False))
+                and str(resident.get("runtime_location", ""))
+                == f"building:{building.get('id')}"
+            )
+        ]
         catalog = SETTLEMENT_BUILDING_CATALOG.get(str(building.get("type_id")), {})
+        type_id = str(building.get("type_id", ""))
+        purposes = {
+            "town_hall": "Civic records, elections, permits, and public planning",
+            "general_store": "Daily provisions, tools, maps, and regional trade goods",
+            "market_stall": "Local produce and traveling merchant stock",
+            "carpenter": "Construction supplies, repairs, and woodworking",
+            "workshop": "Tools, mechanisms, and practical fabrication",
+            "clinic": "Medical care, remedies, and patient recovery",
+            "sheriff_office": "Bounties, patrols, reports, and public safety",
+            "library": "Books, study, archives, and community learning",
+            "inn": "Meals, lodging, travelers, and local news",
+            "home": "Private household residence",
+            "well": "Public water and a brief place to rest",
+            "park": "Public green space and community gathering place",
+        }
+        hours = self.procedural_town_building_hours(building)
+        hours_line = (
+            f"Hours: {self.procedural_town_format_hour(hours[0])}–{self.procedural_town_format_hour(hours[1])} "
+            f"({self.procedural_town_building_open_status(building)})"
+            if hours
+            else "Hours: Always accessible"
+        )
         return [
             str(building.get("name", "Settlement Building")).upper(),
             "",
             f"Town: {plan.get('name', 'Wilderness Settlement')}",
             f"Type: {catalog.get('name', building.get('type_id', 'Building'))}",
+            f"Purpose: {purposes.get(type_id, 'A working part of the settlement')}",
+            hours_line,
             f"Staff: {', '.join(staff) if staff else 'No assigned staff'}",
+            f"Inside now: {', '.join(occupants) if occupants else 'No one visible'}",
             f"Local style: {self.procedural_town_identity(plan).get('architecture', 'practical frontier construction')}",
             "",
-            "This building was generated from the settlement blueprint.",
-            "Its residents, workplace assignments, and schedules persist with the town.",
+            "Residents use its doorway, rooms, counters, and work areas as part of their daily schedules.",
+        ]
+
+    @staticmethod
+    def procedural_town_format_hour(hour: int) -> str:
+        value = int(hour) % 24
+        if value == 0:
+            return "midnight"
+        if value == 12:
+            return "noon"
+        return f"{value if value <= 12 else value - 12}:00 {'AM' if value < 12 else 'PM'}"
+
+    def procedural_town_building_hours(
+        self, building: Dict[str, object]
+    ) -> Optional[Tuple[int, int]]:
+        return {
+            "town_hall": (8, 17),
+            "general_store": (7, 19),
+            "market_stall": (7, 18),
+            "carpenter": (8, 18),
+            "workshop": (8, 18),
+            "clinic": (6, 22),
+            "sheriff_office": (7, 22),
+            "library": (8, 19),
+            "inn": (6, 24),
+        }.get(str(building.get("type_id", "")))
+
+    def procedural_town_building_is_open(
+        self,
+        building: Dict[str, object],
+        hour: Optional[int] = None,
+    ) -> bool:
+        hours = self.procedural_town_building_hours(building)
+        if not hours:
+            return True
+        current_hour = int(getattr(self.state, "hour", 6) if hour is None else hour)
+        return int(hours[0]) <= current_hour < int(hours[1])
+
+    def procedural_town_building_open_status(
+        self, building: Dict[str, object]
+    ) -> str:
+        return "open" if self.procedural_town_building_is_open(building) else "closed"
+
+    def procedural_town_building_service_staff(
+        self,
+        building: Dict[str, object],
+        plan: Optional[Dict[str, object]] = None,
+    ) -> List[Dict[str, object]]:
+        plan = plan or self.current_procedural_town_plan() or {}
+        population = self.procedural_settlement_population(
+            int(plan.get("chunk_x", 0)), int(plan.get("chunk_y", 0))
+        ) or {}
+        building_id = str(building.get("id", ""))
+        return [
+            resident
+            for resident in population.get("residents", {}).values()
+            if (
+                not bool(resident.get("deceased", False))
+                and str(resident.get("workplace_building_id", "")) == building_id
+                and str(resident.get("runtime_location", "")) == f"building:{building_id}"
+                and str(resident.get("runtime_phase", "")) in {"work_morning", "work_afternoon", "bad_weather"}
+            )
         ]
 
     def procedural_town_resident_schedule_entry(
@@ -2863,11 +3309,31 @@ class ProceduralTownRuntimeMixin:
         )
 
     def procedural_town_default_interior_resident_candidates(self) -> List[Position]:
-        return [
+        candidates = [
             (27, 21), (29, 22), (37, 22), (39, 24),
             (27, 24), (37, 24), (14, 21), (50, 21),
             (14, 23), (50, 23), (28, 9), (36, 9),
             (12, 10), (52, 10), (28, 12), (36, 12),
+        ]
+        plan = self.current_procedural_town_plan()
+        building = self.current_procedural_town_building()
+        if not plan or not building:
+            return candidates
+        floor_index = self.current_procedural_building_floor(plan, building)
+        type_id = str(building.get("type_id", ""))
+        property_record = (
+            self.player_property_for_building(plan, building)
+            if hasattr(self, "player_property_for_building") and type_id == "home"
+            else None
+        )
+        template = self.procedural_town_custom_building_template(plan, building, property_record)
+        source_grid = stamp_custom_building_template(template, floor_index) if template else []
+        source_h = len(source_grid) if source_grid else 28
+        source_w = len(source_grid[0]) if source_grid and source_grid[0] else 64
+        side = self.procedural_town_building_door_side(building)
+        return [
+            self.procedural_town_orient_position(x, y, source_w, source_h, side)
+            for x, y in candidates
         ]
 
     def procedural_town_zone_kind_preferences(
@@ -2884,7 +3350,11 @@ class ProceduralTownRuntimeMixin:
             and str(resident.get("home_building_id", "")) == building_id
             and type_id in {"home", "inn"}
         ):
-            return ["bedroom", "dining", "kitchen", "public_hall"]
+            if str(phase) == "late":
+                return ["bedroom", "dining", "public_hall"]
+            if int(getattr(self.state, "hour", 6) or 6) < 7:
+                return ["bedroom", "kitchen", "dining", "public_hall"]
+            return ["kitchen", "dining", "bedroom", "public_hall"]
         role_zones = {
             "Mayor": ["office", "public_hall"],
             "Clerk": ["office", "public_hall"],
@@ -2967,6 +3437,10 @@ class ProceduralTownRuntimeMixin:
             return []
         grid = self.procedural_town_interior_map(building)
         current_floor = self.current_procedural_building_floor(plan, building)
+        source_grid = stamp_custom_building_template(template, current_floor)
+        source_h = len(source_grid) if source_grid else len(grid)
+        source_w = len(source_grid[0]) if source_grid and source_grid[0] else len(grid[0])
+        side = self.procedural_town_building_door_side(building)
         anchors: List[Position] = []
         for kind in zone_kinds:
             for zone in template.get("zones", []) or []:
@@ -2974,7 +3448,17 @@ class ProceduralTownRuntimeMixin:
                     continue
                 if int(zone.get("floor", 0) or 0) != current_floor:
                     continue
-                candidates = self.procedural_town_zone_rect_candidates(grid, zone)
+                x1, y1 = self.procedural_town_orient_position(
+                    int(zone.get("x1", 0)), int(zone.get("y1", 0)), source_w, source_h, side
+                )
+                x2, y2 = self.procedural_town_orient_position(
+                    int(zone.get("x2", zone.get("x1", 0))),
+                    int(zone.get("y2", zone.get("y1", 0))),
+                    source_w, source_h, side,
+                )
+                oriented_zone = dict(zone)
+                oriented_zone.update({"x1": min(x1, x2), "y1": min(y1, y2), "x2": max(x1, x2), "y2": max(y1, y2)})
+                candidates = self.procedural_town_zone_rect_candidates(grid, oriented_zone)
                 if not candidates:
                     continue
                 limit = 1 if kind in {
@@ -3000,14 +3484,20 @@ class ProceduralTownRuntimeMixin:
             return []
         grid = self.procedural_town_interior_map(building)
         current_floor = self.current_procedural_building_floor(plan, building)
+        source_grid = stamp_custom_building_template(template, current_floor)
+        source_h = len(source_grid) if source_grid else len(grid)
+        source_w = len(source_grid[0]) if source_grid and source_grid[0] else len(grid[0])
+        side = self.procedural_town_building_door_side(building)
         anchors: List[Position] = []
         for spawn in template.get("spawns", []) or []:
             if not isinstance(spawn, dict):
                 continue
             if int(spawn.get("floor", 0) or 0) != current_floor:
                 continue
-            x = int(spawn.get("x", 0) or 0)
-            y = int(spawn.get("y", 0) or 0)
+            x, y = self.procedural_town_orient_position(
+                int(spawn.get("x", 0) or 0), int(spawn.get("y", 0) or 0),
+                source_w, source_h, side,
+            )
             if not (0 <= y < len(grid) and 0 <= x < len(grid[y])):
                 continue
             if self.procedural_town_interior_tile_passable(grid[y][x]):
@@ -3057,16 +3547,21 @@ class ProceduralTownRuntimeMixin:
             if floor is None
             else int(floor)
         )
+        source_grid = stamp_custom_building_template(template, floor_index)
+        source_h = len(source_grid) if source_grid else 0
+        source_w = len(source_grid[0]) if source_grid and source_grid[0] else 0
+        side = self.procedural_town_building_door_side(building)
         lookup: Dict[Position, str] = {}
         for color in template.get("colors", []) or []:
             if not isinstance(color, dict):
                 continue
             if int(color.get("floor", 0) or 0) != int(floor_index):
                 continue
-            lookup[(
-                int(color.get("x", 0) or 0),
-                int(color.get("y", 0) or 0),
-            )] = str(color.get("color", ""))
+            color_x, color_y = self.procedural_town_orient_position(
+                int(color.get("x", 0) or 0), int(color.get("y", 0) or 0),
+                source_w, source_h, side,
+            )
+            lookup[(color_x, color_y)] = str(color.get("color", ""))
         return lookup
 
     def procedural_town_resident_preferred_interior_floor(
@@ -3189,9 +3684,9 @@ class ProceduralTownRuntimeMixin:
     ) -> List[Position]:
         zone_kinds = self.procedural_town_zone_kind_preferences(resident, building, phase)
         candidates = (
-            self.procedural_town_template_spawn_anchors(plan, building)
-            + self.procedural_town_template_zone_anchors(plan, building, zone_kinds)
+            self.procedural_town_template_zone_anchors(plan, building, zone_kinds)
             + self.procedural_town_inferred_zone_anchors(building, zone_kinds)
+            + self.procedural_town_template_spawn_anchors(plan, building)
             + self.procedural_town_default_interior_resident_candidates()
         )
         return list(dict.fromkeys(candidates))
@@ -3235,6 +3730,237 @@ class ProceduralTownRuntimeMixin:
                 return False
             return self.procedural_town_interior_tile_passable(grid[y][x])
         return self.procedural_town_map_tile_passable(x, y, plan)
+
+    def procedural_town_runtime_building(
+        self,
+        plan: Dict[str, object],
+        location: str,
+    ) -> Optional[Dict[str, object]]:
+        if not str(location).startswith("building:"):
+            return None
+        building = plan.get("buildings", {}).get(str(location).split(":", 1)[1])
+        return building if isinstance(building, dict) else None
+
+    def procedural_town_runtime_outdoor_target(
+        self,
+        plan: Dict[str, object],
+        location: str,
+        fallback_x: int,
+        fallback_y: int,
+    ) -> Position:
+        building = self.procedural_town_runtime_building(plan, location)
+        if building:
+            return int(building.get("access_x", fallback_x)), int(building.get("access_y", fallback_y))
+        return int(fallback_x), int(fallback_y)
+
+    def procedural_town_resident_gathering_target(
+        self,
+        plan: Dict[str, object],
+        resident: Dict[str, object],
+        base_target: Position,
+        reserved: Set[Position],
+    ) -> Position:
+        """Give shared outdoor schedules distinct, comfortably spaced slots."""
+        base_x, base_y = int(base_target[0]), int(base_target[1])
+        spaced_offsets = [
+            (dx, dy)
+            for radius in (0, 3, 6, 9)
+            for dy in range(-radius, radius + 1, 3 if radius else 1)
+            for dx in range(-radius, radius + 1, 3 if radius else 1)
+            if max(abs(dx), abs(dy)) == radius
+        ]
+        if len(spaced_offsets) > 1:
+            tail = spaced_offsets[1:]
+            rotation = stable_text_seed(
+                f"{resident.get('id')}:{resident.get('runtime_phase')}:{base_x},{base_y}:gather"
+            ) % len(tail)
+            spaced_offsets = [spaced_offsets[0]] + tail[rotation:] + tail[:rotation]
+        player_position = (
+            int(getattr(self.state, "player_x", -1)),
+            int(getattr(self.state, "player_y", -1)),
+        )
+        grid = self.get_wilderness_chunk_map(
+            int(plan["chunk_x"]), int(plan["chunk_y"])
+        )
+        protected_access = {
+            (int(building.get("access_x", -1)), int(building.get("access_y", -1)))
+            for building in plan.get("buildings", {}).values()
+            if isinstance(building, dict)
+        }
+        valid: List[Position] = []
+        for dx, dy in spaced_offsets:
+            candidate = (base_x + dx, base_y + dy)
+            if candidate in reserved or candidate == player_position:
+                continue
+            if self.procedural_town_map_tile_passable(candidate[0], candidate[1], plan):
+                valid.append(candidate)
+        off_route = [
+            candidate
+            for candidate in valid
+            if candidate not in protected_access
+            and grid[candidate[1]][candidate[0]] not in {":", "="}
+        ]
+        clear_access = [
+            candidate for candidate in valid if candidate not in protected_access
+        ]
+        if off_route:
+            return off_route[0]
+        if clear_access:
+            return clear_access[0]
+        if valid:
+            return valid[0]
+        fallback = self.procedural_town_nearest_resident_tile(
+            plan, base_x, base_y, reserved
+        )
+        return fallback or (base_x, base_y)
+
+    def procedural_town_resident_path_step(
+        self,
+        start: Position,
+        target: Position,
+        occupied: Set[Position],
+        plan: Dict[str, object],
+        interior: bool,
+        limit: int = 420,
+    ) -> Optional[Position]:
+        """Find one architecture-aware step, treating a closed room door as openable."""
+        if start == target:
+            return start
+        queue = deque([start])
+        parents: Dict[Position, Optional[Position]] = {start: None}
+        best = start
+        best_distance = abs(start[0] - target[0]) + abs(start[1] - target[1])
+        grid = self.procedural_town_interior_map() if interior else self.get_wilderness_chunk_map(
+            int(plan["chunk_x"]), int(plan["chunk_y"])
+        )
+        reached: Optional[Position] = None
+        while queue and len(parents) <= int(limit):
+            x, y = queue.popleft()
+            distance = abs(x - target[0]) + abs(y - target[1])
+            if distance < best_distance:
+                best, best_distance = (x, y), distance
+            if (x, y) == target:
+                reached = (x, y)
+                break
+            neighbors = [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)]
+            neighbors.sort(key=lambda pos: abs(pos[0] - target[0]) + abs(pos[1] - target[1]))
+            for nx, ny in neighbors:
+                position = (nx, ny)
+                if position in parents or not (0 <= ny < len(grid) and 0 <= nx < len(grid[ny])):
+                    continue
+                door = interior and grid[ny][nx] == "_"
+                passable = door or self.procedural_town_runtime_tile_passable(
+                    nx, ny, occupied, plan, interior
+                )
+                if not passable:
+                    continue
+                parents[position] = (x, y)
+                queue.append(position)
+        endpoint = reached or (best if best != start else None)
+        if endpoint is None:
+            return None
+        step = endpoint
+        while parents.get(step) not in {None, start}:
+            step = parents[step]  # type: ignore[index]
+        return step
+
+    def procedural_town_resident_close_used_door(
+        self,
+        resident: Dict[str, object],
+        occupied: Set[Position],
+    ) -> None:
+        if not self.on_procedural_town_interior():
+            return
+        door_x = int(resident.get("runtime_opened_door_x", -1) or -1)
+        door_y = int(resident.get("runtime_opened_door_y", -1) or -1)
+        if door_x < 0 or door_y < 0:
+            return
+        current = (int(resident.get("runtime_x", -1)), int(resident.get("runtime_y", -1)))
+        if abs(current[0] - door_x) + abs(current[1] - door_y) <= 1:
+            return
+        if (door_x, door_y) in occupied or (
+            int(getattr(self.state, "player_x", -1)), int(getattr(self.state, "player_y", -1))
+        ) == (door_x, door_y):
+            return
+        grid = self.procedural_town_interior_map()
+        if 0 <= door_y < len(grid) and 0 <= door_x < len(grid[door_y]) and grid[door_y][door_x] == "|":
+            grid[door_y][door_x] = "_"
+        resident["runtime_opened_door_x"] = -1
+        resident["runtime_opened_door_y"] = -1
+
+    def procedural_town_resident_open_door_for_step(
+        self,
+        resident: Dict[str, object],
+        x: int,
+        y: int,
+    ) -> bool:
+        if not self.on_procedural_town_interior():
+            return False
+        grid = self.procedural_town_interior_map()
+        if not (0 <= int(y) < len(grid) and 0 <= int(x) < len(grid[int(y)])):
+            return False
+        if grid[int(y)][int(x)] != "_":
+            return False
+        grid[int(y)][int(x)] = "|"
+        resident["runtime_opened_door_x"] = int(x)
+        resident["runtime_opened_door_y"] = int(y)
+        resident["runtime_blocked_ticks"] = 0
+        return True
+
+    def procedural_town_complete_resident_arrival(
+        self,
+        resident: Dict[str, object],
+        plan: Dict[str, object],
+        interior: bool,
+    ) -> bool:
+        transition = str(resident.get("runtime_transition", ""))
+        if not transition:
+            return False
+        position = (int(resident.get("runtime_x", -1)), int(resident.get("runtime_y", -1)))
+        target = (int(resident.get("runtime_target_x", -2)), int(resident.get("runtime_target_y", -2)))
+        if position != target:
+            return False
+        desired_location = str(resident.get("runtime_schedule_location", "outdoor"))
+        if interior and transition == "leave":
+            current_location = str(resident.get("runtime_location", ""))
+            building = self.procedural_town_runtime_building(plan, current_location)
+            if not building:
+                return False
+            resident["runtime_location"] = "outdoor"
+            resident["runtime_x"] = int(building.get("access_x", 1))
+            resident["runtime_y"] = int(building.get("access_y", 1))
+            resident["runtime_transition"] = (
+                "approach" if desired_location.startswith("building:") else "travel"
+            )
+            return True
+        if interior and transition == "settle":
+            resident["runtime_transition"] = ""
+            resident["runtime_transition_target"] = ""
+            resident["runtime_blocked_ticks"] = 0
+            return True
+        if not interior:
+            if desired_location.startswith("building:"):
+                building = self.procedural_town_runtime_building(plan, desired_location)
+                resident["runtime_location"] = desired_location
+                if building:
+                    landing = self.procedural_town_interior_entry_landing(
+                        self.procedural_town_interior_map(building), building
+                    )
+                    resident["runtime_x"], resident["runtime_y"] = landing
+                    resident["runtime_floor"] = 0
+                    resident["runtime_transition"] = "settle"
+                    resident["runtime_transition_target"] = desired_location
+                else:
+                    resident["runtime_x"] = -1
+                    resident["runtime_y"] = -1
+                    resident["runtime_transition"] = ""
+                    resident["runtime_transition_target"] = ""
+            else:
+                resident["runtime_transition"] = ""
+                resident["runtime_transition_target"] = ""
+            resident["runtime_blocked_ticks"] = 0
+            return True
+        return False
 
     def ensure_procedural_town_resident_runtime(
         self,
@@ -3293,14 +4019,22 @@ class ProceduralTownRuntimeMixin:
         ):
             return
         occupied: Set[Position] = set()
+        reserved_targets: Set[Position] = set()
         indoor_index = 0
+        frontline_roles = {
+            "Shopkeeper", "Innkeeper", "Merchant", "Doctor", "Sheriff",
+            "Librarian", "Carpenter", "Mayor",
+        }
         for resident in sorted(
             population.get("residents", {}).values(),
-            key=lambda value: str(value.get("id", "")),
+            key=lambda value: (
+                0 if interior and str(value.get("role", "")) in frontline_roles else 1,
+                str(value.get("id", "")),
+            ),
         ):
             if bool(resident.get("deceased", False)):
                 continue
-            location, target_x, target_y, activity = (
+            desired_location, target_x, target_y, activity = (
                 self.procedural_town_resident_runtime_destination(
                     resident,
                     plan,
@@ -3309,24 +4043,42 @@ class ProceduralTownRuntimeMixin:
                 )
             )
             previous_day_key = str(resident.get("runtime_day_key", ""))
-            changed = (
+            previous_location = str(resident.get("runtime_location", ""))
+            schedule_changed = (
                 force_reanchor
                 or str(resident.get("runtime_phase", "")) != phase
                 or str(resident.get("runtime_day_key", "")) != day_key
                 or str(resident.get("runtime_weather", "")) != weather
-                or str(resident.get("runtime_location", "")) != location
+                or str(resident.get("runtime_schedule_location", "")) != desired_location
             )
+            if force_reanchor or not previous_location:
+                resident["runtime_location"] = desired_location
+                resident["runtime_transition"] = ""
+                resident["runtime_transition_target"] = ""
+            elif schedule_changed and previous_location != desired_location:
+                resident["runtime_transition"] = (
+                    "leave" if previous_location.startswith("building:")
+                    else ("approach" if desired_location.startswith("building:") else "travel")
+                )
+                resident["runtime_transition_target"] = desired_location
+            elif schedule_changed:
+                resident["runtime_transition"] = ""
+                resident["runtime_transition_target"] = ""
             resident["runtime_phase"] = phase
             resident["runtime_day_key"] = day_key
             resident["runtime_weather"] = weather
-            resident["runtime_location"] = location
+            resident["runtime_schedule_location"] = desired_location
+            resident["runtime_schedule_target_x"] = int(target_x)
+            resident["runtime_schedule_target_y"] = int(target_y)
             resident["runtime_activity"] = activity
             resident["procedural_resident"] = True
             if previous_day_key != day_key:
                 resident["runtime_steps_today"] = 0
+            actual_location = str(resident.get("runtime_location", desired_location))
+            transition = str(resident.get("runtime_transition", ""))
 
             if interior:
-                if location != f"building:{current_building_id}":
+                if actual_location != f"building:{current_building_id}":
                     continue
                 property_record = (
                     self.player_property_for_building(plan, current_building)
@@ -3341,13 +4093,17 @@ class ProceduralTownRuntimeMixin:
                     template,
                     property_record,
                 )
-                resident_floor = self.procedural_town_resident_preferred_interior_floor(
-                    plan,
-                    current_building,
-                    resident,
-                    phase,
-                    floor_count,
-                    indoor_index,
+                resident_floor = (
+                    0
+                    if transition == "leave"
+                    else self.procedural_town_resident_preferred_interior_floor(
+                        plan,
+                        current_building,
+                        resident,
+                        phase,
+                        floor_count,
+                        indoor_index,
+                    )
                 )
                 try:
                     floor_changed = int(resident.get("runtime_floor", -1)) != int(resident_floor)
@@ -3357,29 +4113,54 @@ class ProceduralTownRuntimeMixin:
                 if resident_floor != current_floor:
                     indoor_index += 1
                     continue
-                candidates = self.procedural_town_interior_resident_candidates_for(
-                    plan,
-                    current_building,
-                    resident,
-                    phase,
+                candidates = (
+                    [self.procedural_town_interior_entry_landing(
+                        self.procedural_town_interior_map(current_building), current_building
+                    )]
+                    if transition == "leave"
+                    else self.procedural_town_interior_resident_candidates_for(
+                        plan,
+                        current_building,
+                        resident,
+                        phase,
+                    )
                 )
                 if not candidates:
                     candidates = self.procedural_town_default_interior_resident_candidates()
-                start_index = indoor_index % len(candidates)
-                preferred = candidates[start_index]
+                start_index = (
+                    0
+                    if phase in {"work_morning", "work_afternoon"}
+                    and str(resident.get("role", "")) in frontline_roles
+                    else indoor_index % len(candidates)
+                )
+                ordered = candidates[start_index:] + candidates[:start_index]
+                preferred = next(
+                    (
+                        candidate
+                        for candidate in ordered
+                        if candidate not in reserved_targets
+                        and self.procedural_town_runtime_tile_passable(
+                            candidate[0], candidate[1], set(), plan, interior=True
+                        )
+                    ),
+                    ordered[0],
+                )
+                reserved_targets.add(preferred)
                 resident["runtime_target_x"], resident["runtime_target_y"] = preferred
-                if changed or floor_changed or not self.procedural_town_runtime_tile_passable(
+                if force_reanchor or floor_changed or not self.procedural_town_runtime_tile_passable(
                     int(resident.get("runtime_x", -1)),
                     int(resident.get("runtime_y", -1)),
                     occupied,
                     plan,
                     interior=True,
                 ):
-                    ordered = candidates[start_index:] + candidates[:start_index]
+                    placement_order = [preferred] + [
+                        candidate for candidate in ordered if candidate != preferred
+                    ]
                     position = next(
                         (
                             candidate
-                            for candidate in ordered
+                            for candidate in placement_order
                             if self.procedural_town_runtime_tile_passable(
                                 candidate[0],
                                 candidate[1],
@@ -3399,13 +4180,39 @@ class ProceduralTownRuntimeMixin:
                 indoor_index += 1
                 continue
 
-            if location != "outdoor":
+            if actual_location.startswith("building:") and transition == "leave":
+                old_building = self.procedural_town_runtime_building(plan, actual_location)
+                if old_building:
+                    exit_target = (
+                        int(old_building.get("access_x", 1)),
+                        int(old_building.get("access_y", 1)),
+                    )
+                    position = self.procedural_town_nearest_resident_tile(
+                        plan, exit_target[0], exit_target[1], occupied
+                    )
+                    if position:
+                        resident["runtime_x"], resident["runtime_y"] = position
+                        resident["runtime_location"] = "outdoor"
+                        actual_location = "outdoor"
+                        resident["runtime_transition"] = (
+                            "approach" if desired_location.startswith("building:") else "travel"
+                        )
+                        transition = str(resident["runtime_transition"])
+            if actual_location != "outdoor":
                 continue
+            outdoor_target = self.procedural_town_runtime_outdoor_target(
+                plan, desired_location, target_x, target_y
+            )
+            if not desired_location.startswith("building:"):
+                outdoor_target = self.procedural_town_resident_gathering_target(
+                    plan, resident, outdoor_target, reserved_targets
+                )
+                reserved_targets.add(outdoor_target)
+            resident["runtime_target_x"], resident["runtime_target_y"] = outdoor_target
             runtime_x = int(resident.get("runtime_x", -1))
             runtime_y = int(resident.get("runtime_y", -1))
             if (
-                changed
-                or not self.procedural_town_map_tile_passable(
+                not self.procedural_town_map_tile_passable(
                     runtime_x,
                     runtime_y,
                     plan,
@@ -3414,8 +4221,8 @@ class ProceduralTownRuntimeMixin:
             ):
                 position = self.procedural_town_nearest_resident_tile(
                     plan,
-                    target_x,
-                    target_y,
+                    outdoor_target[0],
+                    outdoor_target[1],
                     occupied,
                 )
                 if position is None:
@@ -3426,6 +4233,107 @@ class ProceduralTownRuntimeMixin:
                 int(resident.get("runtime_y", target_y)),
             ))
         self._procedural_resident_runtime_signature = runtime_signature
+
+    def procedural_town_stream_resident_lookup(
+        self,
+        chunk_x: int,
+        chunk_y: int,
+    ) -> Dict[Position, Dict[str, object]]:
+        """Compute outdoor resident snapshots without promoting the town chunk."""
+        plan = self.procedural_town_plan(int(chunk_x), int(chunk_y))
+        if not plan:
+            return {}
+        population = self.procedural_settlement_population(int(chunk_x), int(chunk_y))
+        if not population:
+            return {}
+        context = self.procedural_settlement_dialogue_context(int(chunk_x), int(chunk_y))
+        event = self.procedural_town_active_event(plan)
+        phase = str(context["phase"])
+        day_key = str(context["day_key"])
+        weather = str(context["weather"])
+        deceased_ids = set(getattr(self.state, "deceased_spouse_npc_ids", []) or [])
+        occupied: Set[Position] = set()
+        reserved_targets: Set[Position] = set()
+        lookup: Dict[Position, Dict[str, object]] = {}
+        for resident in sorted(
+            population.get("residents", {}).values(),
+            key=lambda value: str(value.get("id", "")),
+        ):
+            resident_id = str(resident.get("id", ""))
+            if bool(resident.get("deceased", False)) or resident_id in deceased_ids:
+                continue
+            if (
+                resident_id == str(getattr(self.state, "spouse_npc_id", ""))
+                and bool(getattr(self.state, "spouse_moved_to_farm", False))
+            ):
+                continue
+            desired_location, target_x, target_y, activity = self.procedural_town_resident_runtime_destination(
+                resident,
+                plan,
+                context,
+                event,
+            )
+            scheduled_target = self.procedural_town_runtime_outdoor_target(
+                plan, desired_location, target_x, target_y
+            )
+            if not desired_location.startswith("building:"):
+                scheduled_target = self.procedural_town_resident_gathering_target(
+                    plan, resident, scheduled_target, reserved_targets
+                )
+                reserved_targets.add(scheduled_target)
+            actual_location = str(resident.get("runtime_location", ""))
+            schedule_matches = (
+                str(resident.get("runtime_phase", "")) == phase
+                and str(resident.get("runtime_day_key", "")) == day_key
+                and str(resident.get("runtime_weather", "")) == weather
+                and str(resident.get("runtime_schedule_location", "")) == desired_location
+            )
+            transition_target: Optional[Position] = None
+            if schedule_matches:
+                if actual_location != "outdoor":
+                    continue
+            elif actual_location.startswith("building:") and actual_location != desired_location:
+                old_building = self.procedural_town_runtime_building(plan, actual_location)
+                if not old_building:
+                    continue
+                transition_target = (
+                    int(old_building.get("access_x", 1)),
+                    int(old_building.get("access_y", 1)),
+                )
+            elif actual_location == "outdoor":
+                transition_target = scheduled_target
+            elif desired_location == "outdoor":
+                transition_target = scheduled_target
+            else:
+                continue
+            runtime_x = int(resident.get("runtime_x", -1))
+            runtime_y = int(resident.get("runtime_y", -1))
+            runtime_matches = (
+                schedule_matches
+                and actual_location == "outdoor"
+                and (runtime_x, runtime_y) not in occupied
+                and self.procedural_town_map_tile_passable(runtime_x, runtime_y, plan)
+            )
+            position = (runtime_x, runtime_y) if runtime_matches else self.procedural_town_nearest_resident_tile(
+                plan,
+                *(transition_target or scheduled_target),
+                occupied,
+            )
+            if position is None:
+                continue
+            occupied.add(position)
+            snapshot = dict(resident)
+            snapshot.update({
+                "x": int(position[0]),
+                "y": int(position[1]),
+                "runtime_x": int(position[0]),
+                "runtime_y": int(position[1]),
+                "runtime_location": "outdoor",
+                "runtime_activity": activity,
+                "procedural_resident": True,
+            })
+            lookup[position] = snapshot
+        return lookup
 
     def update_procedural_town_residents(
         self,
@@ -3474,80 +4382,122 @@ class ProceduralTownRuntimeMixin:
             )
             for resident in residents
         }
-        context = self.procedural_settlement_dialogue_context(
-            int(plan["chunk_x"]),
-            int(plan["chunk_y"]),
+        ordered_residents = sorted(
+            residents, key=lambda value: str(value.get("id", ""))
         )
-        event = self.procedural_town_active_event(plan)
-        for resident in sorted(residents, key=lambda value: str(value.get("id", ""))):
+        if ordered_residents:
+            priority_rotation = tick % len(ordered_residents)
+            ordered_residents = (
+                ordered_residents[priority_rotation:]
+                + ordered_residents[:priority_rotation]
+            )
+        for resident in ordered_residents:
             x = int(resident.get("runtime_x", -1))
             y = int(resident.get("runtime_y", -1))
             if x < 0 or y < 0:
                 continue
+            self.procedural_town_resident_close_used_door(resident, occupied)
+            if self.procedural_town_complete_resident_arrival(resident, plan, interior):
+                occupied.discard((x, y))
+                continue
             role = str(resident.get("role", "Settler"))
-            move_percent = 32
+            transition = str(resident.get("runtime_transition", ""))
+            target = (
+                int(resident.get("runtime_target_x", x)),
+                int(resident.get("runtime_target_y", y)),
+            )
+            move_percent = 78 if transition else 32
             if role in {"Student", "Merchant", "Carpenter Apprentice"}:
-                move_percent = 48
+                move_percent = max(move_percent, 48)
             elif role in {"Mayor", "Librarian", "Archivist", "Doctor", "Retiree"}:
-                move_percent = 20
-            if str(resident.get("runtime_phase", "")) == "late":
+                move_percent = max(move_percent if transition else 0, 20)
+            if str(resident.get("runtime_phase", "")) == "late" and not transition:
                 move_percent //= 2
-            if str(resident.get("runtime_weather", "")) in BAD_WEATHER:
+            if str(resident.get("runtime_weather", "")) in BAD_WEATHER and not transition:
                 move_percent //= 2
+            if not transition and (x, y) != target:
+                # Residents actively clear old gathering clusters and keep up
+                # with a changed public schedule instead of idling in a queue.
+                move_percent = max(move_percent, 58)
             roll = stable_text_seed(
                 f"{resident.get('id')}:{resident.get('runtime_day_key')}:{tick}"
             ) % 100
             if roll >= move_percent:
                 continue
             occupied.discard((x, y))
-            options = [(1, 0), (-1, 0), (0, 1), (0, -1)]
-            rotation = stable_text_seed(f"{resident.get('id')}:{tick}:direction") % 4
-            options = options[rotation:] + options[:rotation]
-            if interior:
-                target_x = int(resident.get("runtime_target_x", 21))
-                target_y = int(resident.get("runtime_target_y", 10))
-                radius = 5
-            else:
-                _location, target_x, target_y, _activity = (
-                    self.procedural_town_resident_runtime_destination(
-                        resident,
-                        plan,
-                        context,
-                        event,
-                    )
-                )
-                radius = 6
-            if abs(x - target_x) + abs(y - target_y) > radius:
-                options.sort(
-                    key=lambda delta: abs(x + delta[0] - target_x)
-                    + abs(y + delta[1] - target_y)
-                )
-            moved = False
-            for dx, dy in options:
-                nx, ny = x + dx, y + dy
-                if not interior and abs(nx - target_x) + abs(ny - target_y) > radius + 2:
-                    continue
-                if not self.procedural_town_runtime_tile_passable(
-                    nx,
-                    ny,
-                    occupied,
-                    plan,
-                    interior,
+            if (x, y) == target and not transition:
+                if (
+                    str(resident.get("runtime_phase", ""))
+                    in {"work_morning", "work_afternoon", "bad_weather"}
+                    and role in {
+                        "Shopkeeper", "Innkeeper", "Merchant", "Doctor",
+                        "Sheriff", "Librarian", "Carpenter", "Mayor",
+                    }
                 ):
+                    # Primary service staff stay at their functional station;
+                    # idle wandering must not pull a shopkeeper away from the counter.
+                    occupied.add((x, y))
                     continue
-                resident["runtime_x"], resident["runtime_y"] = nx, ny
-                resident["runtime_facing"] = (
-                    "RIGHT" if dx > 0 else "LEFT" if dx < 0
-                    else "DOWN" if dy > 0 else "UP"
+                idle_options = [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)]
+                rotation = stable_text_seed(f"{resident.get('id')}:{tick}:idle") % 4
+                idle_options = idle_options[rotation:] + idle_options[:rotation]
+                step = next(
+                    (
+                        position
+                        for position in idle_options
+                        if self.procedural_town_runtime_tile_passable(
+                            position[0], position[1], occupied, plan, interior
+                        )
+                    ),
+                    None,
                 )
-                resident["runtime_steps_today"] = int(
-                    resident.get("runtime_steps_today", 0)
+            else:
+                step = self.procedural_town_resident_path_step(
+                    (x, y), target, occupied, plan, interior
+                )
+            if step is None:
+                resident["runtime_blocked_ticks"] = int(
+                    resident.get("runtime_blocked_ticks", 0) or 0
                 ) + 1
-                occupied.add((nx, ny))
-                moved = True
-                break
-            if not moved:
+                if int(resident["runtime_blocked_ticks"]) >= 3 and not transition:
+                    if not interior:
+                        schedule_target = (
+                            int(resident.get("runtime_schedule_target_x", x)),
+                            int(resident.get("runtime_schedule_target_y", y)),
+                        )
+                        alternate = self.procedural_town_resident_gathering_target(
+                            plan,
+                            resident,
+                            schedule_target,
+                            occupied | {(x, y), target},
+                        )
+                        resident["runtime_target_x"], resident["runtime_target_y"] = alternate
+                        resident["runtime_activity"] = "taking a less crowded route around town"
+                        resident["runtime_blocked_ticks"] = 0
+                    else:
+                        resident["runtime_target_x"], resident["runtime_target_y"] = (x, y)
+                        resident["runtime_activity"] = "working nearby after finding the usual route blocked"
+                else:
+                    resident["runtime_activity"] = "waiting for a clear path"
                 occupied.add((x, y))
+                continue
+            nx, ny = step
+            if interior and self.procedural_town_resident_open_door_for_step(resident, nx, ny):
+                occupied.add((x, y))
+                continue
+            dx, dy = nx - x, ny - y
+            resident["runtime_x"], resident["runtime_y"] = nx, ny
+            resident["runtime_facing"] = (
+                "RIGHT" if dx > 0 else "LEFT" if dx < 0
+                else "DOWN" if dy > 0 else "UP"
+            )
+            resident["runtime_steps_today"] = int(
+                resident.get("runtime_steps_today", 0)
+            ) + 1
+            resident["runtime_blocked_ticks"] = 0
+            occupied.add((nx, ny))
+            if self.procedural_town_complete_resident_arrival(resident, plan, interior):
+                occupied.discard((nx, ny))
 
     def procedural_town_resident_position_lookup(
         self,
@@ -3810,6 +4760,13 @@ class ProceduralTownRuntimeMixin:
             cy,
             str(resident.get("id", "")),
         )
+        actual_location = str(resident.get("runtime_location", "outdoor") or "outdoor")
+        scheduled_location = str(resident.get("runtime_schedule_location", actual_location) or actual_location)
+        actual_building = self.procedural_town_runtime_building(plan, actual_location)
+        scheduled_building = self.procedural_town_runtime_building(plan, scheduled_location)
+        actual_label = str(actual_building.get("name")) if actual_building else "Outdoors"
+        destination_label = str(scheduled_building.get("name")) if scheduled_building else "Town commons"
+        transition = str(resident.get("runtime_transition", "") or "")
         lines = [
             str(resident.get("name", "Resident")).upper(),
             "",
@@ -3818,6 +4775,8 @@ class ProceduralTownRuntimeMixin:
             f"Times spoken: {resident.get('dialogue_count', 0)}",
             f"Last topic: {str(resident.get('last_dialogue_topic', '') or 'none').replace('_', ' ').title()}",
             f"Current activity: {resident.get('runtime_activity', 'following today’s routine')}",
+            f"Current location: {actual_label}",
+            f"Destination: {destination_label}{f' ({transition})' if transition else ''}",
             f"Current schedule phase: {str(resident.get('runtime_phase', '') or 'unknown').replace('_', ' ').title()}",
             f"Steps today: {resident.get('runtime_steps_today', 0)}",
             f"Request: {request_status}",
@@ -3866,6 +4825,47 @@ class ProceduralTownRuntimeMixin:
         )
         return choices[seed % len(choices)]
 
+    def procedural_town_dialogue_topic_menu(
+        self,
+        resident: Dict[str, object],
+        plan: Dict[str, object],
+    ) -> str:
+        if not bool(resident.get("met", False)):
+            return "chat"
+        available = set(
+            self.procedural_settlement_dialogue_topics(
+                int(plan["chunk_x"]),
+                int(plan["chunk_y"]),
+                str(resident.get("id", "")),
+            )
+        )
+        topic_specs = (
+            ("chat", "Ask What's on Their Mind", "Current activity and concerns"),
+            ("work", "Ask About Their Work", str(resident.get("job_title", resident.get("profession", "Local work")))),
+            ("home", "Ask About Home", "Household and daily routine"),
+            ("settlement", "Ask About This Town", str(plan.get("name", "The settlement"))),
+            ("season", "Ask About the Season", str(getattr(self.state, "season", "Season"))),
+            ("weather", "Ask About the Weather", str(getattr(self.state, "weather", "Weather"))),
+            ("rumor", "Ask What They've Heard", "Local people and recent talk"),
+            ("personal", "Ask About Their Goals", "Requires growing trust"),
+            ("memory", "Ask What They Remember", "Shared history"),
+            ("secret", "Ask What They Rarely Share", "Requires deep trust"),
+        )
+        items = [
+            MenuItem(label=label, value=topic, enabled=True, hint=hint)
+            for topic, label, hint in topic_specs
+            if topic in available
+        ]
+        items.append(MenuItem(label="Back", value=MENU_BACK, enabled=True))
+        choice = self.vertical_panel_select(
+            f"Talk with {resident.get('name', 'Resident')}",
+            items,
+            LEFT_PANEL_WIDTH,
+            LEFT_PANEL_HEIGHT,
+            return_back=True,
+        )
+        return "" if not choice or choice.value == MENU_BACK else str(choice.value)
+
     def talk_to_procedural_town_resident(
         self,
         resident: Dict[str, object],
@@ -3873,7 +4873,12 @@ class ProceduralTownRuntimeMixin:
         plan = self.current_procedural_town_plan()
         if not plan:
             return None
-        topic = self.procedural_town_primary_dialogue_topic(resident, plan)
+        topic = self.procedural_town_dialogue_topic_menu(resident, plan)
+        if not topic:
+            self.set_message(f"Stopped talking to {resident.get('name', 'the resident')}.")
+            return None
+        day_key = self.town_npc_day_key()
+        influence_available = str(resident.get("last_talk_day", "")) != day_key
         result = self.procedural_settlement_conversation(
             int(plan["chunk_x"]),
             int(plan["chunk_y"]),
@@ -3903,29 +4908,71 @@ class ProceduralTownRuntimeMixin:
             ) % 3 == 0
             else str(result.get("text", "Good to see you."))
         )
+        runtime_location = str(resident.get("runtime_location", "outdoor") or "outdoor")
+        runtime_building = self.procedural_town_runtime_building(plan, runtime_location)
+        location_label = str(runtime_building.get("name", "Outdoors")) if runtime_building else "Town commons"
         lines = [f'"{primary_text}"']
         if result.get("follow_up") and str(result.get("category")) == "first_meeting":
             lines.extend(["", f'"{result.get("follow_up")}"'])
+        lines.extend([
+            "",
+            f"Activity: {resident.get('runtime_activity', 'following today’s routine')}",
+            f"Location: {location_label}",
+        ])
         self.vertical_panel_view(
             str(resident.get("name", "Resident")),
             lines,
             LEFT_PANEL_WIDTH,
             LEFT_PANEL_HEIGHT,
         )
-        bonus = (
-            f" Relationship +{result.get('relationship_gain')}."
-            if int(result.get("relationship_gain", 0) or 0) > 0
-            else ""
+        response = self.npc_dialogue_response_choice(
+            resident,
+            influence_available=influence_available,
+            title=f"Respond to {resident.get('name', 'Them')}",
         )
-        self.autosave_with_message(
-            f"Talked to {resident.get('name', 'the resident')}.{bonus}"
+        response_effect = int(response.get("effect", 0) or 0)
+        if influence_available and response_effect:
+            resident["relationship"] = max(
+                -50,
+                min(250, int(resident.get("relationship", 0) or 0) + response_effect),
+            )
+            resident_id = str(resident.get("id", ""))
+            self.state.town_npc_relationships[resident_id] = int(resident["relationship"])
+        result["relationship"] = int(resident.get("relationship", 0) or 0)
+        result["response_effect"] = response_effect if influence_available else 0
+        self.vertical_panel_view(
+            str(resident.get("name", "Resident")),
+            [
+                str(response.get("reaction", "The conversation settles.")),
+                "",
+                f"Relationship influence: {response_effect:+}"
+                if influence_available and response_effect
+                else "No further relationship influence today."
+                if not influence_available
+                else "No relationship change.",
+            ],
+            LEFT_PANEL_WIDTH,
+            LEFT_PANEL_HEIGHT,
         )
-        if int(result.get("relationship_gain", 0) or 0) > 0:
+        reputation_change = 1 if int(result.get("relationship_gain", 0) or 0) > 0 else 0
+        if influence_available and str(response.get("style", "")) == str(response.get("preferred_style", "")):
+            reputation_change += 1
+        elif influence_available and str(response.get("style", "")) == "dismissive":
+            reputation_change -= 2
+        if reputation_change:
             self.adjust_procedural_town_reputation(
-                1,
-                f"Got to know {resident.get('name', 'a resident')}",
+                reputation_change,
+                f"Conversation with {resident.get('name', 'a resident')}",
                 plan,
             )
+        total_gain = int(result.get("relationship_gain", 0) or 0) + (
+            response_effect if influence_available else 0
+        )
+        bonus = f" Relationship {total_gain:+}." if total_gain else ""
+        reputation_note = f" Town reputation {reputation_change:+}." if reputation_change else ""
+        self.autosave_with_message(
+            f"Talked to {resident.get('name', 'the resident')}.{bonus}{reputation_note}"
+        )
         return result
 
     def procedural_town_social_dialogue_line(
@@ -4153,6 +5200,23 @@ class ProceduralTownRuntimeMixin:
         self,
         resident: Dict[str, object],
     ) -> None:
+        topic_items = [
+            MenuItem(label="Ask About Their Day", value="day", enabled=True, hint=self.spouse_household_activity_label(resident)),
+            MenuItem(label="Ask About Their Work", value="work", enabled=True, hint=str(resident.get("job_title", resident.get("profession", "Work")))),
+            MenuItem(label="Talk About the Household", value="household", enabled=True, hint=self.spouse_support_mode()),
+            MenuItem(label="Talk About the Family", value="family", enabled=True, hint=f"{len(getattr(self.state, 'children', []) or [])} child(ren)"),
+            MenuItem(label="Ask About Their Old Home", value="past", enabled=True, hint=str(resident.get("settlement_name", "Their wilderness town"))),
+            MenuItem(label="Back", value=MENU_BACK, enabled=True),
+        ]
+        topic_choice = self.vertical_panel_select(
+            f"Talk with {resident.get('name', 'Your Spouse')}",
+            topic_items,
+            LEFT_PANEL_WIDTH,
+            LEFT_PANEL_HEIGHT,
+            return_back=True,
+        )
+        if not topic_choice or topic_choice.value == MENU_BACK:
+            return
         resident_id = str(resident.get("id", ""))
         today = self.town_npc_day_key()
         first_today = str(resident.get("last_talk_day", "")) != today
@@ -4166,18 +5230,27 @@ class ProceduralTownRuntimeMixin:
             resident_id,
             2 if first_today else 0,
         )
+        topic = str(topic_choice.value)
+        activity = self.spouse_household_activity_label(resident)
+        dialogue = {
+            "day": f"I was {activity}. Living here has made the ordinary parts of my day feel shared rather than merely repeated.",
+            "work": f"I still care about {resident.get('goal', 'doing useful work well')}. Marriage changed who I plan around, not the part of me that needs purpose.",
+            "household": f"Our {self.spouse_support_mode().lower()} household plan works best when we actually tell each other which part of the week is becoming too heavy.",
+            "family": (
+                "The children are becoming people with their own routines. I want us to notice who they are, not only whether their chores are finished."
+                if getattr(self.state, "children", [])
+                else "I think family is already present in the habits we keep for one another, whatever shape the household takes next."
+            ),
+            "past": f"I remember {resident.get('settlement_name', 'my old town')} clearly. I do not regret moving here, but leaving a place does not make its people and customs disappear.",
+        }.get(topic, "I am glad you asked instead of assuming you already knew the answer.")
         lines = [
             f"{resident.get('name', 'Your spouse')} looks up from "
-            f"{self.spouse_household_activity_label(resident)}.",
+            f"{activity}.",
             "",
-            (
-                f"“I still think about {resident.get('goal', 'the life we chose to build')}. "
-                "It feels different now that it belongs to both of us.”"
-            ),
+            f'“{dialogue}”',
             "",
             f"Personality: {resident.get('personality', 'Practical')}",
-            f"Relationship: {self.town_npc_relationship(resident_id)}"
-            f"{f' ({gain:+})' if gain else ''}",
+            f"Current household role: {self.spouse_support_mode()}",
         ]
         self.vertical_panel_view(
             str(resident.get("name", "Your Spouse")),
@@ -4185,8 +5258,31 @@ class ProceduralTownRuntimeMixin:
             LEFT_PANEL_WIDTH,
             LEFT_PANEL_HEIGHT,
         )
+        response = self.npc_dialogue_response_choice(
+            resident,
+            influence_available=first_today,
+            title=f"Respond to {resident.get('name', 'Them')}",
+        )
+        response_effect = int(response.get("effect", 0) or 0) if first_today else 0
+        if response_effect:
+            gain += self.adjust_town_npc_relationship(resident_id, response_effect)
+        self.vertical_panel_view(
+            str(resident.get("name", "Your Spouse")),
+            [
+                str(response.get("reaction", "The two of you return to the household routine.")),
+                "",
+                f"Relationship influence: {gain:+}"
+                if first_today and gain
+                else "You already made time for a meaningful conversation today."
+                if not first_today
+                else "No relationship change.",
+            ],
+            LEFT_PANEL_WIDTH,
+            LEFT_PANEL_HEIGHT,
+        )
         self.autosave_with_message(
             f"Talked with {resident.get('name', 'your spouse')} at home."
+            + (f" Relationship {gain:+}." if gain else "")
         )
 
     def procedural_household_spouse_menu(
@@ -4380,6 +5476,13 @@ class ProceduralTownRuntimeMixin:
                     f"Stopped talking to {resident.get('name', 'the resident')}."
                 )
                 return
+            if choice.value == "service":
+                building = self.current_procedural_town_building()
+                if building and self.procedural_town_building_is_open(building):
+                    self.procedural_town_building_service(building)
+                    return
+                self.set_message("This workplace is closed right now.")
+                continue
             if choice.value == "talk":
                 self.talk_to_procedural_town_resident(resident)
                 return
@@ -4558,16 +5661,45 @@ class ProceduralTownRuntimeMixin:
             cy,
             resident_id,
         )
-        items = [
-            MenuItem(label="Talk", value="talk", enabled=True),
+        current_building = self.current_procedural_town_building()
+        works_here = bool(
+            current_building
+            and str(resident.get("workplace_building_id", ""))
+            == str(current_building.get("id", ""))
+            and str(resident.get("runtime_location", ""))
+            == f"building:{current_building.get('id')}"
+        )
+        service_labels = {
+            "general_store": "Browse shop stock",
+            "market_stall": "Browse market goods",
+            "carpenter": "Request carpentry service",
+            "workshop": "Request workshop service",
+            "clinic": "Request medical care",
+            "sheriff_office": "Review bounties",
+            "library": "Use library services",
+            "inn": "Ask about meals and rooms",
+            "town_hall": "Request civic service",
+        }
+        items = [MenuItem(label="Talk", value="talk", enabled=True)]
+        if works_here and current_building and str(current_building.get("type_id", "")) in service_labels:
+            is_open = self.procedural_town_building_is_open(current_building)
+            items.append(
+                MenuItem(
+                    label=service_labels[str(current_building.get("type_id", ""))],
+                    value="service",
+                    enabled=is_open,
+                    hint="On duty" if is_open else "Workplace closed",
+                )
+            )
+        items.extend([
             MenuItem(
-                label="Give gift",
+                label="Give Gift",
                 value="gift",
                 enabled=not gifted_today,
                 hint="Already gave a gift today" if gifted_today else "Choose a carried item",
             ),
             MenuItem(
-                label="Ask rumor",
+                label="Ask Rumor",
                 value="rumor",
                 enabled="rumor" in available_topics,
                 hint="Build friendship first" if "rumor" not in available_topics else "",
@@ -4578,7 +5710,7 @@ class ProceduralTownRuntimeMixin:
                 enabled="request" in available_topics,
                 hint=request_status,
             ),
-        ]
+        ])
         if self.is_marriageable_npc(resident):
             court_ok, court_reason = self.can_court_town_npc(resident)
             proposal_ok, proposal_reason = self.can_propose_to_town_npc(resident)
@@ -4709,6 +5841,7 @@ class ProceduralTownRuntimeMixin:
         identity = self.procedural_town_identity(plan)
         event = self.procedural_town_active_event(plan)
         market = self.procedural_town_market_profile(plan)
+        geography = plan.get("geography", {}) if isinstance(plan.get("geography"), dict) else {}
         return [
             str(plan.get("name", "Wilderness Settlement")).upper(),
             "",
@@ -4716,6 +5849,8 @@ class ProceduralTownRuntimeMixin:
             f"Population: {summary.get('population', 0)}",
             f"Households: {summary.get('households', 0)}",
             f"Style: {plan.get('style', 'Crossroads')}",
+            f"Region: {geography.get('region_name', 'Unknown region')}",
+            f"Setting: {geography.get('setting', 'mixed frontier')} | Water: {geography.get('water_access', 'inland')}",
             f"Specialty: {specialty or 'General settlement'}",
             f"Known for: {identity.get('industry', 'regional trade')}",
             f"Motto: {identity.get('motto', '')}",
@@ -4733,6 +5868,13 @@ class ProceduralTownRuntimeMixin:
         building: Dict[str, object],
     ) -> bool:
         type_id = str(building.get("type_id", ""))
+        if not self.procedural_town_building_is_open(building):
+            hours = self.procedural_town_building_hours(building)
+            opens = self.procedural_town_format_hour(hours[0]) if hours else "later"
+            self.set_message(
+                f"{building.get('name', 'This service')} is closed. It opens at {opens}."
+            )
+            return False
         if type_id in PROCEDURAL_LOCAL_STOCK:
             self.procedural_town_local_shop_menu(building)
             return True
@@ -4783,6 +5925,8 @@ class ProceduralTownRuntimeMixin:
         ) + rank * 2
         candidates = list(PROCEDURAL_LOCAL_STOCK.get(type_id, ()))
         special_notes: Dict[str, str] = {}
+        if type_id == "general_store":
+            special_notes["Regional Chart"] = "Prepared by the town cartographer; reveals this entire named region"
         if type_id in {"general_store", "market_stall"}:
             price_lookup = getattr(self, "shippable_unit_price", None)
             for item in list(identity.get("exports", ()) or []):
@@ -6064,12 +7208,16 @@ class ProceduralTownRuntimeMixin:
             if hasattr(self, "ensure_regional_council_state")
             else {}
         )
+        geography = plan.get("geography", {}) if isinstance(plan.get("geography"), dict) else {}
         return [
             "RARE PROCEDURAL WILDERNESS TOWN",
             "",
             f"Name: {plan.get('name')}",
             f"Chunk: {chunk_x},{chunk_y}",
             f"Style: {plan.get('style')}",
+            f"Organic region: {geography.get('region_name', 'unknown')}",
+            f"Geographic setting: {geography.get('setting', 'mixed frontier')}",
+            f"Water access: {geography.get('water_access', 'inland')}",
             f"Specialty: {str(plan.get('specialty', 'general')).replace('_', ' ').title()}",
             f"Discovered: {'yes' if plan.get('discovered') else 'no'}",
             f"Population: {summary.get('population', 0)}",
@@ -6124,7 +7272,7 @@ class ProceduralTownRuntimeMixin:
                 for benefit in self.procedural_town_development_benefits(plan)
             ],
             "",
-            f"Rarity: one candidate per {PROCEDURAL_TOWN_GRID_SIZE}x{PROCEDURAL_TOWN_GRID_SIZE} chunk region",
+            "Rarity: only a minority of organic named regions support a generated town",
             "The authored town is unchanged.",
         ]
 

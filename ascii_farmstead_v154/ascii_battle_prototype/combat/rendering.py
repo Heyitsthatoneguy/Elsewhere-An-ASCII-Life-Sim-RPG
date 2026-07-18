@@ -30,6 +30,26 @@ class Style:
     BRIGHT_CYAN = "" if NO_COLOR else "\033[96m"
     BRIGHT_WHITE = "" if NO_COLOR else "\033[97m"
 
+    # Semantic tactical palette. Terrain stays quiet so actors, danger, and
+    # objectives can own the brightest values.
+    TERRAIN_FLOOR = "" if NO_COLOR else "\033[38;5;242m"
+    TERRAIN_DIRT = "" if NO_COLOR else "\033[38;5;137m"
+    TERRAIN_GRASS = "" if NO_COLOR else "\033[38;5;65m"
+    TERRAIN_MUD = "" if NO_COLOR else "\033[38;5;94m"
+    TERRAIN_BRIDGE = "" if NO_COLOR else "\033[38;5;180m"
+    TERRAIN_STONE = "" if NO_COLOR else "\033[38;5;250m"
+    TERRAIN_WALL = "" if NO_COLOR else "\033[38;5;244m"
+    TERRAIN_TREE = "" if NO_COLOR else "\033[38;5;28m"
+    TERRAIN_WATER = "" if NO_COLOR else "\033[38;5;31m"
+    TERRAIN_ICE = "" if NO_COLOR else "\033[38;5;117m"
+    TERRAIN_HAZARD = "" if NO_COLOR else "\033[38;5;131m"
+    TERRAIN_HEAL = "" if NO_COLOR else "\033[38;5;48;1m"
+    TERRAIN_MAGIC = "" if NO_COLOR else "\033[38;5;141;1m"
+    TERRAIN_WOOD = "" if NO_COLOR else "\033[38;5;130m"
+    OBJECTIVE = "" if NO_COLOR else "\033[38;5;229;1m"
+    ENEMY_ELITE = "" if NO_COLOR else "\033[38;5;203;1m"
+    ENEMY_BOSS = "" if NO_COLOR else "\033[38;5;201;1m"
+
     BG_DARK = "" if NO_COLOR else "\033[48;5;236m"
     BG_PANEL = "" if NO_COLOR else "\033[48;5;235m"
     BG_SELECT = "" if NO_COLOR else "\033[48;5;250m"
@@ -39,6 +59,7 @@ class Style:
     BG_ATTACK = "" if NO_COLOR else "\033[48;5;88m"
     BG_SKILL = "" if NO_COLOR else "\033[48;5;54m"
     BG_OVERWATCH = "" if NO_COLOR else "\033[48;5;25m"
+    BG_OBJECTIVE = "" if NO_COLOR else "\033[48;5;58m"
 
 
 def c(text: str, *styles: str) -> str:

@@ -360,12 +360,23 @@ class SaveLoadMixin:
             "mine_maps": {str(k): grid_to_save_rows(v) for k, v in getattr(self, "mine_maps", {}).items()},
             "mine_enemies": getattr(self, "mine_enemies", {}),
             "wilderness_map": grid_to_save_rows(self.get_wilderness_chunk_map(0, 0)),
-            "wilderness_maps": {str(k): grid_to_save_rows(v) for k, v in getattr(self, "wilderness_maps", {}).items()},
+            "wilderness_maps": {
+                str(k): grid_to_save_rows(v)
+                for k, v in getattr(self, "wilderness_maps", {}).items()
+                if str(k) not in getattr(self, "_wilderness_stream_preloaded_chunks", set())
+            },
             "wilderness_cave_maps": {str(k): grid_to_save_rows(v) for k, v in getattr(self, "wilderness_cave_maps", {}).items()},
             "wilderness_dungeon_maps": {str(k): grid_to_save_rows(v) for k, v in getattr(self, "wilderness_dungeon_maps", {}).items()},
             "wilderness_dungeon_enemies": getattr(self, "wilderness_dungeon_enemies", {}),
             "wilderness_stronghold_enemies": getattr(self, "wilderness_stronghold_enemies", {}),
-            "wilderness_animals": getattr(self, "wilderness_animals", {}),
+            "wilderness_animals": {
+                str(k): v
+                for k, v in getattr(self, "wilderness_animals", {}).items()
+                if (
+                    str(k) not in getattr(self, "_wilderness_stream_preloaded_chunks", set())
+                    or str(k) in getattr(self, "_wilderness_stream_dirty_actor_chunks", set())
+                )
+            },
             "crops": {k: asdict(v) for k, v in self.crops.items()},
         }
         for map_attr, _ in self.FIXED_INTERIOR_MAP_SPECS:
@@ -422,6 +433,8 @@ class SaveLoadMixin:
             )
 
             self.state = GameState(**prepare_loaded_state_data(state_data))
+            if hasattr(self, "ensure_container_state"):
+                self.ensure_container_state()
 
             set_color_enabled(bool(self.state.color_enabled))
 
@@ -544,6 +557,7 @@ class SaveLoadMixin:
                             except Exception:
                                 continue
                         self.wilderness_animals[animal_key] = clean_animals
+            self._wilderness_stream_dirty_actor_chunks = set(self.wilderness_animals)
 
             self.ensure_wilderness_chunks()
             self.ensure_wilderness_caves()

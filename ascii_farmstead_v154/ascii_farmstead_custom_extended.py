@@ -53,6 +53,14 @@ BUILDING_TEMPLATE_ZONE_KINDS = (
     "storage",
     "public_hall",
 )
+
+# Rendering procedural interiors asks for the same filtered template pool
+# several times per frame. Keep the sanitized, read-only records until the
+# backing custom-content file changes instead of reparsing/deep-copying the
+# complete library for every request.
+_CUSTOM_BUILDING_TEMPLATE_RECORD_CACHE: Dict[
+    Tuple[str, bool, object], Tuple[Dict[str, object], ...]
+] = {}
 BUILDING_TEMPLATE_ZONE_LABELS = {
     "bedroom": "Bedroom",
     "kitchen": "Kitchen",
@@ -1057,7 +1065,16 @@ def custom_building_template_records(
     building_type: str = "",
     enabled_only: bool = False,
 ) -> List[Dict[str, object]]:
-    from ascii_farmstead_custom_content import load_custom_content
+    from ascii_farmstead_custom_content import (
+        custom_content_file_signature,
+        load_custom_content,
+    )
+
+    signature = custom_content_file_signature()
+    cache_key = (str(building_type), bool(enabled_only), signature)
+    cached = _CUSTOM_BUILDING_TEMPLATE_RECORD_CACHE.get(cache_key)
+    if cached is not None:
+        return list(cached)
 
     content, _warnings = load_custom_content()
     templates = []
@@ -1070,7 +1087,12 @@ def custom_building_template_records(
         if enabled_only and not template["enabled"]:
             continue
         templates.append(template)
-    return templates
+    # File signatures make old entries unreachable after an editor save. Keep
+    # this tiny cache bounded during repeated custom-content edits.
+    if len(_CUSTOM_BUILDING_TEMPLATE_RECORD_CACHE) >= 24:
+        _CUSTOM_BUILDING_TEMPLATE_RECORD_CACHE.clear()
+    _CUSTOM_BUILDING_TEMPLATE_RECORD_CACHE[cache_key] = tuple(templates)
+    return list(templates)
 
 
 def stamp_custom_building_template(template: Dict[str, object], floor: int = 0) -> Optional[List[List[str]]]:

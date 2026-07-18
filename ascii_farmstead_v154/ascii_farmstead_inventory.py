@@ -8,11 +8,128 @@ future crafting, cooking, shops, and combat reward systems.
 """
 
 import random
-from typing import Dict
+from typing import Dict, Mapping
 
 from ascii_farmstead_data import CROP_DATA, FISH_DATA, FISH_ITEMS, QUALITY_ORDER
 from ascii_farmstead_helpers import fish_sell_price
 from ascii_farmstead_state import quality_item_name
+
+
+class CapacityInventory(dict):
+    """Inventory mapping that cannot silently grow past its carrying limit.
+
+    Old saves are allowed to begin above the current limit. Reductions always
+    work, while additions are held at the highest quantity that fits. Rejected
+    additions are recorded so FarmGame can leave them in a recoverable pack at
+    the player's feet instead of deleting rewards from older direct-write code.
+    """
+
+    def __init__(self, values: Mapping[str, int] | None = None, capacity: int = 200):
+        super().__init__()
+        self.capacity = max(1, int(capacity))
+        self._rejected: Dict[str, int] = {}
+        self._used_points = 0
+        for item_name, qty in dict(values or {}).items():
+            key = str(item_name)
+            quantity = max(0, int(qty or 0))
+            dict.__setitem__(self, key, quantity)
+            self._used_points += quantity * self.item_weight_points(key)
+
+    def used_slots(self) -> int:
+        points = self.used_points()
+        return (points + 3) // 4
+
+    @staticmethod
+    def item_weight_points(item_name: str) -> int:
+        compact_materials = {
+            "Wood", "Stone", "Fiber", "Sap", "Hardwood", "Clay", "Coal",
+            "Copper Ore", "Iron Ore", "Gold Ore", "Copper Bar", "Iron Bar", "Gold Bar",
+            "Quartz", "Amethyst", "Hay", "Animal Feed", "Bait",
+        }
+        return 1 if item_name in compact_materials or item_name.endswith(" Seeds") else 4
+
+    def used_points(self) -> int:
+        return max(0, int(self._used_points))
+
+    def free_points(self) -> int:
+        return max(0, self.capacity * 4 - self.used_points())
+
+    def free_slots(self) -> int:
+        return self.free_points() // 4
+
+    def max_additional(self, item_name: str) -> int:
+        return self.free_points() // self.item_weight_points(str(item_name))
+
+    def set_capacity(self, capacity: int) -> None:
+        self.capacity = max(1, int(capacity))
+
+    def __setitem__(self, item_name, quantity) -> None:
+        key = str(item_name)
+        old_qty = max(0, int(dict.get(self, key, 0) or 0))
+        new_qty = max(0, int(quantity or 0))
+        if new_qty <= old_qty:
+            dict.__setitem__(self, key, new_qty)
+            self._used_points += (new_qty - old_qty) * self.item_weight_points(key)
+            return
+        free_quantity = self.max_additional(key)
+        accepted_qty = old_qty + min(new_qty - old_qty, free_quantity)
+        dict.__setitem__(self, key, accepted_qty)
+        self._used_points += (accepted_qty - old_qty) * self.item_weight_points(key)
+        rejected = new_qty - accepted_qty
+        if rejected > 0:
+            self._rejected[key] = self._rejected.get(key, 0) + rejected
+
+    def take_rejected(self) -> Dict[str, int]:
+        rejected = dict(self._rejected)
+        self._rejected.clear()
+        return rejected
+
+    def update(self, values=(), **kwargs) -> None:
+        incoming = dict(values, **kwargs)
+        for item_name, quantity in incoming.items():
+            self[item_name] = quantity
+
+    def setdefault(self, item_name, default=0):
+        key = str(item_name)
+        if key not in self:
+            self[key] = default
+        return self.get(key)
+
+    def __ior__(self, values):
+        self.update(values)
+        return self
+
+    def __delitem__(self, item_name) -> None:
+        key = str(item_name)
+        old_qty = max(0, int(dict.get(self, key, 0) or 0))
+        dict.__delitem__(self, key)
+        self._used_points -= old_qty * self.item_weight_points(key)
+
+    def pop(self, item_name, *default):
+        key = str(item_name)
+        if key not in self:
+            if default:
+                return default[0]
+            raise KeyError(key)
+        value = dict.get(self, key)
+        self.__delitem__(key)
+        return value
+
+    def popitem(self):
+        key, value = dict.popitem(self)
+        self._used_points -= max(0, int(value or 0)) * self.item_weight_points(str(key))
+        return key, value
+
+    def clear(self) -> None:
+        dict.clear(self)
+        self._used_points = 0
+
+
+def capacity_inventory(inventory: Mapping[str, int] | None, capacity: int) -> CapacityInventory:
+    if isinstance(inventory, CapacityInventory):
+        inventory.set_capacity(capacity)
+        return inventory
+    return CapacityInventory(inventory, capacity)
 
 
 def inventory_crop_quantity(inventory: Dict[str, int], crop_name: str) -> int:

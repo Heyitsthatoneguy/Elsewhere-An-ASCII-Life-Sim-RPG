@@ -53,6 +53,12 @@ class Skill:
     zone_damage: int = 0
     zone_status: str = ""
     zone_status_duration: int = 0
+    custom_pattern: Tuple[Pos, ...] = ()  # hand-drawn offsets authored facing right
+    pattern_anchor: str = "target"  # target or caster
+    pattern_rotate: bool = True
+    armor_pierce: int = 0
+    displacement: int = 0  # positive pushes, negative pulls
+    life_steal: int = 0  # maximum HP restored after dealing damage
 
 
 @dataclass

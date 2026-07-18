@@ -177,6 +177,47 @@ def sanitize_player_trade_routes(value: object) -> Dict[str, Dict[str, object]]:
             "caravan_last_journey_day": str(
                 raw.get("caravan_last_journey_day", "")
             ),
+            "route_reliability": max(35, min(100, int(raw.get("route_reliability", 82)))),
+            "route_development_points": max(0, int(raw.get("route_development_points", 0))),
+            "delivery_streak": max(0, int(raw.get("delivery_streak", 0))),
+            "missed_deliveries": max(0, int(raw.get("missed_deliveries", 0))),
+            "last_delivery_ordinal": max(0, int(raw.get("last_delivery_ordinal", 0))),
+            "incident_cycle_key": str(raw.get("incident_cycle_key", "")),
+            "roadwork_day": str(raw.get("roadwork_day", "")),
+            "waystation_use_day": str(raw.get("waystation_use_day", "")),
+            "route_event_log": [
+                str(value) for value in (
+                    raw.get("route_event_log", [])
+                    if isinstance(raw.get("route_event_log"), list)
+                    else []
+                ) if str(value or "").strip()
+            ][-24:],
+            "crew_assignments": {
+                str(role): str(follower_id)
+                for role, follower_id in _clean_dict(raw.get("crew_assignments", {})).items()
+                if str(role) in {"route_guard", "caravan_driver", "regional_courier", "trade_representative"}
+                and str(follower_id or "").strip()
+            },
+            "crew_work_counters": {
+                str(role): max(0, int(value))
+                for role, value in _clean_dict(raw.get("crew_work_counters", {})).items()
+                if str(role) in {"route_guard", "caravan_driver", "regional_courier", "trade_representative"}
+            },
+            "caravan_incident": (
+                {
+                    "type": str(_clean_dict(raw.get("caravan_incident", {})).get("type", "")),
+                    "status": str(_clean_dict(raw.get("caravan_incident", {})).get("status", "open")),
+                    "ordinal": max(0, int(_clean_dict(raw.get("caravan_incident", {})).get("ordinal", 0))),
+                    "chunk_x": int(_clean_dict(raw.get("caravan_incident", {})).get("chunk_x", 0)),
+                    "chunk_y": int(_clean_dict(raw.get("caravan_incident", {})).get("chunk_y", 0)),
+                    "destination_town_key": str(_clean_dict(raw.get("caravan_incident", {})).get("destination_town_key", "")),
+                    "progress": max(0, int(_clean_dict(raw.get("caravan_incident", {})).get("progress", 0))),
+                    "resolved_by": str(_clean_dict(raw.get("caravan_incident", {})).get("resolved_by", "")),
+                }
+                if str(_clean_dict(raw.get("caravan_incident", {})).get("type", ""))
+                in {"rockfall", "washout", "broken_axle", "bandit_sign", "flooded_ford"}
+                else {}
+            ),
             "active": bool(raw.get("active", True)),
         }
     return clean

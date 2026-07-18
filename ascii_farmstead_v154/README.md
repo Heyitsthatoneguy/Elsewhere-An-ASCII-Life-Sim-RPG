@@ -4,7 +4,7 @@ Elsewhere is a free terminal life-sim RPG about farming, relationships,
 families, exploration, tactical combat, wilderness settlements, business,
 politics, and lives that can continue across generations.
 
-Current release: `0.9.0-beta.2`
+Current release: `0.9.0-beta.3`
 
 ## Windows download
 
@@ -46,7 +46,7 @@ and ANSI color support.
 ## Main controls
 
 ```text
-WASD / arrows   Move
+WASD / arrows / numpad   Move (numpad 7/9/1/3 move diagonally; 5 waits in dungeons)
 F               Use selected tool
 Q / E           Cycle tools
 1 / 2           Cycle owned seed types
@@ -60,7 +60,7 @@ S               Save
 Esc twice       Quit
 ```
 
-Menus use arrows or WASD to move, Z/Enter to confirm, and X/Esc/Q to go back.
+Menus use arrows, WASD, or the numpad to move, Z/Enter to confirm, and X/Esc/Q to go back.
 The in-game Help and Tutorials screens contain more detailed instructions.
 
 ## Saving

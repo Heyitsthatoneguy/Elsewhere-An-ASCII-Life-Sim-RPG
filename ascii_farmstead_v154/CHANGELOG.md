@@ -1,5 +1,67 @@
 # Changelog
 
+## 0.9.0-beta.3
+
+- Added a universal persistent container system for chests, shelves, cabinets,
+  ruins, shop displays, player furniture, and defeated enemies. Container menus
+  support inspection, selective transfer, deposits, and `R` to take everything
+  that fits.
+- Added a 200-unit backpack limit, compact material/seed stacking, unlimited
+  General Store expansions, individual property storage, old-save storage
+  migration, and recoverable dropped packs for rewards that do not fit.
+- Rebuilt map-native dungeon combat around physical positioning, persistent HP,
+  equipment skills and focus, melee/ranged attacks, tactical companions, cover,
+  sound awareness, doors, concealed traps, searchable remains, and mega-dungeons.
+- Expanded companion movement with adaptive formation and single-file modes,
+  breadcrumb following through interiors, catch-up movement, regrouping, and
+  stronger tactical positioning.
+- Reworked farm animals with growth stages, affection, personalities, feeding,
+  grooming, pasture routines, illness, care streaks, and species-specific product
+  quality and timing.
+- Greatly expanded persistent wilderness generation with seamless chunk
+  presentation, connected meaningful roads, physical landmarks and interiors,
+  regional travelers, environmental events, sub-biomes, expeditions, restoration,
+  trade consequences, oceans, islands, currents, docks, ferries, rafts, and
+  water travel.
+- Integrated the starting farm, town routes, and mine into the origin wilderness
+  region, with neutral boundary roads, resident commutes, wayfinding, and
+  season/weather-aware terrain, forage, water, and winter ice.
+- Improved generated towns, authored interiors, building variety, NPC schedules,
+  crowd movement, dialogue context, naturalist residency, shops, roads, and
+  enterable wilderness structures.
+- Added numpad movement throughout exploration and map-native combat, including
+  diagonal corner safety and numpad-5 waiting.
+- Improved terminal graphics with semantic palettes, connected architecture,
+  lighting, weather depth, terrain texture, actor emphasis, and clearer tactical
+  overlays.
+- Improved wilderness/interior performance with cached actor and occupancy
+  lookups, smoother streamed rendering, bounded navigation work, and constant-time
+  inventory capacity accounting.
+- Fixed compact-material take-all transfers stopping behind a full-sized item,
+  raft test interference from generated encounters, stale storage routing, loot
+  auto-collection inconsistencies, and numerous menu, transition, NPC, building,
+  weather, and cross-boundary edge cases.
+
+- New games now wake at 7:00 AM in full daylight. Wake time can be changed from
+  4:00 AM through noon in startup or in-game Settings and persists in saves.
+- Replaced the farm and town's misleading compass-letter transitions with
+  neutral, walkable road openings at their real boundaries, including cleanup
+  for old expanded-town saves.
+- Expanded the seamless origin region with a connected home road, readable
+  wayfinding signs, a fenced farm precinct, and a physical mine building.
+  Wilderness travelers recognize and follow the routes to Elsewhere, Home Farm,
+  and Home Mine.
+- Added recurring same-day resident commutes on the home road. Garrick works the
+  mine route, while Cora, Rowan, and Hana make schedule-, season-, household-,
+  festival-, and weather-aware farm journeys. Residents are absent from town
+  while physically traveling, retain their authored dialogue and relationships,
+  and can be accompanied through a smaller local `Walk together` activity.
+- Wilderness terrain now responds visually to season and weather across streamed
+  chunk boundaries. Inland freshwater freezes into traversable winter ice while
+  coastal water remains open; thawing safely moves stranded players to shore.
+- Improved seasonal forage cleanup and winter yields across persistent wilderness
+  chunks.
+
 ## 0.9.0-beta.2
 
 - Added wilderness-town sheriff offices, Sheriff/Deputy jobs, weekly bounty

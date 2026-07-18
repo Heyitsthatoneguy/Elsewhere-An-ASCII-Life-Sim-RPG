@@ -12,7 +12,7 @@ from ascii_farmstead_support import GAME_DATA_DIRECTORY
 from ascii_battle_prototype.combat.models import Skill
 
 
-CUSTOM_CONTENT_VERSION = 1
+CUSTOM_CONTENT_VERSION = 2
 CUSTOM_CONTENT_BACKUP_COUNT = 3
 CUSTOM_CONTENT_PATH = GAME_DATA_DIRECTORY / "custom_content.json"
 CUSTOM_CONTENT_EXPORT_PATH = GAME_DATA_DIRECTORY / "custom_content_export.json"
@@ -27,7 +27,7 @@ CUSTOM_CONTENT_FIELDS = (
 )
 
 ABILITY_EFFECTS = ("damage", "heal", "guard", "cleanse", "restore_mp")
-ABILITY_SHAPES = ("point", "burst", "strip", "cone", "cross", "multishot")
+ABILITY_SHAPES = ("point", "burst", "strip", "cone", "cross", "multishot", "custom")
 ABILITY_STATUSES = ("", "poison", "root", "vulnerable")
 ABILITY_ZONES = ("", "fire", "frost", "storm", "earth", "poison", "light", "shadow")
 ELEMENTS = ("Fire", "Frost", "Storm", "Earth", "Poison", "Light", "Shadow")
@@ -48,6 +48,18 @@ def invalidate_custom_content_cache() -> None:
         invalidate_class_defs_cache()
     except ImportError:
         pass
+
+
+def custom_content_file_signature(
+    path: Optional[Path] = None,
+) -> Optional[Tuple[str, int, int]]:
+    """Return a cheap identity for caches derived from custom content."""
+    content_path = path or CUSTOM_CONTENT_PATH
+    try:
+        stat = content_path.stat()
+    except OSError:
+        return None
+    return (str(content_path.resolve()), int(stat.st_mtime_ns), int(stat.st_size))
     try:
         from ascii_battle_prototype.combat.equipment import invalidate_equipment_defs_cache
 
@@ -147,6 +159,39 @@ def _clean_int(value: object, default: int, minimum: int, maximum: int) -> int:
     return max(minimum, min(maximum, number))
 
 
+def _clean_bool(value: object, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value or "").strip().casefold()
+    if text in {"true", "yes", "on", "1"}:
+        return True
+    if text in {"false", "no", "off", "0"}:
+        return False
+    return bool(default)
+
+
+def _clean_ability_pattern(value: object) -> List[List[int]]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    points: List[List[int]] = []
+    seen = set()
+    for raw_point in value:
+        if not isinstance(raw_point, (list, tuple)) or len(raw_point) != 2:
+            continue
+        dx = _clean_int(raw_point[0], 0, -6, 6)
+        dy = _clean_int(raw_point[1], 0, -6, 6)
+        point = (dx, dy)
+        if point in seen:
+            continue
+        seen.add(point)
+        points.append([dx, dy])
+        if len(points) >= 169:
+            break
+    return points
+
+
 def _clean_name_list(value: object, maximum: int) -> List[str]:
     if not isinstance(value, (list, tuple)):
         return []
@@ -185,14 +230,20 @@ def sanitize_custom_ability(raw: object) -> Optional[Dict[str, object]]:
     zone_status = str(raw.get("zone_status", "") or "")
     if zone_status not in ABILITY_STATUSES:
         zone_status = ""
+    pattern_anchor = str(raw.get("pattern_anchor", "target") or "target")
+    if pattern_anchor not in {"target", "caster"}:
+        pattern_anchor = "target"
+    combo_status = str(raw.get("combo_status", "") or "")
+    if combo_status not in ABILITY_STATUSES:
+        combo_status = ""
 
     ability: Dict[str, object] = {
         "name": name,
         "description": _clean_text(raw.get("description"), 180) or "A custom combat ability.",
         "effect": effect,
-        "mp_cost": _clean_int(raw.get("mp_cost"), 4, 0, 12),
-        "damage": _clean_int(raw.get("damage"), 0, 0, 14),
-        "range_max": _clean_int(raw.get("range_max"), 4, 1, 8),
+        "mp_cost": _clean_int(raw.get("mp_cost"), 4, 0, 20),
+        "damage": _clean_int(raw.get("damage"), 0, 0, 24),
+        "range_max": _clean_int(raw.get("range_max"), 4, 1, 12),
         "shape": shape,
         "aoe_radius": _clean_int(raw.get("aoe_radius"), 0, 0, 2),
         "width": _clean_int(raw.get("width"), 1, 1, 3),
@@ -206,6 +257,18 @@ def sanitize_custom_ability(raw: object) -> Optional[Dict[str, object]]:
         "zone_damage": _clean_int(raw.get("zone_damage"), 0, 0, 3),
         "zone_status": zone_status,
         "zone_status_duration": _clean_int(raw.get("zone_status_duration"), 0, 0, 3),
+        "custom_pattern": _clean_ability_pattern(raw.get("custom_pattern", [])),
+        "pattern_anchor": pattern_anchor,
+        "pattern_rotate": _clean_bool(raw.get("pattern_rotate"), True),
+        "armor_pierce": _clean_int(raw.get("armor_pierce"), 0, 0, 8),
+        "displacement": _clean_int(raw.get("displacement"), 0, -3, 3),
+        "life_steal": _clean_int(raw.get("life_steal"), 0, 0, 12),
+        "combo_status": combo_status,
+        "combo_any_status": _clean_bool(raw.get("combo_any_status"), False),
+        "combo_guarded": _clean_bool(raw.get("combo_guarded"), False),
+        "combo_damage_bonus": _clean_int(raw.get("combo_damage_bonus"), 0, 0, 10),
+        "combo_ap_gain": _clean_int(raw.get("combo_ap_gain"), 0, 0, 1),
+        "combo_mp_gain": _clean_int(raw.get("combo_mp_gain"), 0, 0, 8),
     }
 
     if effect != "damage":
@@ -222,6 +285,18 @@ def sanitize_custom_ability(raw: object) -> Optional[Dict[str, object]]:
             "zone_damage": 0,
             "zone_status": "",
             "zone_status_duration": 0,
+            "custom_pattern": [],
+            "pattern_anchor": "target",
+            "pattern_rotate": True,
+            "armor_pierce": 0,
+            "displacement": 0,
+            "life_steal": 0,
+            "combo_status": "",
+            "combo_any_status": False,
+            "combo_guarded": False,
+            "combo_damage_bonus": 0,
+            "combo_ap_gain": 0,
+            "combo_mp_gain": 0,
         })
         ability["range_max"] = 8
     if effect != "heal":
@@ -230,6 +305,17 @@ def sanitize_custom_ability(raw: object) -> Optional[Dict[str, object]]:
         ability["mp_amount"] = 0
     if effect == "damage" and int(ability["damage"]) <= 0:
         ability["damage"] = 1
+    if effect == "damage" and shape == "custom" and not ability["custom_pattern"]:
+        ability["custom_pattern"] = [[0, 0]]
+    if ability["combo_status"]:
+        ability["combo_any_status"] = False
+        ability["combo_guarded"] = False
+    elif ability["combo_any_status"]:
+        ability["combo_guarded"] = False
+    elif not ability["combo_guarded"]:
+        ability["combo_damage_bonus"] = 0
+        ability["combo_ap_gain"] = 0
+        ability["combo_mp_gain"] = 0
     if status and int(ability["status_duration"]) <= 0:
         ability["status_duration"] = 1
     if not zone_type:
@@ -483,6 +569,22 @@ def ability_to_skill(record: Dict[str, object]) -> Skill:
         zone_damage=int(ability["zone_damage"]),
         zone_status=str(ability["zone_status"]),
         zone_status_duration=int(ability["zone_status_duration"]),
+        custom_pattern=tuple(
+            (int(point[0]), int(point[1]))
+            for point in ability["custom_pattern"]
+            if isinstance(point, (list, tuple)) and len(point) == 2
+        ),
+        pattern_anchor=str(ability["pattern_anchor"]),
+        pattern_rotate=bool(ability["pattern_rotate"]),
+        armor_pierce=int(ability["armor_pierce"]),
+        displacement=int(ability["displacement"]),
+        life_steal=int(ability["life_steal"]),
+        combo_status=str(ability["combo_status"]),
+        combo_any_status=bool(ability["combo_any_status"]),
+        combo_guarded=bool(ability["combo_guarded"]),
+        combo_damage_bonus=int(ability["combo_damage_bonus"]),
+        combo_ap_gain=int(ability["combo_ap_gain"]),
+        combo_mp_gain=int(ability["combo_mp_gain"]),
     )
 
 
@@ -561,6 +663,13 @@ def ability_balance_score(record: Dict[str, object]) -> int:
     score += int(ability["status_duration"]) * (2 if ability["status"] else 0)
     score += int(ability["zone_duration"]) + int(ability["zone_damage"]) * 2
     score += int(ability["zone_status_duration"]) * (2 if ability["zone_status"] else 0)
+    score += max(0, len(ability["custom_pattern"]) - 1)
+    score += int(ability["armor_pierce"]) * 2
+    score += abs(int(ability["displacement"])) * 2
+    score += int(ability["life_steal"])
+    score += int(ability["combo_damage_bonus"])
+    score += int(ability["combo_ap_gain"]) * 4
+    score += int(ability["combo_mp_gain"])
     if ability["effect"] in {"guard", "cleanse"}:
         score += 7
     score -= int(ability["mp_cost"])
@@ -596,9 +705,17 @@ def ability_summary(record: Dict[str, object]) -> List[str]:
         lines.extend([
             f"Damage: {ability['damage']} | Range: {ability['range_max']}",
             f"Shape: {ability['shape']} | Radius: {ability['aoe_radius']} | Width: {ability['width']} | Shots: {ability['shots']}",
+            f"Pattern: {len(ability['custom_pattern'])} tiles | Anchor: {ability['pattern_anchor']} | Rotate: {'yes' if ability['pattern_rotate'] else 'no'}",
+            f"Armor pierce: {ability['armor_pierce']} | Displacement: {ability['displacement']:+d} | Life steal: {ability['life_steal']}",
             f"Status: {ability['status'] or 'none'} ({ability['status_duration']} turns)",
             f"Zone: {ability['zone_type'] or 'none'} ({ability['zone_duration']} turns, {ability['zone_damage']} damage)",
             f"Zone status: {ability['zone_status'] or 'none'} ({ability['zone_status_duration']} turns)",
+            "Combo: " + (
+                (ability['combo_status'] or ('any status' if ability['combo_any_status'] else 'caster guarded'))
+                + f" -> +{ability['combo_damage_bonus']} damage, +{ability['combo_ap_gain']} AP, +{ability['combo_mp_gain']} MP"
+                if ability['combo_status'] or ability['combo_any_status'] or ability['combo_guarded']
+                else "none"
+            ),
         ])
     elif effect == "heal":
         lines.append(f"Healing: {ability['heal_amount']}")

@@ -208,6 +208,8 @@ class Game:
         self.battle_return_context: Dict[str, object] = {}
         self.battle_world_flags: Dict[str, object] = {}
         self.battle_cleared_flags: Dict[str, object] = {}
+        self.detailed_map_glyphs = not ASCII_MODE
+        self.high_contrast_visuals = False
         self.last_result_lines: List[str] = []
         self.result_section_index = 0
 
@@ -1109,7 +1111,26 @@ class Game:
             return f"Cross sweep, reach {skill.range_max}"
         if skill.shape == "multishot":
             return f"{skill.shots} shots, range {skill.range_max}"
+        if skill.shape == "custom":
+            anchor = "caster" if skill.pattern_anchor == "caster" else "target"
+            rotation = ", rotating" if skill.pattern_rotate else ""
+            return f"Drawn pattern, {len(skill.custom_pattern)} tiles around {anchor}{rotation}, range {skill.range_max}"
         return f"{skill.shape}, range {skill.range_max}"
+
+    def skill_special_properties_label(self, skill: Skill) -> str:
+        parts: List[str] = []
+        if int(skill.armor_pierce) > 0:
+            parts.append(f"pierce {skill.armor_pierce}")
+        if int(skill.displacement) > 0:
+            parts.append(f"push {skill.displacement}")
+        elif int(skill.displacement) < 0:
+            parts.append(f"pull {abs(skill.displacement)}")
+        if int(skill.life_steal) > 0:
+            parts.append(f"drain {skill.life_steal}")
+        combo = self.skill_combo_label(skill)
+        if combo:
+            parts.append(combo)
+        return " | ".join(parts)
 
     def skill_targeting_hint(self, skill: Skill) -> str:
         if skill.effect == "heal":
@@ -1134,6 +1155,11 @@ class Game:
             return f"Hits a cross centered on caster, reaching {skill.range_max} tiles."
         if skill.shape == "multishot":
             base = f"Marks up to {skill.shots} enemies within {skill.range_max} tiles."
+        elif skill.shape == "custom":
+            base = (
+                f"Uses a hand-drawn {len(skill.custom_pattern)}-tile pattern anchored on "
+                f"the {skill.pattern_anchor}; range {skill.range_max}."
+            )
         else:
             base = f"Range {skill.range_max}."
         combo = self.skill_combo_label(skill)
@@ -1178,6 +1204,24 @@ class Game:
             return set()
         if target not in self.skill_range(origin, skill):
             return set()
+
+        if skill.shape == "custom" and skill.custom_pattern:
+            direction = self.direction_from_to(origin, target)
+            base = origin if skill.pattern_anchor == "caster" else target
+            tiles: Set[Pos] = set()
+            for raw_dx, raw_dy in skill.custom_pattern:
+                dx, dy = int(raw_dx), int(raw_dy)
+                if skill.pattern_rotate:
+                    if direction == (0, 1):
+                        dx, dy = -dy, dx
+                    elif direction == (-1, 0):
+                        dx, dy = -dx, -dy
+                    elif direction == (0, -1):
+                        dx, dy = dy, -dx
+                point = (base[0] + dx, base[1] + dy)
+                if self.in_bounds(point):
+                    tiles.add(point)
+            return tiles
 
         if skill.shape == "point":
             return {target}
@@ -1230,6 +1274,33 @@ class Game:
 
         return self.aoe_tiles(target, skill.aoe_radius)
 
+    def skill_damage_against(self, target: Unit, skill: Skill, combo_bonus: int = 0) -> int:
+        pierced = min(max(0, int(target.defense)), max(0, int(skill.armor_pierce)))
+        return max(0, int(skill.damage) + int(combo_bonus) + pierced)
+
+    def apply_skill_displacement(self, caster: Unit, target: Unit, skill: Skill) -> int:
+        distance = int(skill.displacement)
+        if distance == 0 or not target.alive or target.pos == caster.pos:
+            return 0
+        direction = self.direction_from_to(caster.pos, target.pos)
+        if distance < 0:
+            direction = (-direction[0], -direction[1])
+        moved = 0
+        for _step in range(abs(distance)):
+            destination = (target.pos[0] + direction[0], target.pos[1] + direction[1])
+            if not self.in_bounds(destination) or not self.is_passable(destination) or self.unit_at(destination) is not None:
+                break
+            target.pos = destination
+            moved += 1
+        return moved
+
+    def apply_skill_life_steal(self, caster: Unit, skill: Skill, total_damage: int) -> int:
+        if int(total_damage) <= 0 or int(skill.life_steal) <= 0 or caster.hp >= caster.max_hp:
+            return 0
+        drained = min(int(skill.life_steal), int(total_damage), caster.max_hp - caster.hp)
+        caster.hp += drained
+        return drained
+
     def skill_targets(self, caster: Unit, target: Pos, skill: Skill) -> List[Unit]:
         if target not in self.skill_range(caster.pos, skill):
             return []
@@ -1278,6 +1349,16 @@ class Game:
         return None
 
     def zone_glyph(self, zone: Zone) -> str:
+        if self.detailed_map_glyphs:
+            return {
+                "fire": "✹",
+                "frost": "❄",
+                "storm": "ϟ",
+                "earth": "◆",
+                "poison": "☣",
+                "light": "✦",
+                "shadow": "●",
+            }.get(zone.kind, "◆")
         return {
             "fire": "F",
             "frost": "I",
@@ -1682,6 +1763,7 @@ class Game:
             self.flash_effect(self.skill_affected_tiles(owner.pos, action.target, skill), self.skill_effect_kind(skill))
             parts: List[str] = []
             combo_triggers = 0
+            total_damage = 0
             for target in list(targets):
                 if not target.alive:
                     continue
@@ -1689,7 +1771,8 @@ class Game:
                 triggered = combo_bonus > 0 or (self.skill_combo_triggered(owner, target, skill) and (skill.combo_ap_gain or skill.combo_mp_gain))
                 if triggered:
                     combo_triggers += 1
-                dmg = target.take_damage(skill.damage + combo_bonus)
+                dmg = target.take_damage(self.skill_damage_against(target, skill, combo_bonus))
+                total_damage += dmg
                 self.apply_skill_status(target, skill)
                 if owner.ai_controlled:
                     self.combat_stats["follower_damage"] += dmg
@@ -1701,10 +1784,17 @@ class Game:
                     part += " combo"
                 if skill.status:
                     part += f" +{skill.status}"
+                displaced = self.apply_skill_displacement(owner, target, skill)
+                if displaced:
+                    part += f" {'pushed' if skill.displacement > 0 else 'pulled'} {displaced}"
                 if not target.alive:
                     part += " KO"
                     self.award_xp(owner, target)
                 parts.append(part)
+
+            drained = self.apply_skill_life_steal(owner, skill, total_damage)
+            if drained:
+                parts.append(f"{owner.name} +{drained} HP drained")
 
             combo_result = self.apply_skill_combo_rewards(owner, skill, combo_triggers)
             if combo_result:
@@ -2405,37 +2495,78 @@ class Game:
             return "combo"
         return "skill"
 
-    def base_tile(self, tile: str) -> str:
-        if tile == TILE_FLOOR:
-            return c(" . ", Style.BRIGHT_BLACK)
-        if tile == TILE_DIRT:
-            return c(" , ", Style.YELLOW)
-        if tile == TILE_GRASS:
-            return c(" \" ", Style.GREEN)
-        if tile == TILE_MUD:
-            return c(" : ", Style.BRIGHT_BLACK)
-        if tile == TILE_BRIDGE:
-            return c(" = ", Style.BRIGHT_YELLOW)
-        if tile == TILE_STONE:
-            return c(" ^ ", Style.BRIGHT_WHITE)
-        if tile == TILE_THORNS:
-            return c(" * ", Style.BRIGHT_RED)
-        if tile == TILE_SPRING:
-            return c(" + ", Style.BRIGHT_GREEN, Style.BG_DARK)
-        if tile == TILE_CRYSTAL:
-            return c(" m ", Style.BRIGHT_BLUE, Style.BG_DARK)
-        if tile == TILE_ICE:
-            return c(" _ ", Style.BRIGHT_CYAN)
-        if tile == TILE_BARREL:
-            return c(" B ", Style.BRIGHT_YELLOW, Style.BG_ATTACK)
-        if tile == TILE_CRATE:
-            return c(" C ", Style.YELLOW, Style.BG_DARK)
+    def tactical_wall_glyph(self, pos: Pos) -> str:
+        """Shape a stored wall for display without changing tactical data."""
+        if not self.detailed_map_glyphs:
+            return "#"
+        x, y = pos
+        mask = 0
+        for bit, dx, dy in ((1, 0, -1), (2, 1, 0), (4, 0, 1), (8, -1, 0)):
+            other = (x + dx, y + dy)
+            if self.in_bounds(other) and self.tile_at(other) == TILE_WALL:
+                mask |= bit
+        return {
+            1: "│", 2: "─", 3: "└", 4: "│", 5: "│",
+            6: "┌", 7: "├", 8: "─", 9: "┘", 10: "─",
+            11: "┴", 12: "┐", 13: "┤", 14: "┬", 15: "┼",
+        }.get(mask, "#")
+
+    def tactical_tile_glyph(self, pos: Pos, tile: Optional[str] = None) -> str:
+        tile = tile if tile is not None else self.tile_at(pos)
+        if not self.detailed_map_glyphs:
+            return tile
         if tile == TILE_WALL:
-            return c(" # ", Style.BRIGHT_WHITE, Style.BG_DARK)
+            return self.tactical_wall_glyph(pos)
+        glyphs = {
+            TILE_FLOOR: "·" if (pos[0] * 17 + pos[1] * 31) % 11 == 0 else ".",
+            TILE_DIRT: ",",
+            TILE_GRASS: '"',
+            TILE_MUD: ";",
+            TILE_BRIDGE: "═",
+            TILE_STONE: "◆",
+            TILE_THORNS: "*",
+            TILE_SPRING: "✚",
+            TILE_CRYSTAL: "♦",
+            TILE_ICE: "─",
+            TILE_BARREL: "B",
+            TILE_CRATE: "C",
+            TILE_TREE: TILE_TREE,
+            TILE_WATER: "≈",
+        }
+        return glyphs.get(tile, tile)
+
+    def base_tile(self, tile: str, pos: Pos = (0, 0)) -> str:
+        glyph = self.tactical_tile_glyph(pos, tile)
+        if tile == TILE_FLOOR:
+            return c(f" {glyph} ", Style.BRIGHT_BLACK if self.high_contrast_visuals else Style.TERRAIN_FLOOR)
+        if tile == TILE_DIRT:
+            return c(f" {glyph} ", Style.BRIGHT_YELLOW if self.high_contrast_visuals else Style.TERRAIN_DIRT)
+        if tile == TILE_GRASS:
+            return c(f" {glyph} ", Style.BRIGHT_GREEN if self.high_contrast_visuals else Style.TERRAIN_GRASS)
+        if tile == TILE_MUD:
+            return c(f" {glyph} ", Style.YELLOW if self.high_contrast_visuals else Style.TERRAIN_MUD)
+        if tile == TILE_BRIDGE:
+            return c(f" {glyph} ", Style.BRIGHT_YELLOW if self.high_contrast_visuals else Style.TERRAIN_BRIDGE)
+        if tile == TILE_STONE:
+            return c(f" {glyph} ", Style.BRIGHT_WHITE if self.high_contrast_visuals else Style.TERRAIN_STONE)
+        if tile == TILE_THORNS:
+            return c(f" {glyph} ", Style.BRIGHT_RED if self.high_contrast_visuals else Style.TERRAIN_HAZARD)
+        if tile == TILE_SPRING:
+            return c(f" {glyph} ", Style.TERRAIN_HEAL, Style.BG_DARK)
+        if tile == TILE_CRYSTAL:
+            return c(f" {glyph} ", Style.TERRAIN_MAGIC, Style.BG_DARK)
+        if tile == TILE_ICE:
+            return c(f" {glyph} ", Style.TERRAIN_ICE)
+        if tile == TILE_BARREL:
+            return c(f" {glyph} ", Style.BRIGHT_YELLOW, Style.BG_ATTACK, Style.BOLD)
+        if tile == TILE_CRATE:
+            return c(f" {glyph} ", Style.TERRAIN_WOOD, Style.BG_DARK, Style.BOLD)
+        if tile == TILE_WALL:
+            return c(f" {glyph} ", Style.BRIGHT_WHITE if self.high_contrast_visuals else Style.TERRAIN_WALL, Style.BG_DARK)
         if tile == TILE_TREE:
-            return c(f" {TILE_TREE} ", Style.BRIGHT_GREEN)
+            return c(f" {glyph} ", Style.BRIGHT_GREEN if self.high_contrast_visuals else Style.TERRAIN_TREE)
         if tile == TILE_WATER:
-            return c(" ~ ", Style.BRIGHT_CYAN, Style.BG_DARK)
+            return c(f" {glyph} ", Style.BRIGHT_CYAN if self.high_contrast_visuals else Style.TERRAIN_WATER, Style.BG_DARK)
         return f" {tile} "
 
     def cell(
@@ -2459,9 +2590,24 @@ class Game:
             return self.fx_cell(self.visual_effects[pos])
 
         if unit:
-            fg = self.hero_color_style(unit) if unit.team == "hero" else Style.BRIGHT_RED
+            fg = self.hero_color_style(unit) if unit.team == "hero" else (
+                Style.ENEMY_BOSS if unit.boss else Style.ENEMY_ELITE if unit.elite else Style.BRIGHT_RED
+            )
             glyph = self.hero_map_glyph(unit)
-            text = c(f" {glyph} ", Style.BOLD, fg)
+            if unit.team == "enemy" and (unit.boss or unit.elite):
+                glyph = glyph.upper()
+            status_bg = ""
+            if unit.rooted > 0:
+                status_bg = Style.BG_DANGER
+            elif unit.poison > 0:
+                status_bg = Style.BG_PATH
+            elif unit.vulnerable > 0:
+                status_bg = Style.BG_ATTACK
+            elif unit.guard:
+                status_bg = Style.BG_OVERWATCH
+            if self.objective_mode == "Protect Ally" and unit.team == "hero" and unit.name == self.objective_protect_name:
+                status_bg = Style.BG_OBJECTIVE
+            text = c(f" {glyph} ", Style.BOLD, fg, status_bg)
         else:
             marker = self.objective_marker_at(pos)
             if marker:
@@ -2472,23 +2618,23 @@ class Game:
                     fg, bg = self.zone_style(zone)
                     text = c(f" {self.zone_glyph(zone)} ", fg, bg, Style.BOLD)
                 else:
-                    text = self.base_tile(tile)
+                    text = self.base_tile(tile, pos)
 
         if not unit:
             if pos in enemy_path and tile in PASSABLE:
-                text = c(" ? ", Style.BRIGHT_YELLOW, Style.BG_DANGER)
+                text = c(f" {'?' if not self.detailed_map_glyphs else '›'} ", Style.BRIGHT_YELLOW, Style.BG_DANGER)
             if pos in danger and tile in PASSABLE:
                 text = c(" ! ", Style.BRIGHT_RED, Style.BG_DANGER)
             if pos in reachable and tile in PASSABLE:
-                text = c(" + ", Style.BRIGHT_CYAN, Style.BG_MOVE)
+                text = c(f" {'+' if not self.detailed_map_glyphs else '·'} ", Style.BRIGHT_CYAN, Style.BG_MOVE)
             if pos in path and tile in PASSABLE:
-                text = c(" * ", Style.BRIGHT_GREEN, Style.BG_PATH)
+                text = c(f" {'*' if not self.detailed_map_glyphs else '•'} ", Style.BRIGHT_GREEN, Style.BG_PATH, Style.BOLD)
             if pos in attack:
-                text = c(" x ", Style.BRIGHT_YELLOW, Style.BG_ATTACK)
+                text = c(f" {'x' if not self.detailed_map_glyphs else '×'} ", Style.BRIGHT_YELLOW, Style.BG_ATTACK)
             if pos in skill_r:
-                text = c(" o ", Style.BRIGHT_MAGENTA)
+                text = c(f" {'o' if not self.detailed_map_glyphs else '·'} ", Style.BRIGHT_MAGENTA)
             if pos in aoe:
-                text = c(" O ", Style.BRIGHT_MAGENTA, Style.BG_SKILL)
+                text = c(f" {'O' if not self.detailed_map_glyphs else '◎'} ", Style.BRIGHT_MAGENTA, Style.BG_SKILL, Style.BOLD)
             if pos in overwatch_tiles:
                 text = c(" W ", Style.BRIGHT_CYAN, Style.BG_OVERWATCH)
 
@@ -2506,23 +2652,9 @@ class Game:
             text = c(f"<{glyph}>", Style.BLACK, Style.BG_SKILL, Style.BOLD)
 
         if pos == self.cursor:
-            glyph = (self.hero_map_glyph(unit) if unit.team == "hero" else unit.glyph) if unit else {
-                TILE_FLOOR: ".",
-                TILE_DIRT: ",",
-                TILE_GRASS: '"',
-                TILE_MUD: ":",
-                TILE_BRIDGE: "=",
-                TILE_STONE: "^",
-                TILE_THORNS: "*",
-                TILE_SPRING: "+",
-                TILE_CRYSTAL: "m",
-                TILE_ICE: "_",
-                TILE_BARREL: "B",
-                TILE_CRATE: "X" if self.objective_marker_at(pos) == "object" else "C",
-                TILE_WALL: "#",
-                TILE_TREE: TILE_TREE,
-                TILE_WATER: "~",
-            }.get(tile, tile)
+            glyph = (self.hero_map_glyph(unit) if unit.team == "hero" else unit.glyph) if unit else self.tactical_tile_glyph(pos, tile)
+            if not unit and self.objective_marker_at(pos) == "object":
+                glyph = "X" if not self.detailed_map_glyphs else "▣"
 
             if self.state_uses_map_cursor():
                 text = c(f"[{glyph}]", Style.BLACK, Style.BG_SELECT, Style.BOLD)
@@ -2814,19 +2946,22 @@ class Game:
         return "Use final AP carefully; Guard is often safe."
 
     def combat_legend_line(self) -> str:
+        move, route, enemy_route = (("+", "*", "?") if not self.detailed_map_glyphs else ("·", "•", "›"))
+        attack, skill_range, area = (("x", "o", "O") if not self.detailed_map_glyphs else ("×", "·", "◎"))
         if self.state == "target_move":
-            return "+ move | * path | ! danger | ? enemy path"
+            return f"{move} move | {route} path | ! danger | {enemy_route} enemy path"
         if self.state == "target_attack":
-            return "x weapon reach | <unit> affected | B barrels"
+            return f"{attack} weapon reach | <unit> affected | B barrels"
         if self.state == "target_skill":
-            return "o skill range | O area | <unit> hit"
+            return f"{skill_range} skill range | {area} area | <unit> hit"
         if self.state == "target_item":
-            return "O item area | <unit> hit"
+            return f"{area} item area | <unit> hit"
         if self.state == "target_overwatch":
             return "W watched tiles | !unit! covered"
         if self.state == "enemy_view":
             return "Enemy View: sort/read intent/counterplay"
-        return "+ move | x attack | O area | W overwatch | E/H/X optional objectives | F/I/S/E/P/L/D zones"
+        objectives = "E/H/X" if not self.detailed_map_glyphs else "⇥/◎/▣"
+        return f"{move} move | {attack} attack | {area} area | W overwatch | objectives: {objectives} | zones use effect glyphs"
 
     def hero_roster_chip(self, hero: Unit) -> str:
         if not hero.active:
@@ -2868,7 +3003,7 @@ class Game:
             "Floodgate Citadel": "Citadel waterworks with flood channels, bridges, mud, and control rooms.",
             "Frostwall Redoubt": "Frozen redoubt with inner walls, ice lanes, and heavy defensive cover.",
         }
-        return flavor.get(name, "Prototype arena.")
+        return flavor.get(name, "Tactical arena.")
 
     def map_grid_for_name(self, name: str) -> List[List[str]]:
         for map_name, grid, _positions in self.maps:
@@ -4087,6 +4222,9 @@ class Game:
                 lines.append(self.line_box(self.sub_line(label, self.skill_index == i, enabled)))
             lines.append(self.line_box(""))
             lines.extend(self.line_boxes(self.skill_shape_label(skill), limit=2))
+            special = self.skill_special_properties_label(skill)
+            if special:
+                lines.extend(self.line_boxes(special, limit=3))
             lines.extend(self.line_boxes(skill.description, limit=5))
 
         elif self.state == "target_skill":
@@ -4097,6 +4235,9 @@ class Game:
             rider = self.status_rider_label(skill)
             rank = self.skill_rank_label(hero, skill.name)
             lines.append(self.line_box(f"{rank} | Cost {skill.mp_cost}MP | {self.skill_power_label(skill)}{rider} | R{skill.range_max} | {shape}"))
+            special = self.skill_special_properties_label(skill)
+            if special:
+                lines.extend(self.line_boxes(special, limit=2))
             lines.extend(self.line_boxes(skill.description, limit=4))
             verb = "Targets" if skill.target_team == "ally" else "Hits"
             lines.append(self.line_box(f"{verb}: " + (", ".join(affected) if affected else "none")))
@@ -4245,10 +4386,10 @@ class Game:
         else:
             lines.append(self.section_header("Controls", Style.BRIGHT_WHITE))
             if self.state in ("target_move", "target_attack", "target_skill", "target_item", "target_overwatch"):
-                lines.append(self.line_box("WASD/arrows: move cursor"))
+                lines.append(self.line_box("WASD/arrows/numpad: move cursor"))
                 lines.append(self.line_box("Enter/Space: confirm target"))
             else:
-                lines.append(self.line_box("WASD/arrows: navigate menu"))
+                lines.append(self.line_box("WASD/arrows/numpad: navigate menu"))
                 lines.append(self.line_box("Enter/Space: confirm"))
             lines.append(self.line_box("X/Esc/C: back    H: help"))
         lines.append(c("└" + "─" * inner + "┘", Style.BRIGHT_BLACK))
@@ -4273,13 +4414,13 @@ class Game:
         if self.state == "combat_log":
             return "Combat Status: Tab/V event log | X/Esc/C/L/Z/Enter close"
         if self.state == "inspect":
-            return "Inspect: WASD/Arrows move cursor   X/Esc/C returns to command menu"
+            return "Inspect: WASD/Arrows/Numpad move cursor   X/Esc/C returns to command menu"
         if self.state == "enemy_view":
             return f"Enemy View: Up/Down enemy   S sort {self.current_enemy_view_sort()}   Z/Enter focus   X/Esc/C command"
         if self.state == "skill_group_menu":
             return "Skills: Cast Skill / Overwatch / Guard   Z/Enter: select   X/Esc/C: command menu"
         if self.state == "skill_menu":
-            return "WASD/Arrows: choose skill   Z/Enter: select skill   X/Esc/C: Skills menu"
+            return "WASD/Arrows/Numpad: choose skill   Z/Enter: select skill   X/Esc/C: Skills menu"
         if self.state == "overwatch_menu":
             return "Choose weapon/area skill for Overwatch   Z/Enter: select   X/Esc/C: Skills menu"
         if self.state == "support_target_menu":
@@ -4300,7 +4441,7 @@ class Game:
             return "Hero menu: select manual heroes; use Control to toggle companions   X/Esc/C: Party menu"
         if self.state == "map_menu":
             return "Choose arena   Z/Enter: load/reset battle   X/Esc/C: command menu"
-        return "WASD/Arrows: move cursor   ? enemy path   ! likely enemy threat   Z/Enter: confirm   X/Esc/C: cancel"
+        return "WASD/Arrows/Numpad: move cursor   ? enemy path   ! likely enemy threat   Z/Enter: confirm   X/Esc/C: cancel"
 
     def use_compact_layout(self, terminal_height: int, side_by_side: bool) -> bool:
         if FORCE_ROOMY:
@@ -4388,9 +4529,9 @@ class Game:
                 overwatch_hit_positions |= {e.pos for e in self.enemies_alive() if e.pos in prospective}
 
         map_lines: List[str] = []
-        title = "ASCII Tactical Combat Prototype v113"
+        title = "Elsewhere: Tactical Combat"
         if compact:
-            title = "Combat Prototype v113"
+            title = "Elsewhere: Combat"
         map_lines.append(c(title, Style.BOLD, Style.BRIGHT_WHITE))
 
         turn_color = Style.BRIGHT_CYAN if self.turn == "hero" else Style.BRIGHT_RED
@@ -4552,8 +4693,8 @@ class Game:
         for center in self.skill_range(hero.pos, skill):
             targets = self.skill_targets(hero, center, skill)
             score = (
-                sum(min(skill.damage, e.hp) for e in targets)
-                + 20 * sum(1 for e in targets if e.hp <= skill.damage)
+                sum(min(self.skill_damage_against(e, skill), e.hp) for e in targets)
+                + 20 * sum(1 for e in targets if e.hp <= self.skill_damage_against(e, skill))
                 + 5 * len(targets)
             )
             if score > best_score:
@@ -5095,12 +5236,14 @@ class Game:
 
         parts = []
         combo_triggers = 0
+        total_damage = 0
         for e in affected:
             combo_bonus = self.skill_combo_damage_bonus(hero, e, skill)
             triggered = combo_bonus > 0 or (self.skill_combo_triggered(hero, e, skill) and (skill.combo_ap_gain or skill.combo_mp_gain))
             if triggered:
                 combo_triggers += 1
-            dmg = e.take_damage(skill.damage + combo_bonus)
+            dmg = e.take_damage(self.skill_damage_against(e, skill, combo_bonus))
+            total_damage += dmg
             self.apply_skill_status(e, skill)
             self.combat_stats["player_damage"] += dmg
             self.record_actor_damage(hero, dmg)
@@ -5109,10 +5252,17 @@ class Game:
                 part += " combo"
             if skill.status:
                 part += f" +{skill.status}"
+            displaced = self.apply_skill_displacement(hero, e, skill)
+            if displaced:
+                part += f" {'pushed' if skill.displacement > 0 else 'pulled'} {displaced}"
             if not e.alive:
                 part += " KO"
                 self.award_xp(hero, e)
             parts.append(part)
+
+        drained = self.apply_skill_life_steal(hero, skill, total_damage)
+        if drained:
+            parts.append(f"{hero.name} +{drained} HP drained")
 
         combo_result = self.apply_skill_combo_rewards(hero, skill, combo_triggers)
         if combo_result:
@@ -6203,7 +6353,10 @@ class Game:
                 if not targets:
                     continue
 
-                projected_damages = [skill.damage + self.skill_combo_damage_bonus(follower, e, skill) for e in targets]
+                projected_damages = [
+                    self.skill_damage_against(e, skill, self.skill_combo_damage_bonus(follower, e, skill))
+                    for e in targets
+                ]
                 combo_hits = sum(1 for e in targets if self.skill_combo_triggered(follower, e, skill))
                 kills = sum(1 for e, dmg_value in zip(targets, projected_damages) if e.hp <= dmg_value)
                 total_damage = sum(min(dmg_value, e.hp) for e, dmg_value in zip(targets, projected_damages))
@@ -6386,6 +6539,7 @@ class Game:
         self.flash_effect(self.skill_affected_tiles(follower.pos, center, skill), self.skill_effect_kind(skill), frames=2 if skill.aoe_radius > 0 or skill.shape in ("burst", "cone", "strip") else 1)
         parts = []
         combo_triggers = 0
+        total_damage = 0
         for enemy in list(targets):
             if not enemy.alive:
                 continue
@@ -6393,7 +6547,8 @@ class Game:
             triggered = combo_bonus > 0 or (self.skill_combo_triggered(follower, enemy, skill) and (skill.combo_ap_gain or skill.combo_mp_gain))
             if triggered:
                 combo_triggers += 1
-            dmg = enemy.take_damage(skill.damage + combo_bonus)
+            dmg = enemy.take_damage(self.skill_damage_against(enemy, skill, combo_bonus))
+            total_damage += dmg
             self.apply_skill_status(enemy, skill)
             self.combat_stats["follower_damage"] += dmg
             self.record_actor_damage(follower, dmg)
@@ -6402,10 +6557,17 @@ class Game:
                 part += " combo"
             if skill.status:
                 part += f" +{skill.status}"
+            displaced = self.apply_skill_displacement(follower, enemy, skill)
+            if displaced:
+                part += f" {'pushed' if skill.displacement > 0 else 'pulled'} {displaced}"
             if not enemy.alive:
                 part += " KO"
                 self.award_xp(follower, enemy)
             parts.append(part)
+
+        drained = self.apply_skill_life_steal(follower, skill, total_damage)
+        if drained:
+            parts.append(f"{follower.name} +{drained} HP drained")
 
         combo_result = self.apply_skill_combo_rewards(follower, skill, combo_triggers)
         if combo_result:
@@ -7375,15 +7537,14 @@ class Game:
                 self.item_target_index = (self.item_target_index + delta) % len(targets)
 
     def handle_direction(self, key: str) -> None:
-        dx = dy = 0
-        if key in ("UP", "w"):
-            dy = -1
-        elif key in ("DOWN", "s"):
-            dy = 1
-        elif key in ("LEFT", "a"):
-            dx = -1
-        elif key in ("RIGHT", "d"):
-            dx = 1
+        dx, dy = {
+            "UP": (0, -1), "w": (0, -1), "NUM8": (0, -1),
+            "DOWN": (0, 1), "s": (0, 1), "NUM2": (0, 1),
+            "LEFT": (-1, 0), "a": (-1, 0), "NUM4": (-1, 0),
+            "RIGHT": (1, 0), "d": (1, 0), "NUM6": (1, 0),
+            "NUM7": (-1, -1), "NUM9": (1, -1),
+            "NUM1": (-1, 1), "NUM3": (1, 1),
+        }.get(key, (0, 0))
 
         if self.state_uses_map_cursor():
             self.move_cursor(dx, dy)
@@ -7430,7 +7591,10 @@ class Game:
                 self.push("Tab cycles heroes only from command menu.")
             return
 
-        if key in ("UP", "DOWN", "LEFT", "RIGHT", "w", "a", "s", "d"):
+        if key in (
+            "UP", "DOWN", "LEFT", "RIGHT", "w", "a", "s", "d",
+            "NUM1", "NUM2", "NUM3", "NUM4", "NUM6", "NUM7", "NUM8", "NUM9",
+        ):
             self.handle_direction(key)
             return
 
@@ -7465,7 +7629,7 @@ class Game:
             ]),
             ("Battle Controls", [
                 "Command menu: Up/Down choose, Z/Enter confirm.",
-                "Targeting: arrows/WASD move cursor, Z/Enter confirm, X/Esc/C cancel.",
+                "Targeting: arrows/WASD/numpad move cursor, Z/Enter confirm, X/Esc/C cancel.",
                 "L opens the Combat Log.",
                 "Party opens hero/tactic/control options during battle.",
             ]),
@@ -7482,10 +7646,10 @@ class Game:
                 "Mission presets bundle map, enemies, objective, and flavor for testing.",
             ]),
             ("Troubleshooting", [
-                "python combat_prototype_v113.py --no-color",
-                "python combat_prototype_v113.py --ascii",
-                "python combat_prototype_v113.py --compact",
-                "python combat_prototype_v113.py --roomy",
+                "python -m ascii_battle_prototype.combat.main --no-color",
+                "python -m ascii_battle_prototype.combat.main --ascii",
+                "python -m ascii_battle_prototype.combat.main --compact",
+                "python -m ascii_battle_prototype.combat.main --roomy",
             ]),
         ]
         index = 0
@@ -7734,7 +7898,7 @@ class Game:
         title = "VICTORY" if is_victory else "DEFEAT"
         color = Style.BRIGHT_GREEN if is_victory else Style.BRIGHT_RED
         rows: List[str] = []
-        rows.append(c("ASCII Tactical Combat Prototype v113", Style.BOLD, Style.BRIGHT_WHITE))
+        rows.append(c("Elsewhere: Tactical Combat", Style.BOLD, Style.BRIGHT_WHITE))
         rows.append(c(title, Style.BOLD, color) + " / " + c(section_title, Style.BOLD, Style.BRIGHT_CYAN))
         rows.append("-" * width)
         nav = "  ".join(("[" + name + "]") if i == self.result_section_index else name for i, (name, _lines) in enumerate(sections))
@@ -7965,11 +8129,11 @@ class Game:
 
     def objective_marker_cell(self, marker: str) -> str:
         if marker == "exit":
-            return c(" E ", Style.BLACK, Style.BG_MOVE, Style.BOLD)
+            return c(f" {'E' if not self.detailed_map_glyphs else '⇥'} ", Style.BLACK, Style.BG_MOVE, Style.BOLD)
         if marker == "hold":
-            return c(" H ", Style.BLACK, Style.BG_OVERWATCH, Style.BOLD)
+            return c(f" {'H' if not self.detailed_map_glyphs else '◎'} ", Style.BLACK, Style.BG_OVERWATCH, Style.BOLD)
         if marker == "object":
-            return c(" X ", Style.BLACK, Style.BG_ATTACK, Style.BOLD)
+            return c(f" {'X' if not self.detailed_map_glyphs else '▣'} ", Style.BLACK, Style.BG_ATTACK, Style.BOLD)
         return ""
 
     def game_over(self) -> Optional[str]:
@@ -9522,7 +9686,7 @@ class Game:
         target = self.text_entry_target or ""
         label = "Mission Name" if target == "mission" else "Companion Name"
         clear_screen()
-        print(c("ASCII Tactical Combat Prototype v113", Style.BOLD, Style.BRIGHT_WHITE))
+        print(c("Elsewhere: Tactical Combat", Style.BOLD, Style.BRIGHT_WHITE))
         print(c("TYPE CUSTOM NAME", Style.BOLD, Style.BRIGHT_YELLOW))
         print("-" * width)
         print(label)
@@ -10217,7 +10381,7 @@ class Game:
             ("bestiary", "Bestiary", "Inspect enemies and counterplay."),
             ("tutorial", "Tutorials", "Practice basics or advanced tactics."),
             ("help", "Help", "Show controls and feature notes."),
-            ("quit", "Quit", "Exit the prototype."),
+            ("quit", "Quit", "Exit tactical combat."),
         ]
 
     def selected_map_name(self) -> str:
@@ -10286,7 +10450,7 @@ class Game:
                 self.clear_custom_encounter()
 
     def render_home_menu(self, width: int) -> None:
-        print(c("ASCII Tactical Combat Prototype v113", Style.BOLD, Style.BRIGHT_WHITE))
+        print(c("Elsewhere: Tactical Combat", Style.BOLD, Style.BRIGHT_WHITE))
         print(c("HOME", Style.BOLD, Style.BRIGHT_YELLOW))
         print("-" * width)
         for line in self.setup_summary_lines():
@@ -10485,7 +10649,7 @@ class Game:
             show_cursor()
             clear_screen(clear_scrollback=True)
             exit_alt_screen()
-            print("Exited combat prototype.")
+            print("Exited tactical combat.")
 
 
 if __name__ == "__main__":
@@ -10494,4 +10658,4 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         show_cursor()
         clear_screen()
-        print("Exited combat prototype.")
+        print("Exited tactical combat.")
