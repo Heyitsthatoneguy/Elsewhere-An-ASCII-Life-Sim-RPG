@@ -243,12 +243,38 @@ class ActorNavigationMixin:
             return None
         return x, y
 
+    def farm_animal_player_source_position(self) -> Optional[Position]:
+        """Return the player in the same canonical farm coordinates as livestock."""
+        if self.on_farm():
+            return int(self.state.player_x), int(self.state.player_y)
+        if (
+            hasattr(self, "in_seamless_farm_district")
+            and self.in_seamless_farm_district()
+            and hasattr(self, "home_world_farm_source_position")
+        ):
+            source = self.home_world_farm_source_position(
+                int(self.state.player_x), int(self.state.player_y),
+            )
+            if source is not None:
+                return int(source[0]), int(source[1])
+        return None
+
     def farm_animal_at(self, x: int, y: int) -> Optional[Dict[str, object]]:
-        if not self.on_farm():
+        seamless_farm = bool(
+            hasattr(self, "in_seamless_farm_district")
+            and self.in_seamless_farm_district(x, y)
+        )
+        if not (self.on_farm() or seamless_farm):
             return None
+        source = (
+            self.home_world_farm_source_position(x, y)
+            if seamless_farm and hasattr(self, "home_world_farm_source_position")
+            else None
+        )
+        lookup_x, lookup_y = source or (int(x), int(y))
         for animal in self.state.farm_animals:
             position = self.farm_animal_actor_position(animal)
-            if position == (int(x), int(y)):
+            if position == (lookup_x, lookup_y):
                 return animal
         return None
 
@@ -330,7 +356,7 @@ class ActorNavigationMixin:
     def farm_animal_tile_available(self, animal: Dict[str, object], x: int, y: int) -> bool:
         if not self.farm_animal_static_tile_passable(x, y):
             return False
-        if (x, y) == (int(self.state.player_x), int(self.state.player_y)) and self.on_farm():
+        if (x, y) == self.farm_animal_player_source_position():
             return False
         return (x, y) not in self.farm_animal_occupied_positions(exclude=animal)
 
@@ -379,8 +405,12 @@ class ActorNavigationMixin:
         if not candidates:
             self.set_farm_animal_inside(animal, "waiting for a clear doorway")
             return False
-        player = (int(self.state.player_x), int(self.state.player_y))
-        position = max(candidates, key=lambda candidate: manhattan_distance(candidate, player))
+        player = self.farm_animal_player_source_position()
+        position = (
+            max(candidates, key=lambda candidate: manhattan_distance(candidate, player))
+            if player is not None
+            else candidates[0]
+        )
         animal["outside"] = True
         animal["x"], animal["y"] = position
         animal["activity"] = "stepping outside"
@@ -444,7 +474,10 @@ class ActorNavigationMixin:
         if int(animal.get("affection", 0)) >= 70 and str(animal.get("trait", "Gentle")) != "Skittish":
             animal["activity"] = "greeting you affectionately"
             return False
-        player = (int(self.state.player_x), int(self.state.player_y))
+        player = self.farm_animal_player_source_position()
+        if player is None:
+            animal["activity"] = "watching the pasture"
+            return False
         preferred = (position[0] - player[0], position[1] - player[1])
         serial = int(getattr(self, "_farm_animal_step_serial", 0)) + 1
         self._farm_animal_step_serial = serial
@@ -491,8 +524,11 @@ class ActorNavigationMixin:
             return
 
         trait = str(animal.get("trait", "Gentle"))
-        player = (int(self.state.player_x), int(self.state.player_y))
-        if self.on_farm() and trait == "Skittish" and manhattan_distance(position, player) <= 2:
+        player = self.farm_animal_player_source_position()
+        on_visible_farm = player is not None
+        if player is None:
+            player = position
+        if on_visible_farm and trait == "Skittish" and manhattan_distance(position, player) <= 2:
             self.startle_farm_animal(animal)
             return
 
@@ -513,12 +549,12 @@ class ActorNavigationMixin:
 
         preferred: Optional[Position] = None
         following_player = False
-        if int(animal.get("affection", 0)) >= 70 and self.on_farm() and manhattan_distance(position, player) <= 6:
+        if int(animal.get("affection", 0)) >= 70 and on_visible_farm and manhattan_distance(position, player) <= 6:
             preferred = (player[0] - position[0], player[1] - position[1])
             following_player = True
-        elif trait == "Curious" and self.on_farm():
+        elif trait == "Curious" and on_visible_farm:
             preferred = (player[0] - position[0], player[1] - position[1])
-        elif trait == "Skittish" and self.on_farm():
+        elif trait == "Skittish" and on_visible_farm:
             preferred = (position[0] - player[0], position[1] - player[1])
         else:
             preferred = (ax - position[0], ay - position[1]) if rng.random() < 0.18 else None
@@ -701,6 +737,14 @@ class ActorNavigationMixin:
 
     def travel_follower_can_enter_location(self, follower_id: str, location: Optional[str] = None) -> bool:
         location = str(location or self.state.location)
+        if location == "Wilderness" and hasattr(self, "home_world_source_at"):
+            home_kind, _source_x, _source_y = self.home_world_source_at(
+                int(self.state.player_x), int(self.state.player_y),
+            )
+            if home_kind == "farm":
+                location = "Farm"
+            elif home_kind == "town":
+                location = "Town"
         return location in self.travel_follower_allowed_locations(follower_id)
 
     def travel_follower_combat_eligible(self, follower_id: str) -> bool:
@@ -1259,6 +1303,14 @@ class ActorNavigationMixin:
 
     def travel_follower_location_theme(self, location: Optional[str] = None) -> Tuple[str, str, str]:
         location = str(location or self.state.location)
+        if location == "Wilderness" and hasattr(self, "home_world_source_at"):
+            home_kind, _source_x, _source_y = self.home_world_source_at(
+                int(self.state.player_x), int(self.state.player_y),
+            )
+            if home_kind == "farm":
+                location = "Farm"
+            elif home_kind == "town":
+                location = "Town"
         if location == "Farm":
             return "Farm", "the farm", "Set out across the home fields together."
         if location == "HouseInterior":

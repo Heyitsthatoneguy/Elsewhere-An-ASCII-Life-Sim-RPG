@@ -518,6 +518,8 @@ class ProceduralTownRuntimeMixin:
             if chunk_y is None
             else chunk_y
         )
+        if hasattr(self, "home_world_chunk_is_authored") and self.home_world_chunk_is_authored(cx, cy):
+            return False
         key = settlement_chunk_key(cx, cy)
         existing = (getattr(self.state, "wilderness_settlements", {}) or {}).get(key)
         if isinstance(existing, dict) and str(existing.get("source", "")) == "procedural_wilderness":
@@ -4391,6 +4393,12 @@ class ProceduralTownRuntimeMixin:
                 ordered_residents[priority_rotation:]
                 + ordered_residents[:priority_rotation]
             )
+        # A large founded town can contain dozens of residents.  Running a
+        # fresh breadth-first search for every one of them on every player
+        # step made developed settlements progressively slower.  Rotation
+        # above keeps this bounded budget fair across successive updates.
+        path_search_budget = 6 if interior else 10
+        path_searches = 0
         for resident in ordered_residents:
             x = int(resident.get("runtime_x", -1))
             y = int(resident.get("runtime_y", -1))
@@ -4452,6 +4460,10 @@ class ProceduralTownRuntimeMixin:
                     None,
                 )
             else:
+                if path_searches >= path_search_budget:
+                    occupied.add((x, y))
+                    continue
+                path_searches += 1
                 step = self.procedural_town_resident_path_step(
                     (x, y), target, occupied, plan, interior
                 )
@@ -4511,7 +4523,6 @@ class ProceduralTownRuntimeMixin:
         )
         if not population:
             return {}
-        lookup: Dict[Position, Dict[str, object]] = {}
         self.ensure_procedural_town_resident_runtime()
         if self.on_procedural_town_interior():
             building = self.current_procedural_town_building()
@@ -4522,6 +4533,26 @@ class ProceduralTownRuntimeMixin:
         else:
             visible_location = "outdoor"
             current_floor = 0
+            building = None
+        cache_signature = (
+            int(plan["chunk_x"]),
+            int(plan["chunk_y"]),
+            visible_location,
+            int(current_floor),
+            int(getattr(self, "_procedural_resident_move_tick", 0)),
+            getattr(self, "_procedural_resident_runtime_signature", None),
+            len(population.get("residents", {})),
+            str(getattr(self.state, "spouse_npc_id", "")),
+            bool(getattr(self.state, "spouse_moved_to_farm", False)),
+        )
+        if (
+            getattr(self, "_procedural_resident_position_cache_signature", None)
+            == cache_signature
+        ):
+            cached = getattr(self, "_procedural_resident_position_cache", None)
+            if isinstance(cached, dict):
+                return cached
+        lookup: Dict[Position, Dict[str, object]] = {}
         deceased_ids = set(
             getattr(self.state, "deceased_spouse_npc_ids", []) or []
         )
@@ -4629,6 +4660,8 @@ class ProceduralTownRuntimeMixin:
                 )
                 if position[0] >= 0 and position[1] >= 0 and position not in lookup:
                     lookup[position] = caravan
+        self._procedural_resident_position_cache_signature = cache_signature
+        self._procedural_resident_position_cache = lookup
         return lookup
 
     def procedural_town_resident_at(
@@ -4695,6 +4728,12 @@ class ProceduralTownRuntimeMixin:
             else "",
             population,
         )
+        spouse_id = str(resident.get("npc_spouse_id", ""))
+        courtship_id = str(resident.get("courtship_partner_id", ""))
+        family_partner = self.procedural_town_resident_name(
+            spouse_id or courtship_id,
+            population,
+        )
         job_profile = sanitize_procedural_job_profile(
             resident.get("job_profile", {}),
             resident.get("role", "Settler"),
@@ -4720,6 +4759,14 @@ class ProceduralTownRuntimeMixin:
                 else f"Life stage: {resident.get('age_group', 'Adult')}"
             ),
             f"Household role: {resident.get('household_role', 'Resident')}",
+            f"Family status: {resident.get('marital_status', 'Single')}",
+            (
+                f"Spouse: {family_partner}"
+                if spouse_id
+                else f"Courting: {family_partner} (separate homes until marriage)"
+                if courtship_id
+                else "Partner: none"
+            ),
             f"Personality: {resident.get('personality', 'Practical')}",
             f"Community outlook: {resident.get('social_opinion', 'practical about community problems')}",
             f"Current activity: {resident.get('runtime_activity', 'following today’s routine')}",
@@ -5333,6 +5380,12 @@ class ProceduralTownRuntimeMixin:
                     enabled=True,
                     hint=family_reason,
                 ),
+                MenuItem(
+                    label="Household dashboard",
+                    value="household_dashboard",
+                    enabled=True,
+                    hint=self.family_weekly_priority() if hasattr(self, "family_weekly_priority") else self.family_bond_rank(),
+                ),
             ]
             if self.state.pregnancy_active:
                 items.append(
@@ -5416,6 +5469,10 @@ class ProceduralTownRuntimeMixin:
                 if self.family_planning_menu(resident) == "changed":
                     return
                 continue
+            if choice.value == "household_dashboard":
+                if hasattr(self, "family_world_dashboard_menu") and self.family_world_dashboard_menu() == "changed":
+                    return
+                continue
             if choice.value == "pregnancy_checkup":
                 if self.complete_pregnancy_checkup(resident):
                     return
@@ -5427,6 +5484,10 @@ class ProceduralTownRuntimeMixin:
                     LEFT_PANEL_WIDTH,
                     LEFT_PANEL_HEIGHT,
                 )
+                continue
+            if choice.value == "household_dashboard":
+                if hasattr(self, "family_world_dashboard_menu") and self.family_world_dashboard_menu() == "changed":
+                    return
                 continue
             if choice.value == "family_meal":
                 if self.family_meal_menu() == "changed":
@@ -5546,12 +5607,15 @@ class ProceduralTownRuntimeMixin:
                     return
                 continue
             if choice.value == "wedding_plans":
-                self.vertical_panel_view(
-                    "Wedding Plans",
-                    self.marriage_status_lines(),
-                    LEFT_PANEL_WIDTH,
-                    LEFT_PANEL_HEIGHT,
-                )
+                if hasattr(self, "family_wedding_planning_menu"):
+                    self.family_wedding_planning_menu()
+                else:
+                    self.vertical_panel_view(
+                        "Wedding Plans",
+                        self.marriage_status_lines(),
+                        LEFT_PANEL_WIDTH,
+                        LEFT_PANEL_HEIGHT,
+                    )
                 continue
             if choice.value == "move_spouse":
                 if self.invite_spouse_to_farm(resident):
@@ -5749,7 +5813,13 @@ class ProceduralTownRuntimeMixin:
             items.extend(
                 [
                     MenuItem(
-                        label="Move to farm",
+                        label="Household dashboard",
+                        value="household_dashboard",
+                        enabled=True,
+                        hint=self.family_weekly_priority() if hasattr(self, "family_weekly_priority") else self.family_bond_rank(),
+                    ),
+                    MenuItem(
+                        label="Move in together",
                         value="move_spouse",
                         enabled=move_ok,
                         hint=move_reason,

@@ -10,6 +10,7 @@ from ascii_farmstead_custom_content import (
     CUSTOM_CONTENT_EXPORT_PATH,
     CUSTOM_CONTENT_PATH,
     ELEMENTS,
+    WORLD_ABILITY_ELEMENTS,
     ability_summary,
     class_summary,
     empty_custom_content,
@@ -236,12 +237,34 @@ class CustomContentMenuMixin:
         )
         if mp_cost is None:
             return None
+        world_element = self.custom_choice_menu(
+            "World Affinity",
+            WORLD_ABILITY_ELEMENTS,
+            str(current.get("world_element", "")),
+            labels={"": "Automatic / combat only"},
+            hints={
+                "": "Infer safe world behavior from the ability name or elemental zone when possible.",
+                "Fire": "Ignite wilderness vegetation and melt temporary ice.",
+                "Water": "Extinguish fires, soak soil, and water crops.",
+                "Frost": "Freeze water into temporary ice bridges.",
+                "Earth": "Raise stepping stones, till soil, and clear loose obstacles.",
+                "Storm": "Charge open ground and scatter brush.",
+                "Wind": "Disperse weeds, wet ground, and weak fire.",
+                "Nature": "Restore scorched ground and encourage crop growth.",
+                "Poison": "Wither weeds and invasive vegetation.",
+                "Light": "Purify damaged ground and nurture crops.",
+                "Shadow": "Veil exposed terrain temporarily.",
+            },
+        )
+        if world_element is None:
+            return None
 
         record: Dict[str, object] = {
             "name": name,
             "description": description,
             "effect": effect,
             "mp_cost": mp_cost,
+            "world_element": world_element,
         }
         if effect == "heal":
             power = self.custom_number_menu(
@@ -2224,6 +2247,7 @@ class CustomContentMenuMixin:
             "- Drawn patterns may follow the target or caster and may rotate toward the aiming cursor.",
             "- Attacks can pierce armor, push or pull enemies, drain HP, and trigger conditional combo rewards.",
             "- Optional poison, root, vulnerable, and persistent elemental zones are supported.",
+            "- A world affinity lets the ability ignite, freeze, soak, grow, clear, bridge, or purify terrain outside combat.",
             "- Long builder lists scroll automatically; W/S moves by row and A/D pages.",
             "- Values are bounded to combinations the tactical engine can resolve safely.",
             "- The balance estimate includes drawn coverage and advanced attack properties but does not forbid them.",

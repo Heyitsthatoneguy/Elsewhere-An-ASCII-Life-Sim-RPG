@@ -127,6 +127,8 @@ class SaveLoadMixin:
             year = int(state.get("year", 1))
             money = state.get("money", "?")
             player_name = GameState.clean_player_name(state.get("player_name", "Farmer"))
+            if bool(state.get("player_run_ended", False)):
+                return f"MEMORIAL | {player_name} | {format_date(month, day, year)}"
             return f"{player_name} | {format_date(month, day, year)} | ${money}"
         except Exception:
             return "unreadable"
@@ -347,6 +349,8 @@ class SaveLoadMixin:
     def save(self, quiet: bool = False, path: Optional[Path] = None):
         """Save the game, but never crash gameplay if saving fails."""
         target_path = path or SAVE_PATH
+        if hasattr(self, "sync_seamless_farm_to_base_map"):
+            self.sync_seamless_farm_to_base_map()
         data = {
             "save_schema_version": SAVE_SCHEMA_VERSION,
             "game_version": GAME_VERSION,
@@ -564,16 +568,23 @@ class SaveLoadMixin:
             if hasattr(self, "ensure_wilderness_dungeons"):
                 self.ensure_wilderness_dungeons()
             self.ensure_wilderness_animals()
+            if hasattr(self, "ensure_seamless_home_world"):
+                self.ensure_seamless_home_world()
             self.normalize_map_transitions()
+            if hasattr(self, "refresh_seamless_farm_layer"):
+                self.refresh_seamless_farm_layer()
             try:
                 map_width = max(3, int(self.active_map_width()))
                 map_height = max(3, int(self.active_map_height()))
                 self.state.player_x = max(1, min(map_width - 2, int(self.state.player_x)))
                 self.state.player_y = max(1, min(map_height - 2, int(self.state.player_y)))
             except (AttributeError, TypeError, ValueError):
-                self.state.location = "Farm"
-                self.state.player_x = 8
-                self.state.player_y = 9
+                if hasattr(self, "return_to_seamless_farm"):
+                    self.return_to_seamless_farm(8, 9, facing="DOWN")
+                else:
+                    self.state.location = "Farm"
+                    self.state.player_x = 8
+                    self.state.player_y = 9
 
             loaded_crops = data["crops"]
             if not isinstance(loaded_crops, dict):

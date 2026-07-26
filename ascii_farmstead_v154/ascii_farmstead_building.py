@@ -48,6 +48,11 @@ class BuildingMixin:
             return True
         if any(str(animal.get("building_key", "")) == key for animal in self.state.farm_animals):
             return True
+        if (
+            hasattr(self, "placed_container_has_contents")
+            and self.placed_container_has_contents(key, obj_name)
+        ):
+            return True
         return False
 
     def object_store_block_reason(self, key: str, obj_name: str) -> str:
@@ -63,6 +68,10 @@ class BuildingMixin:
             return "clear and harvest the Fish Pond first, or move it instead"
         if any(str(animal.get("building_key", "")) == key for animal in self.state.farm_animals):
             return "this building houses animals; move it instead"
+        if hasattr(self, "placed_container_store_block_reason"):
+            reason = self.placed_container_store_block_reason(key, obj_name)
+            if reason:
+                return reason
         return ""
 
     def clear_placed_object_state(self, key: str, obj_name: str):
@@ -74,6 +83,8 @@ class BuildingMixin:
         self.state.fish_ponds.pop(key, None)
         self.state.farm_building_harvest_days.pop(key, None)
         self.state.farm_building_boosts.pop(key, None)
+        if hasattr(self, "clear_placed_container_state"):
+            self.clear_placed_container_state(key, obj_name)
 
     def rekey_placed_object_state(self, old_key: str, new_key: str):
         """Transfer every known object-attached record to a new anchor key."""
@@ -92,6 +103,9 @@ class BuildingMixin:
         for animal in self.state.farm_animals:
             if str(animal.get("building_key", "")) == old_key:
                 animal["building_key"] = new_key
+        if hasattr(self, "rekey_placed_container_state"):
+            obj_name = str(self.state.placed_objects.get(new_key, "") or "")
+            self.rekey_placed_container_state(old_key, new_key, obj_name)
 
     def place_inventory_object_at(self, obj_name: str, x: int, y: int, autosave: bool = True) -> bool:
         """Place one inventory object while keeping the item selected for repeats."""

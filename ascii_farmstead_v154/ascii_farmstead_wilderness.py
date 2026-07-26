@@ -216,6 +216,8 @@ class WildernessRevampMixin:
     ) -> List[Dict[str, object]]:
         cx = int(self.state.wilderness_chunk_x if chunk_x is None else chunk_x)
         cy = int(self.state.wilderness_chunk_y if chunk_y is None else chunk_y)
+        if hasattr(self, "home_world_chunk_is_authored") and self.home_world_chunk_is_authored(cx, cy):
+            return []
         record = self.wilderness_random_combat_record(cx, cy, create=create)
         if not record.get("present") or record.get("resolved"):
             return []
@@ -504,12 +506,31 @@ class WildernessRevampMixin:
         rx, ry = self.wilderness_region_coords(chunk_x, chunk_y)
         candidates = self.wilderness_region_chunks(chunk_x, chunk_y)
         outpost = self.wilderness_region_outpost_chunk(chunk_x, chunk_y)
-        safe_candidates = [point for point in candidates if point != outpost and not self.wilderness_chunk_has_stronghold(*point) and not self.procedural_town_plan(*point) and not self.is_claimable_wilderness_chunk(*point)]
-        candidates = safe_candidates or [point for point in candidates if point != outpost]
+        safe_candidates = [
+            point for point in candidates
+            if point != outpost
+            and not (
+                hasattr(self, "home_world_chunk_is_authored")
+                and self.home_world_chunk_is_authored(*point)
+            )
+            and not self.wilderness_chunk_has_stronghold(*point)
+            and not self.procedural_town_plan(*point)
+            and not self.is_claimable_wilderness_chunk(*point)
+        ]
+        candidates = safe_candidates or [
+            point for point in candidates
+            if point != outpost
+            and not (
+                hasattr(self, "home_world_chunk_is_authored")
+                and self.home_world_chunk_is_authored(*point)
+            )
+        ]
         rng = random.Random(self.wilderness_chunk_seed(rx, ry) + 88902)
         return candidates[rng.randrange(len(candidates))]
 
     def wilderness_chunk_has_structure(self, chunk_x: int, chunk_y: int) -> bool:
+        if hasattr(self, "home_world_chunk_is_authored") and self.home_world_chunk_is_authored(chunk_x, chunk_y):
+            return False
         return (int(chunk_x), int(chunk_y)) == self.wilderness_region_structure_chunk(chunk_x, chunk_y)
 
     def wilderness_structure_marker_at(
@@ -529,6 +550,31 @@ class WildernessRevampMixin:
             if 0 <= ny < len(grid) and 0 <= nx < len(grid[0]) and grid[ny][nx] == "#":
                 wall_neighbors += 1
         return wall_neighbors > 0
+
+    def current_wilderness_structure_door_at(self, x: int, y: int) -> bool:
+        """Validate a runtime structure door by ownership, not glyph shape alone."""
+        if str(getattr(self.state, "location", "")) != "Wilderness":
+            return False
+        chunk_x = int(getattr(self.state, "wilderness_chunk_x", 0))
+        chunk_y = int(getattr(self.state, "wilderness_chunk_y", 0))
+        if (
+            hasattr(self, "home_world_chunk_is_authored")
+            and self.home_world_chunk_is_authored(chunk_x, chunk_y)
+        ):
+            return False
+        if self.procedural_town_plan(chunk_x, chunk_y):
+            return False
+        poi_state = getattr(self.state, "wilderness_poi_state", {})
+        saved_record = (
+            poi_state.get(f"structure:{chunk_x},{chunk_y}")
+            if isinstance(poi_state, dict)
+            else None
+        )
+        assigned = self.wilderness_chunk_has_structure(chunk_x, chunk_y) or (
+            isinstance(saved_record, dict)
+            and str(saved_record.get("kind", "")) == "wilderness_structure"
+        )
+        return bool(assigned and self.wilderness_structure_marker_at(x, y))
 
     def wilderness_structure_marker_positions(
         self,
@@ -645,6 +691,9 @@ class WildernessRevampMixin:
         )
 
     def enter_wilderness_structure(self, x: int, y: int):
+        if not self.current_wilderness_structure_door_at(x, y):
+            self.set_message("That is not a wilderness structure entrance.")
+            return False
         side = self.wilderness_exterior_door_side(self.active_map(), x, y)
         dx, dy = self.wilderness_door_delta(side)
         self.state.current_wilderness_structure_key = self.wilderness_chunk_key()
@@ -656,6 +705,7 @@ class WildernessRevampMixin:
         self.state.player_x, self.state.player_y = self.wilderness_interior_entry_landing(grid, side)
         self.state.facing = {"north": "DOWN", "south": "UP", "west": "RIGHT", "east": "LEFT"}[side]
         self.set_message(f"Entered {self.wilderness_structure_record().get('name', 'the wilderness structure')}.")
+        return True
 
     def exit_wilderness_structure(self):
         self.state.location = "Wilderness"
@@ -2467,6 +2517,28 @@ class WildernessRevampMixin:
         cx, cy = int(self.state.wilderness_chunk_x), int(self.state.wilderness_chunk_y)
         region = self.wilderness_region_record(cx, cy)
         week = self.stronghold_cache_week_key()
+        locker_position = next(
+            (
+                (px, py)
+                for py, row in enumerate(self.active_map())
+                for px, tile in enumerate(row)
+                if tile == "s"
+            ),
+            None,
+        )
+        if locker_position and hasattr(self, "outpost_supply_container_at"):
+            record = self.outpost_supply_container_at(*locker_position)
+            if record:
+                contents, _capacity, _policy = self.normalize_container_record(record)
+                available = sum(max(0, int(quantity or 0)) for quantity in contents.values())
+                if available <= 0:
+                    self.set_message("The outpost supply locker is empty until its next weekly restock.")
+                    return False
+                taken = self.take_all_from_container(record)
+                if taken > 0:
+                    region["outpost_last_supply_week"] = week
+                    return True
+                return False
         if region.get("outpost_last_supply_week") == week:
             self.set_message("The outpost supply locker has already been checked this week.")
             return False
@@ -3830,7 +3902,7 @@ class WildernessRevampMixin:
             fixed_route_penalty = (
                 0
                 if not fixed_local_path
-                or ((destination_x, destination_y) == (0, 0) and (local_x, local_y) in fixed_local_path)
+                or ((destination_x, destination_y) == (chunk_x, chunk_y) and (local_x, local_y) in fixed_local_path)
                 else 4
             )
             return (
@@ -3842,6 +3914,17 @@ class WildernessRevampMixin:
         return sorted(options, key=score)
 
     def generate_wilderness_travelers(self, chunk_x: int, chunk_y: int) -> List[Dict[str, object]]:
+        if hasattr(self, "home_world_chunk_is_authored") and self.home_world_chunk_is_authored(chunk_x, chunk_y):
+            travelers = []
+            for commuter in self.home_region_commuters_for_chunk(chunk_x, chunk_y):
+                record = dict(commuter)
+                x, y = int(record.get("preferred_x", 1)), int(record.get("preferred_y", 1))
+                record.update({
+                    "x": x, "y": y, "anchor_x": x, "anchor_y": y,
+                    "chunk_x": int(chunk_x), "chunk_y": int(chunk_y),
+                })
+                travelers.append(record)
+            return travelers
         if self.procedural_town_plan(chunk_x, chunk_y) or self.wilderness_chunk_has_stronghold(chunk_x, chunk_y):
             return []
         level = self.wilderness_region_project_level(chunk_x, chunk_y)

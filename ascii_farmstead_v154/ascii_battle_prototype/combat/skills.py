@@ -8,11 +8,21 @@ from .models import Skill
 def create_default_skills() -> List[Skill]:
     skills = [
         # Core attacks/status
-        Skill("Spark Shot", mp_cost=2, damage=5, range_max=4, shape="point", description="Efficient single-target strike."),
-        Skill("Venom Dart", mp_cost=3, damage=3, range_max=5, shape="point", status="poison", status_duration=3, description="Light shot that poisons one enemy."),
-        Skill("Marking Shot", mp_cost=3, damage=2, range_max=5, shape="point", status="vulnerable", status_duration=2, description="Marks one enemy, making follow-up hits stronger."),
-        Skill("Pinning Line", mp_cost=5, damage=4, range_max=6, shape="strip", width=1, status="root", status_duration=1, description="Linear shot that pins enemies in place."),
-        Skill("Toxic Cloud", mp_cost=6, damage=2, range_max=5, aoe_radius=1, shape="burst", status="poison", status_duration=2, description="Small poison cloud for clustered enemies."),
+        Skill("Spark Shot", mp_cost=2, damage=5, range_max=4, shape="point",
+              description="Efficient single-target strike that recovers 1 MP when it exploits a status.",
+              combo_any_status=True, combo_mp_gain=1, combo_note="combo: statused target -> +1 MP"),
+        Skill("Venom Dart", mp_cost=3, damage=3, range_max=5, shape="point", status="poison", status_duration=3,
+              armor_pierce=1, description="Precise toxic shot that pierces 1 armor and poisons one enemy."),
+        Skill("Marking Shot", mp_cost=3, damage=2, range_max=5, shape="point", status="vulnerable", status_duration=2,
+              combo_status="vulnerable", combo_damage_bonus=3,
+              combo_note="combo: vulnerable target -> +damage",
+              description="Marks one enemy; re-marking an exposed target deals meaningful setup damage."),
+        Skill("Pinning Line", mp_cost=5, damage=4, range_max=6, shape="strip", width=1, status="root", status_duration=1,
+              zone_type="earth", zone_duration=2, zone_status="root", zone_status_duration=1,
+              description="Pins a full lane and leaves a short-lived strip of hindering ground."),
+        Skill("Toxic Cloud", mp_cost=6, damage=2, range_max=5, aoe_radius=1, shape="burst", status="poison", status_duration=2,
+              zone_type="poison", zone_duration=3, zone_damage=1, zone_status="poison", zone_status_duration=2,
+              description="Poisons a cluster and leaves a lingering toxic cloud."),
 
         # Support/action economy
         Skill("Coordinate", mp_cost=0, damage=0, range_max=99, shape="support", description="End this unit's turn and transfer all remaining AP to an ally.", effect="transfer_ap", ap_amount=0, target_team="ally"),
@@ -22,13 +32,25 @@ def create_default_skills() -> List[Skill]:
         Skill("Mana Channel", mp_cost=4, damage=0, range_max=99, shape="support", description="Restore 6 MP to one ally.", effect="restore_mp", mp_amount=6, target_team="ally"),
 
         # Area/terrain/barrel-friendly attacks
-        Skill("Flame Burst", mp_cost=4, damage=7, range_max=5, aoe_radius=1, shape="burst", description="Compact explosive burst."),
-        Skill("Shatter Shot", mp_cost=3, damage=2, range_max=6, aoe_radius=1, shape="burst", description="Low-damage burst built for detonating barrels and clearing clustered objects."),
-        Skill("Cinder Sweep", mp_cost=5, damage=5, range_max=4, shape="cone", width=3, description="Wide cone that punishes enemies near chokepoints."),
-        Skill("Frost Line", mp_cost=5, damage=5, range_max=6, shape="strip", width=1, status="root", status_duration=1, description="Freezing line attack that roots enemies in lanes."),
-        Skill("Breaker Strike", mp_cost=6, damage=9, range_max=2, shape="point", status="vulnerable", status_duration=2, description="Close-range elite/boss pressure that leaves the target vulnerable."),
+        Skill("Flame Burst", mp_cost=4, damage=7, range_max=5, aoe_radius=1, shape="burst",
+              zone_type="fire", zone_duration=2, zone_damage=2,
+              description="Compact explosion that leaves a brief burning field."),
+        Skill("Shatter Shot", mp_cost=3, damage=3, range_max=6, aoe_radius=1, shape="burst",
+              armor_pierce=3, displacement=1,
+              description="Concussive anti-armor burst that breaks objects and pushes clustered targets."),
+        Skill("Cinder Sweep", mp_cost=5, damage=5, range_max=4, shape="cone", width=3, displacement=1,
+              zone_type="fire", zone_duration=1, zone_damage=1,
+              description="Wide fiery cone that drives enemies out of chokepoints."),
+        Skill("Frost Line", mp_cost=5, damage=5, range_max=6, shape="strip", width=1, status="root", status_duration=1,
+              zone_type="frost", zone_duration=2, zone_damage=1, zone_status="root", zone_status_duration=1,
+              description="Freezes a lane into a persistent rooting corridor."),
+        Skill("Breaker Strike", mp_cost=6, damage=9, range_max=2, shape="point", status="vulnerable", status_duration=2,
+              armor_pierce=3, displacement=1,
+              description="Close-range armor breaker that exposes and knocks back elite targets."),
         Skill("Thorn Snare", mp_cost=6, damage=3, range_max=5, shape="cross", status="root", status_duration=1, description="Cross-shaped snare for holding enemies in hazardous terrain."),
-        Skill("Shock Net", mp_cost=7, damage=4, range_max=5, aoe_radius=1, shape="burst", status="vulnerable", status_duration=1, description="Burst that exposes grouped enemies for follow-up attacks."),
+        Skill("Shock Net", mp_cost=7, damage=4, range_max=5, aoe_radius=1, shape="burst", status="vulnerable", status_duration=1,
+              zone_type="storm", zone_duration=2, zone_damage=1, zone_status="vulnerable", zone_status_duration=1,
+              description="Exposes grouped enemies and leaves a crackling control field."),
 
         # Core class revamp skills
         Skill("Battle Standard", mp_cost=3, damage=0, range_max=99, shape="support", effect="guard", target_team="ally",

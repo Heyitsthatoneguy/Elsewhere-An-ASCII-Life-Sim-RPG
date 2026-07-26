@@ -590,6 +590,9 @@ def underground_tile_style(
             ">": C.SERVICE + C.BOLD,
             "+": C.DOOR + C.BOLD,
             "$": C.ORE_GOLD,
+            "l": C.SNOW,
+            "s": C.WOOD,
+            "u": C.UNDERGROUND_RELIC,
             "P": C.UNDERGROUND_RELIC,
             "!": C.HOSTILE,
             "S": C.UNDERGROUND_RELIC,
@@ -687,7 +690,7 @@ def underground_tile_style(
             color = C.FLOOR
         elif tile in {"#", " "}:
             color = C.WALL + C.BOLD
-        elif tile in {"<", "U", "N", ">", "+", "$", "P", "S", "?"}:
+        elif tile in {"<", "U", "N", ">", "+", "$", "l", "s", "u", "P", "S", "?"}:
             color = C.SERVICE + C.BOLD
         elif tile == "!":
             color = C.HOSTILE

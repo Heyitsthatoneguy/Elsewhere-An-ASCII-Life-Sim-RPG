@@ -35,6 +35,45 @@ CONTAINER_ITEM_DATA: Dict[str, Dict[str, object]] = {
     "Ranger's Route Card": {"value": 46, "description": "A weathered card listing shelters, water sources, and safe crossings."},
     "Old Medical Text": {"value": 58, "description": "Outdated remedies share pages with surprisingly careful anatomical drawings."},
     "Silver Button": {"value": 32, "description": "One ornate button, polished smooth by years of use."},
+    "Engraved Thimble": {"value": 44, "description": "A tiny silver thimble engraved with curling vines."},
+    "Porcelain Songbird": {"value": 92, "description": "A delicate painted bird that survived its cabinet better than its owner did."},
+    "Lacquered Puzzle Box": {"value": 118, "description": "A many-sided wooden box with a cleverly hidden latch and an empty velvet lining."},
+    "Amber Bead Strand": {"value": 105, "description": "Warm amber beads threaded on surprisingly sturdy cord."},
+    "Silver Candlestick": {"value": 126, "description": "A weighty old candlestick stamped with a nearly forgotten maker's mark."},
+    "Clockwork Curio": {"value": 145, "description": "Brass gears turn inside a palm-sized case, though their original purpose is unclear."},
+    "Ceremonial Key": {"value": 78, "description": "An ornate key made for display rather than any surviving lock."},
+    "Field Bandage": {
+        "value": 36, "description": "A clean field dressing that restores 20 HP.",
+        "effect": "heal", "amount": 20,
+    },
+    "Focus Tonic": {
+        "value": 52, "description": "A sharp herbal tonic that restores 12 focus.",
+        "effect": "focus", "amount": 12,
+    },
+    "Restorative Salts": {
+        "value": 30, "description": "A pungent travel remedy that restores 35 stamina.",
+        "effect": "stamina", "amount": 35,
+    },
+    "Antidote Kit": {
+        "value": 64, "description": "A compact kit that clears poison during map combat.",
+        "effect": "cleanse", "amount": 1,
+    },
+    "Warding Chalk": {
+        "value": 72, "description": "Prepared chalk that grants three guarded turns during map combat.",
+        "effect": "guard", "amount": 3,
+    },
+    "Cartographer's Rubbing": {
+        "value": 96, "description": "A charcoal rubbing that reveals the architecture of the current dungeon floor.",
+        "effect": "dungeon_map", "amount": 1,
+    },
+    "Surveyor's Lens": {
+        "value": 135, "description": "A fitted lens that improves passive trap discovery while it is carried.",
+        "passive": "trap_scout", "amount": 0.12,
+    },
+    "Locksmith's Roll": {
+        "value": 150, "description": "Fine picks and probes that improve trap disarming while they are carried.",
+        "passive": "trap_disarm", "amount": 0.12,
+    },
 }
 
 CONTAINER_PROFILES: Dict[str, Dict[str, object]] = {
@@ -57,6 +96,164 @@ CONTAINER_PROFILES: Dict[str, Dict[str, object]] = {
     "crate": {
         "name": "Supply Crate", "capacity": 260,
         "loot": ["Ranger's Route Card", "Miner's Token", "Decorative Bottle", "Sealed Spice Jar", "Surveyor's Notes"],
+    },
+    "dresser": {
+        "name": "Dresser", "capacity": 220,
+        "loot": ["Bundle of Old Letters", "Silver Button", "Pressed Wildflowers", "Tarnished Locket"],
+    },
+    "wardrobe": {
+        "name": "Wardrobe", "capacity": 320,
+        "loot": ["Bundle of Old Letters", "Silver Button", "Pressed Wildflowers", "Carved Bone Token"],
+    },
+    "pantry": {
+        "name": "Pantry", "capacity": 260,
+        "loot": ["Sealed Spice Jar", "Decorative Bottle", "Hand-Painted Plate", "Old Town Ledger"],
+    },
+    "encounter_cache": {
+        "name": "Recovered Cache", "capacity": 300,
+        "loot": ["Ranger's Route Card", "Miner's Token", "Foreign Coin", "Sealed Spice Jar", "Surveyor's Notes", "Carved Bone Token"],
+    },
+    "store_seeds": {
+        "name": "Seed Shelves", "capacity": 180,
+        "loot": ["Turnip Seeds", "Potato Seeds", "Fiber", "Restorative Salts"],
+    },
+    "store_farm_supply": {
+        "name": "Farm Supply Shelf", "capacity": 180,
+        "loot": ["Fiber", "Wood", "Stone", "Field Snack", "Restorative Salts"],
+    },
+    "store_general_goods": {
+        "name": "General Goods Display", "capacity": 180,
+        "loot": ["Decorative Bottle", "Hand-Painted Plate", "Field Snack", "Engraved Thimble"],
+    },
+    "smith_crate": {
+        "name": "Ore Crate", "capacity": 300,
+        "loot": ["Coal", "Copper Ore", "Iron Ore", "Miner's Token", "Locksmith's Roll"],
+    },
+    "smith_coal": {
+        "name": "Coal Bin", "capacity": 360,
+        "loot": ["Coal", "Stone", "Miner's Token"],
+    },
+    "smith_tools": {
+        "name": "Tool Rack", "capacity": 220,
+        "loot": ["Ruin Scrap", "Miner's Token", "Locksmith's Roll", "Ceremonial Key"],
+    },
+    "civic_archive": {
+        "name": "Records Archive", "capacity": 220,
+        "loot": ["Old Town Ledger", "Surveyor's Notes", "Bundle of Old Letters", "Cartographer's Rubbing", "Ceremonial Key"],
+    },
+    "inn_pantry": {
+        "name": "Inn Pantry", "capacity": 300,
+        "loot": ["Field Snack", "Sealed Spice Jar", "Restorative Salts", "Decorative Bottle", "Hand-Painted Plate"],
+    },
+    "clinic_cabinet": {
+        "name": "Medicine Cabinet", "capacity": 220,
+        "loot": ["Field Bandage", "Focus Tonic", "Antidote Kit", "Potion", "Ether", "Old Medical Text"],
+    },
+    "clinic_supply": {
+        "name": "Clinic Supply Shelf", "capacity": 260,
+        "loot": ["Field Bandage", "Wild Herbs", "Fiber", "Restorative Salts", "Old Medical Text"],
+    },
+    "animal_feed": {
+        "name": "Feed Bin", "capacity": 340,
+        "loot": ["Hay", "Field Snack", "Fiber", "Sealed Spice Jar"],
+    },
+    "animal_medicine": {
+        "name": "Animal Medicine Shelf", "capacity": 200,
+        "loot": ["Wild Herbs", "Field Bandage", "Antidote Kit", "Fiber"],
+    },
+    "lumber_crate": {
+        "name": "Lumber Rack", "capacity": 480,
+        "loot": ["Wood", "Hardwood", "Fiber", "Surveyor's Notes"],
+    },
+    "market_produce": {
+        "name": "Produce Crates", "capacity": 260,
+        "loot": ["Turnip", "Potato", "Field Snack", "Sealed Spice Jar"],
+    },
+    "market_forage": {
+        "name": "Forage Baskets", "capacity": 220,
+        "loot": ["Wild Herbs", "Fiber", "Pressed Wildflowers", "Restorative Salts"],
+    },
+    "market_rare": {
+        "name": "Rare Goods Case", "capacity": 160,
+        "loot": ["Foreign Coin", "Amber Bead Strand", "Porcelain Songbird", "Clockwork Curio"],
+    },
+    "dungeon_archive": {
+        "name": "Ruined Archive", "capacity": 180,
+        "loot": [
+            "Water-Stained Journal", "Old Town Ledger", "Old Medical Text",
+            "Cartographer's Rubbing", "Focus Tonic", "Surveyor's Lens",
+        ],
+        "count_min": 1, "count_max": 3,
+    },
+    "dungeon_supply": {
+        "name": "Abandoned Supply Crate", "capacity": 260,
+        "loot": [
+            "Field Bandage", "Restorative Salts", "Antidote Kit", "Warding Chalk",
+            "Field Snack", "Coal", "Fiber", "Ruin Scrap", "Locksmith's Roll",
+        ],
+        "count_min": 2, "count_max": 4,
+    },
+    "dungeon_urn": {
+        "name": "Funerary Urn", "capacity": 100,
+        "loot": [
+            "Foreign Coin", "Carved Bone Token", "Small Clay Idol", "Amber Bead Strand",
+            "Silver Button", "Ceremonial Key", "Porcelain Songbird",
+        ],
+        "count_min": 1, "count_max": 2,
+    },
+}
+
+
+AUTHORED_CONTAINER_FIXTURES: Dict[str, Dict[str, Tuple[str, str, bool, str]]] = {
+    "GeneralStoreInterior": {
+        "s": ("store_seeds", "display", False, "General Store"),
+        "f": ("store_farm_supply", "display", False, "General Store"),
+        "b": ("store_general_goods", "display", False, "General Store"),
+    },
+    "BlacksmithInterior": {
+        "o": ("smith_crate", "display", False, "Blacksmith"),
+        "q": ("smith_coal", "display", False, "Blacksmith"),
+        "t": ("smith_tools", "display", False, "Blacksmith"),
+    },
+    "LibraryInterior": {
+        "l": ("civic_archive", "display", False, "Town library"),
+    },
+    "MayorHouseInterior": {
+        "s": ("civic_archive", "display", False, "Mayor's office"),
+    },
+    "InnInterior": {
+        "p": ("inn_pantry", "display", False, "Town inn"),
+    },
+    "FurnitureStoreInterior": {
+        "L": ("bookshelf", "display", False, "Furniture Store"),
+        "l": ("shelf", "display", False, "Furniture Store"),
+        "U": ("dresser", "display", False, "Furniture Store"),
+        "u": ("dresser", "display", False, "Furniture Store"),
+    },
+    "CarpenterStoreInterior": {
+        "l": ("lumber_crate", "display", False, "Carpenter"),
+    },
+    "AnimalStoreInterior": {
+        "f": ("animal_feed", "display", False, "Animal Store"),
+        "m": ("animal_medicine", "display", False, "Animal Store"),
+    },
+    "ClinicInterior": {
+        "m": ("clinic_cabinet", "display", False, "Town clinic"),
+        "s": ("clinic_supply", "display", False, "Town clinic"),
+    },
+    "TownHallInterior": {
+        "r": ("civic_archive", "display", False, "Town Hall"),
+    },
+    "MarketRowInterior": {
+        "v": ("market_produce", "display", False, "Market vendor"),
+        "f": ("market_forage", "display", False, "Market vendor"),
+        "r": ("market_rare", "display", False, "Market vendor"),
+    },
+    "TownResidenceInterior": {
+        "l": ("bookshelf", "display", False, "Local resident"),
+        "s": ("cabinet", "display", False, "Local resident"),
+        "u": ("dresser", "display", False, "Local resident"),
+        "p": ("pantry", "display", False, "Local resident"),
     },
 }
 
@@ -143,10 +340,16 @@ class ContainerSystemMixin:
             return {}
         seed = int(hashlib.sha256(key.encode("utf-8")).hexdigest()[:16], 16)
         rng = random.Random(seed)
-        count = rng.randint(1, min(4, len(choices)))
+        count_min = max(1, min(len(choices), int(data.get("count_min", 1) or 1)))
+        count_max = max(
+            count_min,
+            min(len(choices), int(data.get("count_max", min(4, len(choices))) or min(4, len(choices)))),
+        )
+        max_quantity = max(1, int(data.get("max_quantity", 1) or 1))
+        count = rng.randint(count_min, count_max)
         contents: Dict[str, int] = {}
         for item_name in rng.sample(choices, count):
-            contents[str(item_name)] = rng.randint(1, 2 if profile in {"shelf", "crate"} else 1)
+            contents[str(item_name)] = rng.randint(1, max_quantity)
         if profile in {"ruin_chest", "crate"}:
             materials = rng.choice([
                 {"Stone": rng.randint(2, 6)},
@@ -191,10 +394,27 @@ class ContainerSystemMixin:
         self.state.world_containers[key] = record
         return record
 
-    def player_container_record(self, x: int, y: int, object_name: str) -> Dict[str, object]:
+    def player_container_record(
+        self,
+        x: int,
+        y: int,
+        object_name: str,
+        object_key: Optional[str] = None,
+    ) -> Dict[str, object]:
         label, capacity, profile = PLAYER_CONTAINER_DATA[object_name]
         key = self.container_record_key(x, y, f"player:{object_name}")
         record = self.state.world_containers.get(key)
+        if not isinstance(record, dict) and object_key:
+            record = next(
+                (
+                    candidate
+                    for candidate in self.state.world_containers.values()
+                    if isinstance(candidate, dict)
+                    and str(candidate.get("object_key", "")) == str(object_key)
+                    and str(candidate.get("name", "")) == label
+                ),
+                None,
+            )
         if not isinstance(record, dict):
             # Furniture movement changes its coordinate key. Reattach the first
             # matching orphaned record so moving a full chest never empties it.
@@ -212,11 +432,19 @@ class ContainerSystemMixin:
                     record = candidate
                     break
         if not isinstance(record, dict):
-            extra = "guides" if object_name in {"Bookshelf", "Shelf"} else ("keepsakes" if object_name == "Keepsake Chest" else "")
+            extra = (
+                "guides" if object_name in {"Bookshelf", "Shelf"}
+                else "keepsakes" if object_name == "Keepsake Chest"
+                else "outfit" if object_name in {"Dresser", "Wardrobe"}
+                else "pantry" if object_name == "Pantry"
+                else ""
+            )
             record = self.create_container_record(
                 key, x, y, profile, name=label, take_policy="player", allow_deposit=True,
                 capacity=capacity, contents={}, owner="Player", extra_action=extra,
             )
+        if object_key:
+            record["object_key"] = str(object_key)
         if not bool(getattr(self.state, "container_storage_migrated", False)):
             legacy = getattr(self.state, "storage_inventory", {})
             if isinstance(legacy, dict) and any(int(qty or 0) > 0 for qty in legacy.values()):
@@ -228,41 +456,295 @@ class ContainerSystemMixin:
             self.state.container_storage_migrated = True
         return record
 
+    def player_container_record_for_object_key(
+        self,
+        object_key: str,
+        object_name: str,
+    ) -> Optional[Dict[str, object]]:
+        if object_name not in PLAYER_CONTAINER_DATA:
+            return None
+        label = PLAYER_CONTAINER_DATA[object_name][0]
+        records = getattr(self.state, "world_containers", {})
+        if not isinstance(records, dict):
+            return None
+        tagged = next(
+            (
+                record
+                for record in records.values()
+                if isinstance(record, dict)
+                and str(record.get("object_key", "")) == str(object_key)
+                and str(record.get("name", "")) == label
+            ),
+            None,
+        )
+        if isinstance(tagged, dict):
+            return tagged
+        parsed = getattr(self, "parse_object_key", lambda _key: None)(str(object_key))
+        if not parsed:
+            return None
+        _scope, x, y = parsed
+        candidates = [
+            record
+            for record in records.values()
+            if isinstance(record, dict)
+            and str(record.get("take_policy", "")) == "player"
+            and str(record.get("name", "")) == label
+            and (int(record.get("x", -1)), int(record.get("y", -1))) == (int(x), int(y))
+        ]
+        if len(candidates) == 1:
+            candidates[0]["object_key"] = str(object_key)
+            return candidates[0]
+        return None
+
+    def placed_container_has_contents(self, object_key: str, object_name: str) -> bool:
+        record = self.player_container_record_for_object_key(object_key, object_name)
+        if not record:
+            return False
+        contents, _capacity, _policy = self.normalize_container_record(record)
+        return any(int(quantity or 0) > 0 for quantity in contents.values()) or int(record.get("money", 0) or 0) > 0
+
+    def placed_container_store_block_reason(self, object_key: str, object_name: str) -> str:
+        if self.placed_container_has_contents(object_key, object_name):
+            return "empty this storage container first, or move it instead"
+        return ""
+
+    def clear_placed_container_state(self, object_key: str, object_name: str) -> None:
+        record = self.player_container_record_for_object_key(object_key, object_name)
+        if not record:
+            return
+        for key, candidate in list(self.state.world_containers.items()):
+            if candidate is record:
+                self.state.world_containers.pop(key, None)
+
+    def rekey_placed_container_state(
+        self,
+        old_object_key: str,
+        new_object_key: str,
+        object_name: str,
+    ) -> None:
+        record = self.player_container_record_for_object_key(old_object_key, object_name)
+        if not record:
+            return
+        record["object_key"] = str(new_object_key)
+        parsed = getattr(self, "parse_object_key", lambda _key: None)(str(new_object_key))
+        if parsed:
+            _scope, x, y = parsed
+            record["x"], record["y"] = int(x), int(y)
+
     def static_container_profile_at(self, x: int, y: int) -> Optional[Tuple[str, str, bool, str]]:
         if not getattr(self, "in_active_bounds", lambda _x, _y: False)(x, y):
             return None
         tile = self.active_map()[y][x]
         location = str(getattr(self.state, "location", ""))
-        if getattr(self, "on_wilderness_dungeon", lambda: False)() and tile == "$":
-            return "ruin_chest", "free", False, ""
-        if getattr(self, "on_wilderness_structure", lambda: False)() and tile in {"$", "l", "L", "s", "c"}:
-            return ("ruin_chest" if tile == "$" else "bookshelf" if tile in {"l", "L"} else "cabinet"), "free", False, ""
+        if getattr(self, "on_wilderness_dungeon", lambda: False)():
+            dungeon_profiles = {
+                "$": "ruin_chest",
+                "l": "dungeon_archive",
+                "L": "dungeon_archive",
+                "s": "dungeon_supply",
+                "u": "dungeon_urn",
+            }
+            profile = dungeon_profiles.get(tile)
+            return (profile, "free", False, "") if profile else None
+        if getattr(self, "on_wilderness_structure", lambda: False)() and tile in {"$", "l", "L", "s"}:
+            return ("ruin_chest" if tile == "$" else "bookshelf" if tile in {"l", "L"} else "crate"), "free", False, ""
         if getattr(self, "on_wilderness_outpost", lambda: False)() and tile in {"l", "L"}:
             return "bookshelf", "display", False, "Ranger service"
-        commercial_active = any(
-            getattr(self, method, lambda: False)()
-            for method in (
-                "on_general_store", "on_blacksmith_interior", "on_furniture_store",
-                "on_carpenter_store", "on_animal_store", "on_clinic", "on_museum", "on_market_row",
-            )
-        )
-        if commercial_active and tile in {"l", "L", "s"}:
-            return ("bookshelf" if tile in {"l", "L"} else "shelf"), "display", False, "Shop stock"
-        if getattr(self, "on_library_interior", lambda: False)() and tile in {"l", "L", "s"}:
-            return "bookshelf", "display", False, "Town library"
-        if getattr(self, "on_procedural_town_interior", lambda: False)() and tile in {"l", "L", "s", "c"}:
-            building = str(getattr(self.state, "current_procedural_building_id", "")).lower()
-            is_business = any(word in building for word in ("shop", "store", "clinic", "inn", "hall", "station", "library"))
-            policy = "display" if is_business else "theft"
-            owner = "Business stock" if is_business else "Local resident"
-            profile = "bookshelf" if tile in {"l", "L"} else ("cabinet" if tile == "c" else "shelf")
-            return profile, policy, False, owner
-        if location in {"MayorHouseInterior", "InnInterior", "TownResidenceInterior"} and tile in {"l", "L", "s", "c"}:
-            profile = "bookshelf" if tile in {"l", "L"} else ("cabinet" if tile == "c" else "shelf")
-            return profile, "display", False, "Resident property"
+        authored = AUTHORED_CONTAINER_FIXTURES.get(location, {}).get(tile)
+        if authored:
+            return authored
+        if getattr(self, "on_procedural_town_interior", lambda: False)() and tile in {"l", "L", "s", "u", "p"}:
+            building_record = getattr(self, "current_procedural_town_building", lambda: None)() or {}
+            building_type = str(building_record.get("type_id", getattr(self.state, "current_procedural_building_id", ""))).lower()
+            is_business = building_type in {
+                "general_store", "blacksmith", "clinic", "inn", "town_hall",
+                "sheriff_office", "library", "furniture_store", "carpenter",
+                "animal_store", "market",
+            }
+            player_owned = bool(getattr(self, "on_player_owned_procedural_residence", lambda: False)())
+            policy = "player" if player_owned else ("display" if is_business else "theft")
+            owner = "Player" if player_owned else ("Business stock" if is_business else "Local resident")
+            business_profiles = {
+                "general_store": {"s": "store_general_goods", "l": "store_general_goods", "L": "store_general_goods"},
+                "blacksmith": {"s": "smith_crate", "l": "smith_tools", "L": "smith_tools"},
+                "clinic": {"s": "clinic_supply", "u": "clinic_cabinet"},
+                "inn": {"p": "inn_pantry", "s": "inn_pantry"},
+                "library": {"l": "civic_archive", "L": "civic_archive", "s": "civic_archive"},
+                "town_hall": {"l": "civic_archive", "L": "civic_archive", "s": "civic_archive"},
+                "sheriff_office": {"l": "civic_archive", "L": "civic_archive", "s": "smith_tools"},
+                "carpenter": {"s": "lumber_crate", "l": "lumber_crate", "L": "lumber_crate"},
+                "animal_store": {"s": "animal_feed", "p": "animal_feed", "u": "animal_medicine"},
+                "market": {"s": "market_produce", "l": "market_rare", "L": "market_rare"},
+            }
+            profile = business_profiles.get(building_type, {}).get(tile)
+            if not profile:
+                profile = (
+                    "bookshelf" if tile in {"l", "L"}
+                    else "dresser" if tile == "u"
+                    else "pantry" if tile == "p"
+                    else "shelf"
+                )
+            return profile, policy, player_owned, owner
         return None
 
-    def container_display_stock(self) -> Dict[str, int]:
+    def wilderness_encounter_container_at(self, x: int, y: int) -> Optional[Dict[str, object]]:
+        if not getattr(self, "on_wilderness", lambda: False)():
+            return None
+        visual = getattr(self, "wilderness_random_combat_visual_at", lambda _x, _y: None)(x, y)
+        if not isinstance(visual, dict):
+            return None
+        name = str(visual.get("name", "Encounter cache"))
+        lowered = name.lower()
+        if not any(word in lowered for word in ("crate", "cargo", "cart", "remains", "nest", "den", "carapace")):
+            return None
+        record = visual.get("container")
+        if isinstance(record, dict):
+            return record
+        encounter = getattr(self, "wilderness_random_combat_record", lambda *_args, **_kwargs: {})(
+            self.state.wilderness_chunk_x,
+            self.state.wilderness_chunk_y,
+            create=False,
+        )
+        encounter_id = str(encounter.get("id", "encounter"))
+        key = f"{self.container_scope_key()}:encounter:{encounter_id}:{int(x)},{int(y)}"
+        contents = self.deterministic_container_contents(key, "encounter_cache")
+        if "crate" in lowered or "cargo" in lowered or "cart" in lowered:
+            contents["Wood"] = int(contents.get("Wood", 0) or 0) + 2
+        elif "nest" in lowered or "den" in lowered:
+            contents["Fiber"] = int(contents.get("Fiber", 0) or 0) + 2
+        record = {
+            "key": key,
+            "scope": self.container_scope_key(),
+            "x": int(x),
+            "y": int(y),
+            "profile": "encounter_cache",
+            "name": name,
+            "capacity": 300,
+            "contents": contents,
+            "take_policy": "free",
+            "allow_deposit": False,
+            "owner": "",
+            "opened": False,
+            "extra_action": "",
+        }
+        visual["container"] = record
+        return record
+
+    def outpost_supply_container_at(self, x: int, y: int) -> Optional[Dict[str, object]]:
+        if not getattr(self, "on_wilderness_outpost", lambda: False)():
+            return None
+        if not getattr(self, "in_active_bounds", lambda _x, _y: False)(x, y):
+            return None
+        if self.active_map()[y][x] != "s":
+            return None
+        key = self.container_record_key(x, y, "outpost_supplies")
+        record = self.state.world_containers.get(key)
+        if not isinstance(record, dict):
+            record = self.create_container_record(
+                key,
+                x,
+                y,
+                "crate",
+                name="Outpost Supply Locker",
+                take_policy="free",
+                allow_deposit=False,
+                capacity=500,
+                contents={},
+                owner="Regional ranger service",
+            )
+            record["profile"] = "outpost_supplies"
+        week = str(getattr(self, "stronghold_cache_week_key", lambda: "")())
+        if str(record.get("last_restock_week", "")) != week:
+            cx, cy = int(self.state.wilderness_chunk_x), int(self.state.wilderness_chunk_y)
+            region = getattr(self, "wilderness_region_record", lambda *_args: {})(cx, cy)
+            already_claimed = (
+                not record.get("last_restock_week")
+                and isinstance(region, dict)
+                and str(region.get("outpost_last_supply_week", "")) == week
+            )
+            if not already_claimed:
+                level = int(getattr(self, "wilderness_region_project_level", lambda *_args: 0)(cx, cy) or 0)
+                refill = {"Field Snack": 1, "Wood": 1 + level, "Fiber": 1 + level}
+                contents, capacity, _policy = self.normalize_container_record(record)
+                free = max(0, capacity - self.container_used(contents))
+                for item_name, quantity in refill.items():
+                    accepted = min(max(0, int(quantity)), free)
+                    if accepted <= 0:
+                        continue
+                    contents[item_name] = int(contents.get(item_name, 0) or 0) + accepted
+                    free -= accepted
+            record["last_restock_week"] = week
+        return record
+
+    def dungeon_chest_container_at(self, x: int, y: int) -> Optional[Dict[str, object]]:
+        if not getattr(self, "on_wilderness_dungeon", lambda: False)():
+            return None
+        if not getattr(self, "in_active_bounds", lambda _x, _y: False)(x, y):
+            return None
+        if self.active_map()[y][x] != "$":
+            return None
+        key = self.container_record_key(x, y, "ruin_chest")
+        record = self.state.world_containers.get(key)
+        if isinstance(record, dict):
+            return record
+        dungeon_key = str(getattr(self.state, "current_dungeon_key", ""))
+        floor = max(1, int(getattr(self.state, "current_dungeon_floor", 1) or 1))
+        feature_id = str(
+            getattr(self, "wilderness_dungeon_feature_id", lambda px, py, level=1: f"F{level}:{px},{py}")(
+                x, y, floor
+            )
+        )
+        dungeon_record = getattr(self, "dungeon_record", lambda _key: {})(dungeon_key)
+        opened = {
+            str(value)
+            for value in dungeon_record.get("opened_chests", [])
+        } if isinstance(dungeon_record, dict) else set()
+        if feature_id in opened:
+            money, contents = 0, {}
+        elif hasattr(self, "wilderness_dungeon_chest_loot"):
+            money, contents = self.wilderness_dungeon_chest_loot(
+                dungeon_key, floor, x, y
+            )
+        else:
+            money, contents = 0, self.deterministic_container_contents(key, "ruin_chest")
+        record = self.create_container_record(
+            key,
+            x,
+            y,
+            "ruin_chest",
+            name="Dungeon Chest",
+            take_policy="free",
+            allow_deposit=False,
+            capacity=500,
+            contents=contents,
+            owner="",
+        )
+        record["money"] = max(0, int(money or 0))
+        record["dungeon_chest_id"] = feature_id
+        record["dungeon_key"] = dungeon_key
+        return record
+
+    def container_display_stock(self, profile: str = "") -> Dict[str, int]:
+        profile_stock = {
+            "store_seeds": {"Turnip Seeds": 12, "Potato Seeds": 8},
+            "store_farm_supply": {"Fiber": 10, "Wood": 8, "Stone": 8, "Restorative Salts": 2},
+            "store_general_goods": {"Potion": 4, "Field Snack": 5, "Decorative Bottle": 2},
+            "smith_crate": {"Copper Ore": 10, "Iron Ore": 6, "Stone": 12},
+            "smith_coal": {"Coal": 12},
+            "smith_tools": {"Copper Bar": 3, "Ruin Scrap": 4, "Locksmith's Roll": 1},
+            "civic_archive": {"Dog-Eared Field Guide": 2, "Old Town Ledger": 1, "Surveyor's Notes": 2},
+            "inn_pantry": {"Field Snack": 8, "Sealed Spice Jar": 2, "Restorative Salts": 3},
+            "clinic_cabinet": {"Potion": 8, "Ether": 5, "Field Bandage": 5, "Antidote Kit": 2},
+            "clinic_supply": {"Wild Herbs": 6, "Fiber": 8, "Field Bandage": 4},
+            "animal_feed": {"Hay": 20, "Fiber": 8, "Field Snack": 4},
+            "animal_medicine": {"Wild Herbs": 6, "Field Bandage": 3, "Antidote Kit": 2},
+            "lumber_crate": {"Wood": 20, "Stone": 12, "Hardwood": 5, "Fiber": 8},
+            "market_produce": {"Turnip": 6, "Potato": 6, "Field Snack": 4},
+            "market_forage": {"Wild Herbs": 6, "Fiber": 8, "Pressed Wildflowers": 2},
+            "market_rare": {"Foreign Coin": 2, "Amber Bead Strand": 1, "Porcelain Songbird": 1},
+        }
+        if profile in profile_stock:
+            return dict(profile_stock[profile])
         if getattr(self, "on_general_store", lambda: False)():
             return {"Turnip Seeds": 12, "Potato Seeds": 8, "Potion": 4, "Fiber": 10}
         if getattr(self, "on_blacksmith_interior", lambda: False)():
@@ -291,11 +773,23 @@ class ContainerSystemMixin:
         if dropped:
             return dropped
 
+        encounter_container = self.wilderness_encounter_container_at(x, y)
+        if encounter_container:
+            return encounter_container
+
+        outpost_supplies = self.outpost_supply_container_at(x, y)
+        if outpost_supplies:
+            return outpost_supplies
+
+        dungeon_chest = self.dungeon_chest_container_at(x, y)
+        if dungeon_chest:
+            return dungeon_chest
+
         placed = None
         if getattr(self, "on_farm_work_land", lambda: False)() or getattr(self, "on_house", lambda: False)() or getattr(self, "on_player_owned_procedural_residence", lambda: False)():
-            _key, placed, ax, ay = self.placed_object_at(x, y)
+            placed_key, placed, ax, ay = self.placed_object_at(x, y)
             if placed in PLAYER_CONTAINER_DATA and ax is not None and ay is not None:
-                return self.player_container_record(int(ax), int(ay), str(placed))
+                return self.player_container_record(int(ax), int(ay), str(placed), object_key=placed_key)
 
         static = self.static_container_profile_at(x, y)
         if not static:
@@ -307,10 +801,11 @@ class ContainerSystemMixin:
             return record
         if not create:
             return None
-        stock = self.container_display_stock() if policy == "display" else None
+        stock = self.container_display_stock(profile) if policy == "display" else None
+        initial_contents = {} if policy == "player" else (stock if stock else None)
         return self.create_container_record(
             key, x, y, profile, take_policy=policy, allow_deposit=allow_deposit,
-            owner=owner, contents=stock if stock else None,
+            owner=owner, contents=initial_contents,
         )
 
     def dropped_pack_at(self, x: int, y: int) -> Optional[Dict[str, object]]:
@@ -332,6 +827,18 @@ class ContainerSystemMixin:
             return False
         self.show_world_container(record)
         return True
+
+    def container_interaction_hint_at(self, x: int, y: int) -> str:
+        static = self.static_container_profile_at(x, y)
+        if not static:
+            return ""
+        profile, policy, _allow_deposit, owner = static
+        name = str(CONTAINER_PROFILES.get(profile, {}).get("name", "container"))
+        if policy == "display":
+            return f"Z/Enter: browse {name.lower()}"
+        if policy == "theft":
+            return f"Z/Enter: search {owner.lower() if owner else 'owned'} {name.lower()}"
+        return f"Z/Enter: open {name.lower()}"
 
     def normalize_container_record(self, record: Dict[str, object]) -> Tuple[Dict[str, int], int, str]:
         pile = record.get("_loot_pile")
@@ -355,6 +862,147 @@ class ContainerSystemMixin:
     def container_item_sell_price(self, item_name: str) -> int:
         return max(0, int(CONTAINER_ITEM_DATA.get(item_name, {}).get("value", 0) or 0))
 
+    def container_item_is_usable(self, item_name: str) -> bool:
+        return str(CONTAINER_ITEM_DATA.get(item_name, {}).get("effect", "")) in {
+            "heal", "focus", "stamina", "cleanse", "guard", "dungeon_map",
+        }
+
+    def container_item_use_hint(self, item_name: str) -> str:
+        data = CONTAINER_ITEM_DATA.get(item_name, {})
+        effect = str(data.get("effect", ""))
+        amount = max(0, int(data.get("amount", 0) or 0))
+        return {
+            "heal": f"+{amount} HP",
+            "focus": f"+{amount} focus",
+            "stamina": f"+{amount} stamina",
+            "cleanse": "clears poison in map combat",
+            "guard": f"{amount} guarded map-combat turns",
+            "dungeon_map": "reveals the current dungeon floor",
+        }.get(effect, "")
+
+    def container_item_detail_lines(self, item_name: str) -> List[str]:
+        data = CONTAINER_ITEM_DATA.get(item_name)
+        if not data:
+            return []
+        lines = [str(data.get("description", "A recovered object."))]
+        usable = self.container_item_use_hint(item_name)
+        if usable:
+            lines.append(f"Use: {usable}.")
+        passive = str(data.get("passive", ""))
+        amount = float(data.get("amount", 0.0) or 0.0)
+        if passive == "trap_scout":
+            lines.append(f"Carried benefit: +{int(round(amount * 100))}% trap discovery chance.")
+        elif passive == "trap_disarm":
+            lines.append(f"Carried benefit: +{int(round(amount * 100))}% trap disarm chance.")
+        return lines
+
+    def container_passive_bonus(self, passive: str) -> float:
+        total = 0.0
+        inventory = getattr(self.state, "inventory", {})
+        for item_name, quantity in inventory.items():
+            if int(quantity or 0) <= 0:
+                continue
+            data = CONTAINER_ITEM_DATA.get(str(item_name), {})
+            if str(data.get("passive", "")) == str(passive):
+                total += float(data.get("amount", 0.0) or 0.0)
+        return min(0.30, max(0.0, total))
+
+    def container_item_can_help_now(self, item_name: str) -> bool:
+        data = CONTAINER_ITEM_DATA.get(item_name, {})
+        effect = str(data.get("effect", ""))
+        amount = max(0, int(data.get("amount", 0) or 0))
+        if effect == "stamina":
+            return int(getattr(self.state, "stamina", 0)) < int(getattr(self, "max_stamina", lambda: 0)())
+        if effect in {"heal", "focus"}:
+            from ascii_farmstead_combat import build_player_combat_profile
+
+            profile = build_player_combat_profile(self.state)
+            current_key = "current_hp" if effect == "heal" else "focus"
+            maximum_key = "max_hp" if effect == "heal" else "max_focus"
+            return int(profile.get(current_key, 0) or 0) < int(profile.get(maximum_key, 0) or 0)
+        if effect == "cleanse":
+            if not bool(getattr(self, "map_native_combat_active", lambda: False)()):
+                return False
+            combat = getattr(self, "dungeon_roguelike_record", lambda: {})()
+            return int(combat.get("poison_turns", 0) or 0) > 0
+        if effect == "guard":
+            return bool(getattr(self, "map_native_combat_active", lambda: False)()) and amount > 0
+        if effect == "dungeon_map":
+            if not bool(getattr(self, "on_wilderness_dungeon", lambda: False)()):
+                return False
+            grid = self.active_map()
+            explored = getattr(self, "dungeon_explored_tiles", lambda: set())()
+            return any(
+                tile not in {"#", " "} and (x, y) not in explored
+                for y, row in enumerate(grid)
+                for x, tile in enumerate(row)
+            )
+        return False
+
+    def use_container_item(self, item_name: str) -> bool:
+        if int(getattr(self.state, "inventory", {}).get(item_name, 0) or 0) <= 0:
+            self.set_message(f"You do not have any {item_name}.")
+            return False
+        if not self.container_item_is_usable(item_name):
+            self.set_message(f"{item_name} is not usable from inventory.")
+            return False
+        if not self.container_item_can_help_now(item_name):
+            self.set_message(f"{item_name} would not help you right now.")
+            return False
+
+        from ascii_farmstead_combat import build_player_combat_profile
+
+        data = CONTAINER_ITEM_DATA[item_name]
+        effect = str(data.get("effect", ""))
+        amount = max(0, int(data.get("amount", 0) or 0))
+        result = ""
+        if effect == "heal":
+            profile = build_player_combat_profile(self.state)
+            before = int(profile.get("current_hp", 0) or 0)
+            maximum = max(1, int(profile.get("max_hp", before) or before or 1))
+            self.state.combat_current_hp = min(maximum, before + amount)
+            result = f"restored {int(self.state.combat_current_hp) - before} HP"
+        elif effect == "focus":
+            profile = build_player_combat_profile(self.state)
+            before = int(profile.get("focus", 0) or 0)
+            maximum = max(0, int(profile.get("max_focus", before) or before or 0))
+            self.state.combat_focus = min(maximum, before + amount)
+            result = f"restored {int(self.state.combat_focus) - before} focus"
+        elif effect == "stamina":
+            restored = int(getattr(self, "restore_stamina", lambda _amount: 0)(amount) or 0)
+            result = f"restored {restored} stamina"
+        elif effect == "cleanse":
+            combat = self.dungeon_roguelike_record()
+            combat["poison_turns"] = 0
+            result = "cleared the poison"
+        elif effect == "guard":
+            combat = self.dungeon_roguelike_record()
+            combat["guard_turns"] = max(amount, int(combat.get("guard_turns", 0) or 0))
+            result = f"granted {amount} guarded turns"
+        elif effect == "dungeon_map":
+            grid = self.active_map()
+            combat = self.dungeon_roguelike_record()
+            explored = set(getattr(self, "dungeon_explored_tiles", lambda: set())())
+            explored.update(
+                (x, y)
+                for y, row in enumerate(grid)
+                for x, tile in enumerate(row)
+                if tile not in {"#", " "}
+            )
+            combat["explored_tiles"] = [
+                self.dungeon_feature_key(x, y)
+                for x, y in sorted(explored, key=lambda point: (point[1], point[0]))
+            ]
+            _regions, room_lookup = self.dungeon_room_regions()
+            combat["revealed_rooms"] = sorted(set(room_lookup.values()))
+            self._dungeon_explored_cache_signature = None
+            self._dungeon_visibility_cache_signature = None
+            result = "revealed the current dungeon floor"
+
+        self.state.inventory[item_name] = int(self.state.inventory.get(item_name, 0) or 0) - 1
+        self.autosave_with_message(f"Used {item_name}: {result}.")
+        return True
+
     def container_used(self, contents: Dict[str, int]) -> int:
         return sum(max(0, int(qty or 0)) for qty in contents.values())
 
@@ -374,7 +1022,8 @@ class ContainerSystemMixin:
             self.set_message("Those goods belong here. Speak to the responsible shopkeeper or resident instead.")
             return 0
         available = max(0, int(contents.get(item_name, 0) or 0))
-        quantity = min(available, max(0, int(quantity)), self.backpack_fit_quantity(item_name))
+        requested = min(available, max(0, int(quantity)))
+        quantity = min(requested, self.backpack_fit_quantity(item_name))
         if quantity <= 0:
             self.set_message("Your backpack is full." if self.backpack_free() <= 0 else "There is nothing left to take.")
             return 0
@@ -385,7 +1034,12 @@ class ContainerSystemMixin:
         self.container_apply_theft(record, accepted)
         if autosave:
             verb = "Stole" if policy == "theft" else "Took"
-            self.autosave_with_message(f"{verb} {accepted} {item_name}. Backpack {self.backpack_used()}/{self.backpack_capacity()}.")
+            remaining = max(0, available - accepted)
+            remainder = f" {remaining} remain here." if remaining > 0 and accepted < requested else ""
+            self.autosave_with_message(
+                f"{verb} {accepted} {item_name}.{remainder} "
+                f"Backpack {self.backpack_used()}/{self.backpack_capacity()}."
+            )
         return accepted
 
     def take_container_money(self, record: Dict[str, object], autosave: bool = True) -> int:
@@ -398,19 +1052,37 @@ class ContainerSystemMixin:
             return 0
         self.state.money += money
         source["money"] = 0
+        self.container_apply_theft(record, money)
         if autosave:
-            self.autosave_with_message(f"Took {money}g.")
+            verb = "Stole" if str(record.get("take_policy", "")) == "theft" else "Took"
+            self.autosave_with_message(f"{verb} {money}g.")
         return money
 
     def remove_empty_loot_pile(self, record: Dict[str, object]) -> None:
         pile = record.get("_loot_pile")
-        if not isinstance(pile, dict):
+        if isinstance(pile, dict):
+            contents = dict(pile.get("items", {}) or {})
+            if int(pile.get("money", 0) or 0) <= 0 and not any(int(qty or 0) > 0 for qty in contents.values()):
+                floor_loot = self.dungeon_floor_loot()
+                if pile in floor_loot:
+                    floor_loot.remove(pile)
             return
-        contents = dict(pile.get("items", {}) or {})
-        if int(pile.get("money", 0) or 0) <= 0 and not any(int(qty or 0) > 0 for qty in contents.values()):
-            floor_loot = self.dungeon_floor_loot()
-            if pile in floor_loot:
-                floor_loot.remove(pile)
+        chest_id = str(record.get("dungeon_chest_id", ""))
+        dungeon_key = str(record.get("dungeon_key", ""))
+        if not chest_id or not dungeon_key:
+            return
+        contents, _capacity, _policy = self.normalize_container_record(record)
+        if int(record.get("money", 0) or 0) > 0 or any(
+            int(quantity or 0) > 0 for quantity in contents.values()
+        ):
+            return
+        dungeon_record = getattr(self, "dungeon_record", lambda _key: {})(dungeon_key)
+        if not isinstance(dungeon_record, dict):
+            return
+        opened = [str(value) for value in dungeon_record.get("opened_chests", [])]
+        if chest_id not in opened:
+            opened.append(chest_id)
+            dungeon_record["opened_chests"] = opened
 
     def take_all_from_container(self, record: Dict[str, object]) -> int:
         contents, _capacity, policy = self.normalize_container_record(record)
@@ -438,6 +1110,9 @@ class ContainerSystemMixin:
 
     def deposit_into_container(self, record: Dict[str, object]) -> bool:
         contents, capacity, _policy = self.normalize_container_record(record)
+        if not bool(record.get("allow_deposit", False)):
+            self.set_message("You cannot store your belongings in this container.")
+            return False
         free = max(0, capacity - self.container_used(contents))
         carried = [(name, int(qty)) for name, qty in sorted(self.state.inventory.items()) if int(qty or 0) > 0]
         items = [MenuItem(label=name, value=name, enabled=free > 0, hint=f"x{qty}") for name, qty in carried]
@@ -459,6 +1134,31 @@ class ContainerSystemMixin:
         self.autosave_with_message(f"Stored {quantity} {item_name} in {record.get('name', 'the container')}.")
         return True
 
+    def deposit_all_into_container(self, record: Dict[str, object]) -> int:
+        contents, capacity, _policy = self.normalize_container_record(record)
+        if not bool(record.get("allow_deposit", False)):
+            self.set_message("You cannot store your belongings in this container.")
+            return 0
+        free = max(0, capacity - self.container_used(contents))
+        stored = 0
+        for item_name, carried in sorted(self.state.inventory.items()):
+            carried = max(0, int(carried or 0))
+            if carried <= 0 or free <= 0:
+                continue
+            quantity = min(carried, free)
+            self.state.inventory[item_name] = carried - quantity
+            contents[item_name] = int(contents.get(item_name, 0) or 0) + quantity
+            stored += quantity
+            free -= quantity
+        if stored:
+            suffix = " The container is full." if free <= 0 else ""
+            self.autosave_with_message(
+                f"Stored {stored} carried item(s) in {record.get('name', 'the container')}.{suffix}"
+            )
+        else:
+            self.set_message("There is nothing that can be stored here.")
+        return stored
+
     def inspect_container_item(self, item_name: str, quantity: int, record: Dict[str, object]) -> None:
         value = self.container_item_sell_price(item_name)
         rows = [
@@ -468,33 +1168,134 @@ class ContainerSystemMixin:
         ]
         self.vertical_panel_view(item_name, rows, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
 
-    def container_item_menu(self, record: Dict[str, object], item_name: str) -> None:
-        contents, _capacity, policy = self.normalize_container_record(record)
-        while int(contents.get(item_name, 0) or 0) > 0:
-            quantity = int(contents.get(item_name, 0) or 0)
-            take_label = "Steal" if policy == "theft" else "Take"
-            items = [MenuItem(label="Inspect", value="inspect", enabled=True, hint=self.container_item_description(item_name))]
-            if policy != "display":
-                items.extend([
-                    MenuItem(label=f"{take_label} one", value="one", enabled=self.backpack_fit_quantity(item_name) > 0, hint=f"backpack {self.backpack_used()}/{self.backpack_capacity()}"),
-                    MenuItem(label=f"{take_label} quantity", value="quantity", enabled=self.backpack_fit_quantity(item_name) > 0, hint=f"x{quantity} here"),
-                ])
+    def inspect_container_money(self, quantity: int, record: Dict[str, object]) -> None:
+        self.vertical_panel_view(
+            "Coins",
+            [
+                "Currency kept in this container.",
+                "",
+                f"Quantity here: {max(0, int(quantity))}g",
+                f"Owner: {record.get('owner') or 'unclaimed'}",
+            ],
+            LEFT_PANEL_WIDTH,
+            LEFT_PANEL_HEIGHT,
+        )
+
+    def take_container_items_menu(self, record: Dict[str, object]) -> None:
+        """Continuously collect whole stacks without per-item quantity prompts."""
+        while True:
+            contents, _capacity, policy = self.normalize_container_record(record)
+            if policy == "display":
+                self.set_message("This is display stock. Purchase it from the person responsible for the building.")
+                return
+            pile = record.get("_loot_pile")
+            money_source = pile if isinstance(pile, dict) else record
+            money = max(0, int(money_source.get("money", 0) or 0))
+            take_label = "Steal" if policy == "theft" else ("Withdraw" if policy == "player" else "Take")
+            items: List[MenuItem] = []
+            if money:
+                items.append(
+                    MenuItem(
+                        label=f"Coins x{money}",
+                        value="__money__",
+                        enabled=True,
+                        hint=f"{take_label.lower()} entire stack",
+                    )
+                )
+            for item_name, quantity in sorted(contents.items()):
+                quantity = max(0, int(quantity or 0))
+                if quantity <= 0:
+                    continue
+                fit = self.backpack_fit_quantity(str(item_name))
+                hint = f"x{quantity} | {take_label.lower()} entire stack"
+                if fit < quantity:
+                    hint = f"x{quantity} | room for {max(0, fit)}"
+                items.append(
+                    MenuItem(
+                        label=str(item_name),
+                        value=f"item:{item_name}",
+                        enabled=fit > 0,
+                        hint=hint,
+                    )
+                )
+            if not items:
+                self.remove_empty_loot_pile(record)
+                self.set_message("There is nothing left to take.")
+                return
             items.append(MenuItem(label="Back", value=MENU_BACK, enabled=True))
-            choice = self.vertical_panel_select(item_name, items, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT, return_back=True)
+            choice = self.vertical_panel_select(
+                f"{take_label} Items",
+                items,
+                LEFT_PANEL_WIDTH,
+                LEFT_PANEL_HEIGHT,
+                return_back=True,
+                hotkeys={"r": "__take_all__"},
+                hotkey_footer="Select: take full stack | R take all",
+            )
+            if choice is None or choice.value == MENU_BACK:
+                self.remove_empty_loot_pile(record)
+                return
+            if choice.value == "__take_all__":
+                self.take_all_from_container(record)
+            elif choice.value == "__money__":
+                self.take_container_money(record)
+            elif str(choice.value).startswith("item:"):
+                item_name = str(choice.value)[5:]
+                self.take_from_container(
+                    record,
+                    item_name,
+                    int(contents.get(item_name, 0) or 0),
+                )
+
+    def inspect_container_contents_menu(self, record: Dict[str, object]) -> None:
+        """Inspect any number of stacks while remaining in the contents browser."""
+        while True:
+            contents, _capacity, _policy = self.normalize_container_record(record)
+            pile = record.get("_loot_pile")
+            money_source = pile if isinstance(pile, dict) else record
+            money = max(0, int(money_source.get("money", 0) or 0))
+            items: List[MenuItem] = []
+            if money:
+                items.append(MenuItem(label=f"Coins x{money}", value="__money__", enabled=True, hint="inspect currency"))
+            for item_name, quantity in sorted(contents.items()):
+                quantity = max(0, int(quantity or 0))
+                if quantity <= 0:
+                    continue
+                value = self.container_item_sell_price(str(item_name))
+                hint = f"x{quantity}"
+                if value:
+                    hint += f" | ${value} each"
+                items.append(MenuItem(label=str(item_name), value=f"item:{item_name}", enabled=True, hint=hint))
+            if not items:
+                self.set_message("The container is empty.")
+                return
+            items.append(MenuItem(label="Back", value=MENU_BACK, enabled=True))
+            choice = self.vertical_panel_select(
+                "Inspect Contents",
+                items,
+                LEFT_PANEL_WIDTH,
+                LEFT_PANEL_HEIGHT,
+                return_back=True,
+                hotkey_footer="Select an item to inspect",
+            )
             if choice is None or choice.value == MENU_BACK:
                 return
-            if choice.value == "inspect":
-                self.inspect_container_item(item_name, quantity, record)
-            elif choice.value == "one":
-                self.take_from_container(record, item_name, 1)
-            elif choice.value == "quantity":
-                maximum = min(quantity, self.backpack_fit_quantity(item_name))
-                selected = self.vertical_quantity_select(
-                    take_label, item_name, 0, max_qty=maximum, start_qty=maximum,
-                    panel_width=LEFT_PANEL_WIDTH, panel_height=LEFT_PANEL_HEIGHT, return_back=True,
+            if choice.value == "__money__":
+                self.inspect_container_money(money, record)
+            elif str(choice.value).startswith("item:"):
+                item_name = str(choice.value)[5:]
+                self.inspect_container_item(
+                    item_name,
+                    int(contents.get(item_name, 0) or 0),
+                    record,
                 )
-                if selected != MENU_BACK and selected is not None and int(selected) > 0:
-                    self.take_from_container(record, item_name, int(selected))
+
+    def container_item_menu(self, record: Dict[str, object], item_name: str) -> None:
+        """Legacy extension hook: inspect one named stack without nested actions."""
+        contents, _capacity, _policy = self.normalize_container_record(record)
+        quantity = max(0, int(contents.get(item_name, 0) or 0))
+        if quantity > 0:
+            self.inspect_container_item(item_name, quantity, record)
 
     def show_world_container(self, record: Dict[str, object]) -> None:
         record["opened"] = True
@@ -506,25 +1307,50 @@ class ContainerSystemMixin:
             used = self.container_used(contents)
             title = str(record.get("name", "Container"))
             items: List[MenuItem] = []
-            if money:
-                items.append(MenuItem(label=f"Coins x{money}", value="__money__", enabled=policy != "display", hint="currency"))
-            for item_name, quantity in sorted(contents.items()):
-                if int(quantity or 0) > 0:
-                    value = self.container_item_sell_price(str(item_name))
-                    hint = f"x{int(quantity)}"
-                    if value:
-                        hint += f" | ${value} each"
-                    items.append(MenuItem(label=str(item_name), value=f"item:{item_name}", enabled=True, hint=hint))
+            stack_count = sum(1 for quantity in contents.values() if int(quantity or 0) > 0)
+            available = stack_count + (1 if money else 0)
+            if policy != "display":
+                action_label = "Steal items" if policy == "theft" else ("Withdraw items" if policy == "player" else "Take items")
+                items.append(
+                    MenuItem(
+                        label=action_label,
+                        value="__take__",
+                        enabled=available > 0,
+                        hint=f"{available} stack(s) | select to take full stacks",
+                    )
+                )
+            items.append(
+                MenuItem(
+                    label="Inspect contents",
+                    value="__inspect__",
+                    enabled=available > 0,
+                    hint=f"{available} stack(s)" if available else "empty",
+                )
+            )
             if bool(record.get("allow_deposit", False)):
                 items.append(MenuItem(label="Store carried item", value="__deposit__", enabled=used < capacity and self.backpack_used() > 0, hint=f"{used}/{capacity} stored"))
+                items.append(MenuItem(label="Store all carried items", value="__deposit_all__", enabled=used < capacity and self.backpack_used() > 0, hint="fill available space"))
             if record.get("extra_action") == "guides":
                 items.append(MenuItem(label="Read household guides", value="__guides__", enabled=True))
             if record.get("extra_action") == "keepsakes":
                 items.append(MenuItem(label="Review family keepsakes", value="__keepsakes__", enabled=True))
+            if record.get("extra_action") == "outfit":
+                items.append(MenuItem(label="Arrange clothes", value="__outfit__", enabled=True))
+            if record.get("extra_action") == "pantry":
+                items.append(MenuItem(label="Review pantry", value="__pantry__", enabled=True))
             items.append(MenuItem(label="Back", value=MENU_BACK, enabled=True))
+            hotkeys = {}
+            footer_parts = []
+            if policy != "display" and available > 0:
+                hotkeys["r"] = "__take_all__"
+                footer_parts.append("R take all")
+            if bool(record.get("allow_deposit", False)):
+                hotkeys["t"] = "__deposit_all__"
+                footer_parts.append("T store all")
+            hotkey_footer = " | ".join(footer_parts) if footer_parts else "Select a section"
             choice = self.vertical_panel_select(
                 title, items, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT, return_back=True,
-                hotkeys={"r": "__take_all__"}, hotkey_footer="R take all",
+                hotkeys=hotkeys, hotkey_footer=hotkey_footer,
             )
             if choice is None or choice.value == MENU_BACK:
                 self.remove_empty_loot_pile(record)
@@ -532,16 +1358,22 @@ class ContainerSystemMixin:
                 return
             if choice.value == "__take_all__":
                 self.take_all_from_container(record)
-            elif choice.value == "__money__":
-                self.take_container_money(record)
+            elif choice.value == "__take__":
+                self.take_container_items_menu(record)
+            elif choice.value == "__inspect__":
+                self.inspect_container_contents_menu(record)
             elif choice.value == "__deposit__":
                 self.deposit_into_container(record)
+            elif choice.value == "__deposit_all__":
+                self.deposit_all_into_container(record)
             elif choice.value == "__guides__":
                 self.show_bookshelf_menu()
             elif choice.value == "__keepsakes__":
                 self.vertical_panel_view("Keepsake Chest", self.family_event_log_lines(), LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
-            elif str(choice.value).startswith("item:"):
-                self.container_item_menu(record, str(choice.value)[5:])
+            elif choice.value == "__outfit__":
+                self.set_message("You sort coats, boots, and work clothes into something presentable.")
+            elif choice.value == "__pantry__":
+                self.set_message("The pantry labels make it easier to plan meals and supplies for a long trip.")
 
     def drop_rejected_inventory_near_player(self) -> Dict[str, int]:
         inventory = self.state.inventory
@@ -587,5 +1419,30 @@ class ContainerSystemMixin:
         choice = self.vertical_panel_select("Owned Storage", items, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT, return_back=True)
         if choice is None or choice.value == MENU_BACK:
             return MENU_BACK
-        self.show_world_container(records[int(choice.value)])
-        return "opened"
+        record = records[int(choice.value)]
+        contents, capacity, _policy = self.normalize_container_record(record)
+        rows = [
+            f"Location: {str(record.get('scope', 'unknown')).replace('location:', '')}",
+            f"Stored: {self.container_used(contents)}/{capacity}",
+            "",
+            "Contents:",
+        ]
+        rows.extend(
+            f"- {item_name} x{int(quantity)}"
+            for item_name, quantity in sorted(contents.items())
+            if int(quantity or 0) > 0
+        )
+        if len(rows) == 4:
+            rows.append("- Empty")
+        rows.extend([
+            "",
+            "This is an index only. Travel to the property and interact with the physical container to transfer items.",
+        ])
+        self.vertical_panel_view(
+            str(record.get("name", "Owned Storage")),
+            rows,
+            LEFT_PANEL_WIDTH,
+            LEFT_PANEL_HEIGHT,
+        )
+        self.set_message("Reviewed owned storage. Physical containers must be accessed in person.")
+        return "viewed"

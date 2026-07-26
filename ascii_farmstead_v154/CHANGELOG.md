@@ -1,5 +1,71 @@
 # Changelog
 
+## 0.9.0-beta.4
+
+- Added persistent world abilities: learned built-in and custom skills can use
+  their combat range and area shapes to ignite or extinguish vegetation, water
+  crops, freeze water into ice bridges, raise temporary stone crossings, clear
+  loose obstacles, restore scorched ground, and produce other elemental terrain
+  effects. Effects react to weather and seasons, remain visible across seamless
+  wilderness chunks, affect traversal, persist in saves, and protect actors,
+  structures, furniture, landmarks, crops, and dropped items from invalid casts.
+- Added V/Adventure > World abilities, universal Water Weave, level-gated Trail
+  Gust and Verdant Touch field techniques, no-effect/no-MP safeguards, terrain
+  inspection details, tutorials, and explicit world affinities in the custom
+  ability builder.
+- Expanded world abilities with four-rank affinity mastery, duration and MP-cost
+  progression, steam/mud/electricity/flash-freeze/overgrowth reactions, direct
+  Z/Enter effect management, crop-safe casting, and temporary crossings that
+  cannot expire beneath the player.
+- Added bounded physical wilderness-fire spread with deterministic propagation,
+  wet and nonflammable firebreaks, rain suppression, strict generation/quantity
+  limits, and complete town/farm-spread protection.
+- Made field casting seamless across loaded neighboring wilderness chunks, with
+  full area-shape previews, correct remote terrain/effect mutation, neighboring
+  actor and town protection, saved last-ability memory, and Y quick-casting.
+- Embedded the complete starting town, expandable farm, and physical mine into
+  the persistent wilderness at their original scale. A real ravine passage,
+  outward roads, spatially matched doors, global coordinates, and save migration
+  replace exterior Farm/Town transitions and miniature hub representations.
+- Overhauled player households for the seamless world. Spouses retain careers,
+  identity colors, public routines, and residence-aware schedules; children move
+  between home, farm, town, library, and market according to age, time, weather,
+  and weekday. Added household priorities, weekly check-ins, planned outings,
+  richer wedding choices, persistent memories, and a household dashboard.
+- Added dynamic family lives for generated residents, including relationships,
+  marriage before cohabitation, children, household growth, aging, and persistent
+  family records across procedural settlements.
+- Added Legacy Permadeath and True Permadeath settings. Legacy mode can continue
+  through an eligible child, while existing ageless and ordinary lifespan modes
+  remain available.
+- Unified the player ability menu across exploration and combat. Learned combat
+  skills remain visible outside encounters, support abilities gain field uses,
+  nearby hostiles restore tactical engagement, and several common abilities now
+  have stronger tactical identities and persistent battlefield effects.
+- Added traditional dungeon exploration memory: rooms remain hidden until entered
+  or opened, current visibility stays distinct from mapped terrain, and hidden
+  enemies, loot, traps, and descriptions no longer leak through darkness.
+- Rebuilt traps into concealed mechanisms with perception-based discovery,
+  bounded searching, distinct effects, real disarming consequences, recovered
+  materials, and enemy interaction.
+- Completed physical containers across authored and procedural interiors,
+  wilderness sites, outposts, player residences, combat remains, and dungeons.
+  Added semantic fixture contents, persistent relocation/depletion, bulk storage,
+  continuous take/inspect browsing, recovered valuables and utility items, and
+  local-only property storage access.
+- Gave each regional wilderness specialist one persistent physical home, daily
+  field routine, journal, relationship memory, lessons, specimen work, and route
+  development, while reducing excessive generic traveler populations.
+- Improved founded-town performance with bounded resident pathfinding and cached
+  occupancy lookups, substantially reducing slowdowns in populated interiors and
+  player-built settlements.
+- Fixed false wilderness-structure and dungeon transitions caused by shared
+  building glyphs, restoring safe collision with authored and generated facades.
+- Repaired seamless farming synchronization. Tilling, planting, watering,
+  harvesting, fertilizer, debris clearing, overnight weather, sprinklers,
+  automation, area tools, area sowing, livestock movement, and Grand Farm
+  cross-boundary behavior now share canonical farm coordinates.
+
 ## 0.9.0-beta.3
 
 - Added a universal persistent container system for chests, shelves, cabinets,

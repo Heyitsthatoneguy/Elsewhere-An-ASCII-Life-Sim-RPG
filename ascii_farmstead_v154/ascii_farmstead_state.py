@@ -514,12 +514,17 @@ class GameState:
     player_x: int = 8
     player_y: int = 9
     location: str = "Farm"
+    seamless_home_world_version: int = 0
     current_authored_residence_id: str = ""
     facing: str = "DOWN"
     tool_target_mode: str = "FRONT"
     live_time_enabled: bool = True
     time_speed: str = "Brisk"
     aging_and_death_enabled: bool = True
+    mortality_mode: str = ""
+    player_run_ended: bool = False
+    player_death_record: Dict[str, object] = None
+    mortality_history: List[Dict[str, object]] = None
     player_frozen_age: int = 0
     selected_tool_index: int = 0
     selected_seed: str = "Turnip"
@@ -555,6 +560,7 @@ class GameState:
     owned_wilderness_claims: Dict[str, Dict[str, object]] = None
     wilderness_settlements: Dict[str, Dict[str, object]] = None
     procedural_settlement_populations: Dict[str, Dict[str, object]] = None
+    npc_family_state: Dict[str, object] = None
     current_procedural_settlement_key: str = ""
     current_procedural_building_id: str = ""
     current_procedural_building_floor: int = 0
@@ -612,6 +618,7 @@ class GameState:
     family_meal_last_day: str = ""
     family_last_meal: str = ""
     spouse_support_mode: str = "Balanced"
+    family_world_state: Dict[str, object] = None
     child_affection: Dict[str, int] = None
     child_last_gift_day: Dict[str, str] = None
     child_last_lesson_day: Dict[str, str] = None
@@ -700,6 +707,10 @@ class GameState:
     wilderness_strongholds_cleared: int = 0
     wilderness_stronghold_state: Dict[str, Dict[str, object]] = None
     wilderness_poi_state: Dict[str, Dict[str, object]] = None
+    world_magic_effects: Dict[str, Dict[str, object]] = None
+    world_magic_tile_cooldowns: Dict[str, str] = None
+    world_magic_cast_counts: Dict[str, int] = None
+    last_world_magic_ability: str = ""
     mine_floor: int = 1
     mine_return_location: str = "Farm"
     deepest_mine_floor: int = 1
@@ -1131,6 +1142,8 @@ class GameState:
         self.spouse_support_mode = str(self.spouse_support_mode or "Balanced")
         if self.spouse_support_mode not in valid_spouse_modes:
             self.spouse_support_mode = "Balanced"
+        if not isinstance(self.family_world_state, dict):
+            self.family_world_state = {}
 
         self.child_affection = clean_family_points(self.child_affection)
         if not isinstance(self.child_last_gift_day, dict):
@@ -1413,6 +1426,26 @@ class GameState:
         except Exception:
             self.player_lifespan_age = 90
         self.aging_and_death_enabled = bool(self.aging_and_death_enabled)
+        valid_mortality_modes = {
+            "Immortal",
+            "Natural Mortality",
+            "Dynasty Permadeath",
+            "True Permadeath",
+        }
+        if str(self.mortality_mode) not in valid_mortality_modes:
+            self.mortality_mode = (
+                "Natural Mortality" if self.aging_and_death_enabled else "Immortal"
+            )
+        self.aging_and_death_enabled = self.mortality_mode != "Immortal"
+        self.player_run_ended = bool(self.player_run_ended)
+        if not isinstance(self.player_death_record, dict):
+            self.player_death_record = {}
+        if not isinstance(self.mortality_history, list):
+            self.mortality_history = []
+        self.mortality_history = [
+            record for record in self.mortality_history
+            if isinstance(record, dict)
+        ][-40:]
         try:
             self.player_frozen_age = max(0, int(self.player_frozen_age))
         except Exception:
@@ -1818,6 +1851,10 @@ class GameState:
         if not isinstance(self.wilderness_seed, int):
             self.wilderness_seed = 1337
         try:
+            self.seamless_home_world_version = max(0, min(2, int(self.seamless_home_world_version)))
+        except Exception:
+            self.seamless_home_world_version = 0
+        try:
             self.wilderness_chunk_x = int(self.wilderness_chunk_x)
         except Exception:
             self.wilderness_chunk_x = 0
@@ -1899,6 +1936,8 @@ class GameState:
         self.procedural_settlement_populations = sanitize_procedural_settlement_populations(
             self.procedural_settlement_populations
         )
+        if not isinstance(self.npc_family_state, dict):
+            self.npc_family_state = {}
         self.player_properties = sanitize_player_properties(self.player_properties)
         self.player_businesses = sanitize_player_businesses(self.player_businesses)
         self.player_trade_routes = sanitize_player_trade_routes(
@@ -2040,6 +2079,63 @@ class GameState:
                 if isinstance(record, dict):
                     cleaned_poi_state[str(poi_key)] = dict(record)
             self.wilderness_poi_state = cleaned_poi_state
+        if not isinstance(self.world_magic_effects, dict):
+            self.world_magic_effects = {}
+        else:
+            cleaned_world_magic: Dict[str, Dict[str, object]] = {}
+            valid_kinds = {
+                "fire", "ice", "wet", "scorched", "earth_bridge", "growth",
+                "cleared", "charged", "purified", "shadow", "steam", "mud",
+                "electrified", "overgrowth", "slick_ice",
+            }
+            for effect_key, raw in list(self.world_magic_effects.items())[-1200:]:
+                if not isinstance(raw, dict) or str(raw.get("kind", "")) not in valid_kinds:
+                    continue
+                try:
+                    expires_at = max(1, int(raw.get("expires_at", 0)))
+                    created_at = max(0, int(raw.get("created_at", 0)))
+                    x, y = int(raw.get("x", 0)), int(raw.get("y", 0))
+                    chunk_x = int(raw.get("chunk_x", 0) or 0)
+                    chunk_y = int(raw.get("chunk_y", 0) or 0)
+                    next_spread_at = max(0, int(raw.get("next_spread_at", 0) or 0))
+                    spread_count = max(0, min(2, int(raw.get("spread_count", 0) or 0)))
+                    generation = max(0, min(4, int(raw.get("generation", 0) or 0)))
+                except (TypeError, ValueError):
+                    continue
+                cleaned_world_magic[str(effect_key)[:180]] = {
+                    "kind": str(raw.get("kind", "")),
+                    "scope": str(raw.get("scope", ""))[:120],
+                    "x": x,
+                    "y": y,
+                    "created_at": created_at,
+                    "expires_at": expires_at,
+                    "source": str(raw.get("source", ""))[:48],
+                    "original_tile": str(raw.get("original_tile", ""))[:1],
+                    "chunk_x": chunk_x,
+                    "chunk_y": chunk_y,
+                    "next_spread_at": next_spread_at,
+                    "spread_count": spread_count,
+                    "generation": generation,
+                }
+            self.world_magic_effects = cleaned_world_magic
+        if not isinstance(self.world_magic_tile_cooldowns, dict):
+            self.world_magic_tile_cooldowns = {}
+        else:
+            self.world_magic_tile_cooldowns = {
+                str(key)[:220]: str(value)[:24]
+                for key, value in list(self.world_magic_tile_cooldowns.items())[-1500:]
+            }
+        if not isinstance(self.world_magic_cast_counts, dict):
+            self.world_magic_cast_counts = {}
+        else:
+            cleaned_cast_counts: Dict[str, int] = {}
+            for affinity, count in self.world_magic_cast_counts.items():
+                try:
+                    cleaned_cast_counts[str(affinity)[:24]] = max(0, int(count))
+                except (TypeError, ValueError):
+                    continue
+            self.world_magic_cast_counts = cleaned_cast_counts
+        self.last_world_magic_ability = str(self.last_world_magic_ability or "")[:48]
         self.mine_floor = normalize_mine_floor(self.mine_floor)
         self.deepest_mine_floor = max(normalize_mine_floor(self.deepest_mine_floor), self.mine_floor)
         self.unlocked_mine_elevators = sorted(
@@ -2239,6 +2335,12 @@ def apply_loaded_state_defaults(state_data: Dict[str, object]):
 
 def prepare_loaded_state_data(state_data: Dict[str, object]) -> Dict[str, object]:
     state_data = dict(state_data)
+    if "mortality_mode" not in state_data:
+        state_data["mortality_mode"] = (
+            "Natural Mortality"
+            if bool(state_data.get("aging_and_death_enabled", True))
+            else "Immortal"
+        )
     legacy_town_access = "town_development_stage" not in state_data and "unlocked_town_buildings" not in state_data
     legacy_mine_progress_without_clear_state = not any(
         key in state_data

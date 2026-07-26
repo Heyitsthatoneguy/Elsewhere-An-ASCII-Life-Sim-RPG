@@ -19,12 +19,26 @@ from ascii_farmstead_combat import (
 from ascii_farmstead_data import LEFT_PANEL_HEIGHT, LEFT_PANEL_WIDTH, MENU_BACK
 from ascii_farmstead_helpers import add_months_to_date, format_birthday, format_date
 from ascii_farmstead_npc_builder import stable_text_seed
-from ascii_farmstead_ui import MenuItem
+from ascii_farmstead_ui import MenuItem, menu_select
 
 
 DYNASTY_RETIREMENT_AGE = 55
 DYNASTY_HEIR_AGE_MONTHS = 216
 DYNASTY_HEALTH_WARNING_AGE = 75
+
+MORTALITY_MODES = (
+    "Immortal",
+    "Natural Mortality",
+    "Dynasty Permadeath",
+    "True Permadeath",
+)
+
+MORTALITY_MODE_DESCRIPTIONS = {
+    "Immortal": "No permanent player death. Children grow up, but adults stop aging.",
+    "Natural Mortality": "Old age can cause succession; combat defeat remains recoverable.",
+    "Dynasty Permadeath": "Combat and old age can kill the player; a child continues the dynasty.",
+    "True Permadeath": "Any player death permanently ends this save's run, even when heirs exist.",
+}
 
 DYNASTY_HEIRLOOMS: Dict[str, Dict[str, str]] = {
     "field_journal": {
@@ -55,6 +69,20 @@ class DynastyMixin:
 
     def aging_and_death_active(self) -> bool:
         return bool(getattr(self.state, "aging_and_death_enabled", True))
+
+    def mortality_mode(self) -> str:
+        mode = str(getattr(self.state, "mortality_mode", "") or "")
+        if mode not in MORTALITY_MODES:
+            mode = "Natural Mortality" if self.aging_and_death_active() else "Immortal"
+            self.state.mortality_mode = mode
+        return mode
+
+    def mortality_mode_description(self, mode: str = "") -> str:
+        mode = str(mode or self.mortality_mode())
+        return MORTALITY_MODE_DESCRIPTIONS.get(mode, MORTALITY_MODE_DESCRIPTIONS["Natural Mortality"])
+
+    def combat_defeat_is_lethal(self) -> bool:
+        return self.mortality_mode() in {"Dynasty Permadeath", "True Permadeath"}
 
     def dynasty_lifespan_for_identity(
         self,
@@ -256,6 +284,7 @@ class DynastyMixin:
                         person["frozen_age_years"] = raw_age
                         person["age_years"] = raw_age
             self.state.aging_and_death_enabled = False
+            self.state.mortality_mode = "Immortal"
             message = (
                 "Aging and death disabled. Children still grow to adulthood; "
                 "adults remain in their current life stage."
@@ -332,11 +361,64 @@ class DynastyMixin:
                 )
                 person["age_years"] = frozen
             self.state.aging_and_death_enabled = True
+            if self.mortality_mode() == "Immortal":
+                self.state.mortality_mode = "Natural Mortality"
             message = "Aging and natural death enabled. Life stages will progress again."
         if autosave:
             self.autosave_with_message(message)
         else:
             self.set_message(message)
+
+    def set_mortality_mode(self, mode: str, autosave: bool = True) -> bool:
+        mode = str(mode)
+        if mode not in MORTALITY_MODES:
+            self.set_message("Unknown mortality mode.")
+            return False
+        target_aging = mode != "Immortal"
+        if target_aging != self.aging_and_death_active():
+            self.set_aging_and_death_enabled(target_aging, autosave=False)
+        self.state.mortality_mode = mode
+        self.state.aging_and_death_enabled = target_aging
+        message = f"Mortality mode: {mode}. {self.mortality_mode_description(mode)}"
+        if autosave:
+            self.autosave_with_message(message)
+        else:
+            self.set_message(message)
+        return True
+
+    def show_mortality_mode_menu(self, startup: bool = False) -> str:
+        items = [
+            MenuItem(
+                label=mode,
+                value=mode,
+                enabled=True,
+                hint=("Selected" if mode == self.mortality_mode() else self.mortality_mode_description(mode)),
+            )
+            for mode in MORTALITY_MODES
+        ]
+        items.append(MenuItem(label="Back", value=MENU_BACK, enabled=True))
+        if startup:
+            choice = menu_select(
+                "Mortality Mode",
+                items,
+                footer="Choose how player death and succession work | X/Esc back",
+                extra_lines=[
+                    "Strict modes can end a character or the entire run.",
+                    "The setting can be changed later from System > Settings.",
+                ],
+            )
+        else:
+            choice = self.vertical_panel_select(
+                "Mortality Mode",
+                items,
+                LEFT_PANEL_WIDTH,
+                LEFT_PANEL_HEIGHT,
+                return_back=True,
+            )
+        if choice is None or choice.value == MENU_BACK:
+            return MENU_BACK
+        self.set_mortality_mode(str(choice.value), autosave=not startup)
+        return str(choice.value)
 
     def dynasty_relation_for_generation(
         self,
@@ -1040,7 +1122,8 @@ class DynastyMixin:
         return total
 
     def simulate_dynasty_transition(self, years: int) -> List[str]:
-        years = max(0, min(10, int(years)))
+        # A minor heir may require a full regency before taking over at eighteen.
+        years = max(0, min(18, int(years)))
         if years <= 0:
             return ["No time jump; succession occurred immediately."]
         start_year = int(self.state.year)
@@ -1101,6 +1184,178 @@ class DynastyMixin:
         )[-40:]
         return lines
 
+    def mortality_heir_candidates(self) -> List[Dict[str, object]]:
+        children = [
+            child for child in (getattr(self.state, "children", []) or [])
+            if isinstance(child, dict)
+        ]
+        return sorted(
+            children,
+            key=lambda child: (
+                -self.household_child_age_months(child),
+                str(child.get("name", "")),
+            ),
+        )
+
+    def select_mortality_heir(self, interactive: bool = True) -> Optional[Dict[str, object]]:
+        candidates = self.mortality_heir_candidates()
+        if not candidates:
+            return None
+        designated_id = int(getattr(self.state, "designated_heir_child_id", 0) or 0)
+        designated = next(
+            (child for child in candidates if self.child_dynasty_id(child) == designated_id),
+            None,
+        )
+        if designated or not interactive or len(candidates) == 1:
+            return designated or candidates[0]
+        items = [
+            MenuItem(
+                label=str(child.get("name", "Heir")),
+                value=self.child_dynasty_id(child),
+                enabled=True,
+                hint=(
+                    f"{self.household_child_stage(child)}, age "
+                    f"{self.household_child_age_months(child) // 12}"
+                ),
+            )
+            for child in candidates
+        ]
+        choice = self.vertical_panel_select(
+            "Choose a Successor",
+            items,
+            LEFT_PANEL_WIDTH,
+            LEFT_PANEL_HEIGHT,
+            return_back=False,
+        )
+        selected_id = int(choice.value) if choice is not None else self.child_dynasty_id(candidates[0])
+        return next(
+            (child for child in candidates if self.child_dynasty_id(child) == selected_id),
+            candidates[0],
+        )
+
+    def player_mortality_record(self, cause: str, source: str = "") -> Dict[str, object]:
+        record = self.dynasty_record_for_current_player(
+            str(cause),
+            int(self.state.year),
+        )
+        record.update({
+            "death_month": int(self.state.month),
+            "death_day": int(self.state.day),
+            "death_year": int(self.state.year),
+            "death_cause": str(cause),
+            "death_source": str(source),
+            "death_location": str(getattr(self.state, "location", "Unknown")),
+            "combat_level": int(getattr(self.state, "combat_level", 1) or 1),
+            "combat_victories": int(getattr(self.state, "mine_combat_victories", 0) or 0),
+            "enemies_defeated": int(getattr(self.state, "mine_enemies_defeated", 0) or 0),
+            "mortality_mode": self.mortality_mode(),
+            "successor_name": "",
+        })
+        return record
+
+    def player_memorial_lines(self, record: Optional[Dict[str, object]] = None) -> List[str]:
+        record = record or getattr(self.state, "player_death_record", {}) or {}
+        if not record:
+            return ["No completed life is recorded for this save."]
+        children = list(record.get("children", []) or [])
+        lines = [
+            str(record.get("name", "Farmer")).upper(),
+            f"Generation {record.get('generation', 1)} of {self.state.dynasty_name}",
+            "",
+            f"Lived to age {record.get('age', '?')}",
+            f"Died: {format_date(record.get('death_month', 1), record.get('death_day', 1), record.get('death_year', 1))}",
+            f"Cause: {record.get('death_cause', record.get('end_reason', 'Unknown'))}",
+            f"Final location: {record.get('death_location', 'Unknown')}",
+            f"Combat level: {record.get('combat_level', 1)}",
+            f"Enemies defeated: {record.get('enemies_defeated', 0)}",
+            f"Deepest mine floor: {record.get('mine_depth', 1)}",
+            f"Properties: {record.get('properties', 0)} | Businesses: {record.get('businesses', 0)} | Routes: {record.get('routes', 0)}",
+            f"Children: {len(children)}",
+        ]
+        if record.get("successor_name"):
+            lines.extend(["", f"Succeeded by: {record.get('successor_name')}"])
+        elif bool(getattr(self.state, "player_run_ended", False)):
+            lines.extend(["", "This permadeath run has ended. The memorial remains viewable, but gameplay cannot continue from this save."])
+        return lines
+
+    def show_player_memorial(self) -> None:
+        self.vertical_panel_view(
+            "Run Memorial",
+            self.player_memorial_lines(),
+            LEFT_PANEL_WIDTH,
+            LEFT_PANEL_HEIGHT,
+        )
+
+    def finalize_permadeath_run(
+        self,
+        record: Dict[str, object],
+        interactive: bool = True,
+    ) -> bool:
+        self.state.player_death_record = dict(record)
+        self.state.mortality_history = (
+            list(getattr(self.state, "mortality_history", []) or []) + [dict(record)]
+        )[-40:]
+        self.state.dynasty_history = (
+            list(getattr(self.state, "dynasty_history", []) or []) + [dict(record)]
+        )[-40:]
+        self.state.player_run_ended = True
+        self.state.combat_current_hp = 0
+        if hasattr(self, "save"):
+            self.save(quiet=True)
+        self.set_message(
+            f"{record.get('name', 'The player')} died: {record.get('death_cause', 'unknown cause')}. This permadeath run has ended."
+        )
+        if interactive:
+            self.show_player_memorial()
+            self.running = False
+        return True
+
+    def resolve_player_death(
+        self,
+        cause: str,
+        source: str = "",
+        interactive: bool = True,
+    ) -> bool:
+        mode = self.mortality_mode()
+        if mode not in {"Dynasty Permadeath", "True Permadeath"}:
+            return False
+        record = self.player_mortality_record(cause, source)
+        if mode == "True Permadeath":
+            return self.finalize_permadeath_run(record, interactive=interactive)
+        heir = self.select_mortality_heir(interactive=interactive)
+        if heir is None:
+            record["death_cause"] = f"{cause}; no heir survived to continue the dynasty"
+            return self.finalize_permadeath_run(record, interactive=interactive)
+        heir_name = str(heir.get("name", "the heir"))
+        record["successor_name"] = heir_name
+        self.state.player_death_record = dict(record)
+        self.state.mortality_history = (
+            list(getattr(self.state, "mortality_history", []) or []) + [dict(record)]
+        )[-40:]
+        child_months = self.household_child_age_months(heir)
+        wait_years = max(0, (DYNASTY_HEIR_AGE_MONTHS - child_months + 11) // 12)
+        succeeded = self.perform_dynasty_succession(
+            self.child_dynasty_id(heir),
+            reason=str(cause),
+            transition_years=max(1, wait_years),
+            interactive=interactive,
+            allow_minor_heir=True,
+        )
+        if succeeded:
+            self.state.player_run_ended = False
+            return True
+        return self.finalize_permadeath_run(record, interactive=interactive)
+
+    def handle_combat_defeat_mortality(
+        self,
+        cause: str,
+        source: str = "combat",
+        interactive: bool = True,
+    ) -> bool:
+        if not self.combat_defeat_is_lethal():
+            return False
+        return self.resolve_player_death(cause, source=source, interactive=interactive)
+
     def perform_dynasty_succession(
         self,
         child_id: int,
@@ -1108,11 +1363,17 @@ class DynastyMixin:
         transition_years: int = 3,
         interactive: bool = True,
         heirloom_type: str = "",
+        allow_minor_heir: bool = False,
     ) -> bool:
+        candidate_pool = (
+            self.mortality_heir_candidates()
+            if allow_minor_heir
+            else self.eligible_dynasty_heirs()
+        )
         child = next(
             (
                 candidate
-                for candidate in self.eligible_dynasty_heirs()
+                for candidate in candidate_pool
                 if self.child_dynasty_id(candidate) == int(child_id)
             ),
             None,
@@ -1121,6 +1382,12 @@ class DynastyMixin:
             self.set_message("No eligible heir was selected.")
             return False
         child = self.ensure_child_profile_fields(child)
+        if allow_minor_heir:
+            child_months = self.household_child_age_months(child)
+            transition_years = max(
+                int(transition_years),
+                max(0, (DYNASTY_HEIR_AGE_MONTHS - child_months + 11) // 12),
+            )
         old_name = str(self.state.player_name)
         old_generation = int(self.state.player_generation)
         record = self.dynasty_record_for_current_player(
@@ -1178,10 +1445,13 @@ class DynastyMixin:
         )
         transition_lines = self.simulate_dynasty_transition(transition_years)
         self.state.dynasty_last_family_update_year = int(self.state.year)
-        self.state.location = "Farm"
-        self.state.player_x = 8
-        self.state.player_y = 9
-        self.state.facing = "DOWN"
+        if hasattr(self, "return_to_seamless_farm"):
+            self.return_to_seamless_farm(8, 9, facing="DOWN")
+        else:
+            self.state.location = "Farm"
+            self.state.player_x = 8
+            self.state.player_y = 9
+            self.state.facing = "DOWN"
         self.state.stamina = self.max_stamina()
         self.state.hour = 6
         self.state.minute = 0
@@ -1257,17 +1527,40 @@ class DynastyMixin:
             if age >= DYNASTY_HEALTH_WARNING_AGE:
                 return f" {self.state.player_name} is now {age}; {self.player_health_outlook()}"
             return f" {self.state.player_name} is now {age}."
+        if self.mortality_mode() in {"Dynasty Permadeath", "True Permadeath"}:
+            old_name = str(self.state.player_name)
+            if self.resolve_player_death(
+                "Natural death in old age",
+                source="old age",
+                interactive=False,
+            ):
+                if bool(getattr(self.state, "player_run_ended", False)):
+                    return f" {old_name} died peacefully in old age. The permadeath run has ended."
+                return (
+                    f" {old_name} died peacefully in old age. "
+                    f"{self.state.player_name} now leads the dynasty."
+                )
         heirs = self.eligible_dynasty_heirs()
         heir = self.designated_dynasty_heir() or (heirs[0] if heirs else None)
         if heir:
             old_name = str(self.state.player_name)
             heir_name = str(heir.get("name", "the heir"))
+            death_record = self.player_mortality_record(
+                "Natural death in old age",
+                source="old age",
+            )
+            death_record["successor_name"] = heir_name
             if self.perform_dynasty_succession(
                 self.child_dynasty_id(heir),
                 reason="Natural death in old age",
                 transition_years=1,
                 interactive=False,
             ):
+                self.state.player_death_record = dict(death_record)
+                self.state.mortality_history = (
+                    list(getattr(self.state, "mortality_history", []) or [])
+                    + [dict(death_record)]
+                )[-40:]
                 return (
                     f" {old_name} died peacefully in old age. "
                     f"After a year of mourning and transition, {heir_name} "
@@ -1458,6 +1751,8 @@ class DynastyMixin:
             self.player_age_display_line(),
             f"Background: {self.state.player_background}",
             f"Starting class: {self.state.player_starting_class}",
+            f"Mortality mode: {self.mortality_mode()}",
+            f"Mortality rules: {self.mortality_mode_description()}",
             f"Health outlook: {self.player_health_outlook()}",
             f"Designated heir: {heir.get('name') if heir else 'none'}",
             f"Eligible heirs: {len(self.eligible_dynasty_heirs())}",
@@ -1610,6 +1905,12 @@ class DynastyMixin:
                 MenuItem(label="Dynasty ledger", value="ledger", enabled=True),
                 MenuItem(label="Family tree", value="tree", enabled=True),
                 MenuItem(
+                    label="Last life memorial",
+                    value="memorial",
+                    enabled=bool(getattr(self.state, "player_death_record", {})),
+                    hint="previous farmstead head",
+                ),
+                MenuItem(
                     label="Heirloom collection",
                     value="heirlooms",
                     enabled=bool(self.state.dynasty_heirlooms),
@@ -1656,6 +1957,8 @@ class DynastyMixin:
                     LEFT_PANEL_WIDTH,
                     LEFT_PANEL_HEIGHT,
                 )
+            elif choice.value == "memorial":
+                self.show_player_memorial()
             elif choice.value == "heirlooms":
                 lines = ["HEIRLOOM COLLECTION", ""]
                 for heirloom in self.state.dynasty_heirlooms:

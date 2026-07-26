@@ -306,10 +306,6 @@ class NpcMixin:
     def town_npc_role_color(self, npc: Dict[str, object]) -> str:
         role = str(npc.get("role", "Villager"))
         friendship = self.town_npc_relationship(str(npc.get("id", "")))
-        if friendship < 0:
-            return C.DIM
-        if friendship >= 100:
-            return C.PLAYER
         role_colors = {
             "Mayor": C.CROP_READY,
             "Seed Seller": C.SPRING_GRASS,
@@ -345,13 +341,34 @@ class NpcMixin:
             "Teen": C.WATER,
             "Young Adult": C.PLAYER,
         }
-        return role_colors.get(role, C.SHOP)
+        identity_color = dict(PLAYER_COLOR_OPTIONS).get(str(npc.get("color", "")))
+        base_color = identity_color or role_colors.get(role, C.SHOP)
+        # Marriage must not repaint a person. Relationship highlighting used to
+        # turn every high-friendship spouse white, while generated spouses also
+        # lost the persistent color assigned by their settlement identity.
+        if str(npc.get("id", "")) == str(getattr(self.state, "spouse_npc_id", "")):
+            return base_color
+        if friendship < 0:
+            return C.DIM
+        if friendship >= 100:
+            return C.PLAYER
+        return base_color
 
     def town_npc_near_player(self, npc: Dict[str, object], distance: int = 3) -> bool:
-        if not self.on_town() or self.town_npc_is_indoor(npc):
+        seamless_town = bool(
+            hasattr(self, "in_seamless_town_district")
+            and self.in_seamless_town_district()
+        )
+        if not (self.on_town() or seamless_town) or self.town_npc_is_indoor(npc):
             return False
         try:
-            return abs(int(npc.get("x", 0)) - self.state.player_x) + abs(int(npc.get("y", 0)) - self.state.player_y) <= distance
+            player_x, player_y = int(self.state.player_x), int(self.state.player_y)
+            if seamless_town:
+                source = self.home_world_town_source_position(player_x, player_y)
+                if source is None:
+                    return False
+                player_x, player_y = source
+            return abs(int(npc.get("x", 0)) - player_x) + abs(int(npc.get("y", 0)) - player_y) <= distance
         except Exception:
             return False
 
@@ -366,8 +383,17 @@ class NpcMixin:
                 npc_x, npc_y = npc_pos
             else:
                 npc_x, npc_y = int(npc.get("x", 0)), int(npc.get("y", 0))
-            dx = self.state.player_x - npc_x
-            dy = self.state.player_y - npc_y
+            player_x, player_y = int(self.state.player_x), int(self.state.player_y)
+            if (
+                hasattr(self, "in_seamless_town_district")
+                and self.in_seamless_town_district()
+            ):
+                source = self.home_world_town_source_position(player_x, player_y)
+                if source is None:
+                    return
+                player_x, player_y = source
+            dx = player_x - npc_x
+            dy = player_y - npc_y
         except Exception:
             return
         if abs(dx) > abs(dy):
@@ -520,6 +546,10 @@ class NpcMixin:
         if reactivity:
             lines.extend(["", "What they notice:"])
             lines.extend(f"- {line}" for line in reactivity)
+        if hasattr(self, "npc_family_status_lines"):
+            family_lines = self.npc_family_status_lines(str(npc.get("id", "")))
+            if family_lines:
+                lines.extend(["", *family_lines])
         if self.is_marriageable_npc(npc):
             lines.append("")
             lines.extend(self.town_npc_romance_lines(npc))
@@ -695,7 +725,15 @@ class NpcMixin:
         npc_id = str(npc.get("id", ""))
         if not self.is_romance_candidate_npc(npc):
             return False
-        return self.state.spouse_npc_id == npc_id or self.is_heterosexual_match_for_player(npc)
+        if self.state.spouse_npc_id == npc_id:
+            return True
+        if str(npc.get("npc_spouse_id", "")) or str(npc.get("marital_status", "Single")) in {"Courting", "Engaged", "Married"}:
+            return False
+        if hasattr(self, "npc_family_profile"):
+            family_profile = self.npc_family_profile(npc_id)
+            if str(family_profile.get("npc_spouse_id", "")) or str(family_profile.get("marital_status", "Single")) in {"Courting", "Engaged", "Married"}:
+                return False
+        return self.is_heterosexual_match_for_player(npc)
 
     def romance_data_for_npc(self, npc: Dict[str, object]) -> Dict[str, str]:
         data = ROMANCE_NPC_DATA.get(str(npc.get("id", "")), {})
@@ -1242,9 +1280,14 @@ class NpcMixin:
             )
             procedural["memories"] = memories[-16:]
 
+        wedding_venue = (
+            str(self.ensure_family_world_state().get("wedding_plan", {}).get("venue", "Town Hall"))
+            if hasattr(self, "ensure_family_world_state")
+            else "Town Hall"
+        )
         self.record_family_event(
             "Wedding",
-            f"Married {npc.get('name')} in a Town Hall ceremony.",
+            f"Married {npc.get('name')} at {wedding_venue}.",
             flag=(
                 f"wedding:{npc_id}:{self.state.year}:"
                 f"{self.state.month}:{self.state.day}"
@@ -1907,8 +1950,8 @@ class NpcMixin:
         if not self.state.spouse_npc_id or self.state.spouse_npc_id != npc_id:
             return False, "Only your spouse can move onto the farm."
         if self.state.spouse_moved_to_farm:
-            return False, f"{npc.get('name', 'Your spouse')} already lives at the farmhouse."
-        return True, "Invite them to move into the farmhouse."
+            return False, f"{npc.get('name', 'Your spouse')} already shares your household."
+        return True, "Invite them to form a shared household with you."
 
     def invite_spouse_to_farm(self, npc: Dict[str, object]) -> bool:
         ok, reason = self.can_invite_spouse_to_farm(npc)
@@ -1922,12 +1965,12 @@ class NpcMixin:
         rows = [
             f"{npc.get('name')} Moves In",
             "",
-            f"{npc.get('name')} agrees to move into the farmhouse with you.",
-            "They will now appear at home, and you can keep talking, gifting, and spending courtship time together there.",
+            f"{npc.get('name')} agrees to form a shared household with you.",
+            "They keep their career and relationships while adding real home, errand, work, and family routines to their week.",
         ]
-        self.record_family_event("Move-In", f"{npc.get('name')} moved into the farmhouse.", flag=f"move_in:{npc_id}")
-        self.vertical_panel_view("Farmhouse Move-In", rows, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
-        self.autosave_with_message(f"{npc.get('name')} moved into the farmhouse.")
+        self.record_family_event("Shared Household", f"{npc.get('name')} moved in and kept an independent daily life.", flag=f"move_in:{npc_id}")
+        self.vertical_panel_view("Shared Household", rows, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
+        self.autosave_with_message(f"{npc.get('name')} joined your household.")
         return True
 
     def pregnancy_due_date_label(self) -> str:
@@ -2892,7 +2935,8 @@ class NpcMixin:
         self.state.pregnancy_due_day = 0
         self.state.pregnancy_due_year = 0
         self.state.pregnancy_checkup_months_seen = []
-        return f" {child_name} was born and now lives in the farmhouse. Starting class: {profile_fields.get('starting_class', 'Vanguard')}."
+        home = self.family_household_home_label() if hasattr(self, "family_household_home_label") else "the farmhouse"
+        return f" {child_name} was born and now lives at {home}. Starting class: {profile_fields.get('starting_class', 'Vanguard')}."
 
     def household_help_candidate_children(self) -> List[Dict[str, object]]:
         helpers: List[Dict[str, object]] = []
@@ -3445,19 +3489,20 @@ class NpcMixin:
         return {**spec, "npc_id": npc_id, "band": self.home_region_commute_band()}
 
     def home_region_route_points(self, destination_id: str) -> List[Tuple[int, int]]:
-        """Ordered local-road cells from Elsewhere to a home-district endpoint."""
-        gateways = self.origin_world_gateway_positions()
-        start_x, start_y = gateways["town"]
-        gateway_key = "mine" if str(destination_id) == "home-mine" else "farm"
-        end_x, end_y = gateways[gateway_key]
-        points = [(start_x, y) for y in range(start_y, 37)]
-        points.extend((x, 36) for x in range(start_x + 1, end_x + 1))
-        points.extend((end_x, y) for y in range(35, end_y - 1, -1))
+        """Ordered world-coordinate road cells from town to a home endpoint."""
+        start_x, start_y = self.home_world_world_for_town_position(110, 20)
+        if str(destination_id) == "home-mine":
+            end_x, end_y = self.home_world_destination_world_positions()["mine"]
+        else:
+            end_x, end_y = self.home_world_destination_world_positions()["farm"]
+        step_x = 1 if end_x >= start_x else -1
+        points = [(x, start_y) for x in range(start_x, end_x + step_x, step_x)]
+        if end_y != start_y:
+            step_y = 1 if end_y >= start_y else -1
+            points.extend((end_x, y) for y in range(start_y + step_y, end_y + step_y, step_y))
         return points
 
     def home_region_commuters_for_chunk(self, chunk_x: int, chunk_y: int) -> List[Dict[str, object]]:
-        if (int(chunk_x), int(chunk_y)) != (0, 0):
-            return []
         band = self.home_region_commute_band()
         # During the work window these residents have crossed the gateway and
         # are represented by ordinary NPC actors inside the farm or mine.
@@ -3498,19 +3543,38 @@ class NpcMixin:
             # Coworkers on the same route walk a few paces apart and use nearby
             # approach cells while working instead of occupying one actor cell.
             path_index = max(0, path_index - len(travelers) * 2)
-            preferred_x, preferred_y = usable_path[max(0, min(len(usable_path) - 1, path_index))]
-            target_gateway = "town" if target_id == "main-town" else ("mine" if target_id == "home-mine" else "farm")
-            target_x, target_y = self.origin_world_gateway_positions()[target_gateway]
+            preferred_world_x, preferred_world_y = usable_path[
+                max(0, min(len(usable_path) - 1, path_index))
+            ]
+            actor_chunk_x, actor_chunk_y, preferred_x, preferred_y = self.home_world_chunk_from_world(
+                preferred_world_x, preferred_world_y,
+            )
+            if (actor_chunk_x, actor_chunk_y) != (int(chunk_x), int(chunk_y)):
+                continue
+            target_gateway = "town" if target_id == "main-town" else (
+                "mine" if target_id == "home-mine" else "farm"
+            )
+            target_x, target_y = self.home_world_destination_world_positions()[target_gateway]
+            target_chunk_x, target_chunk_y, _target_local_x, _target_local_y = self.home_world_chunk_from_world(
+                target_x, target_y,
+            )
+            local_route = []
+            for route_world_x, route_world_y in usable_path:
+                route_chunk_x, route_chunk_y, route_x, route_y = self.home_world_chunk_from_world(
+                    route_world_x, route_world_y,
+                )
+                if (route_chunk_x, route_chunk_y) == (int(chunk_x), int(chunk_y)):
+                    local_route.append((route_x, route_y))
             travelers.append({
                 "id": str(npc.get("id", "")), "name": str(npc.get("name", "Town Resident")),
                 "role": str(npc.get("role", "Resident")), "regional_circulation": True,
                 "authored_resident_trip": True, "home_region_commute": True,
                 "road_route": True, "fixed_road_route": True, "static_actor": band == "working",
                 "preferred_x": preferred_x, "preferred_y": preferred_y,
-                "home_route_points": list(usable_path),
+                "home_route_points": local_route,
                 "route_destination_id": target_id, "route_destination_name": target_name,
-                "route_destination_kind": target_kind, "route_destination_chunk_x": 0,
-                "route_destination_chunk_y": 0, "route_destination_world_x": target_x,
+                "route_destination_kind": target_kind, "route_destination_chunk_x": target_chunk_x,
+                "route_destination_chunk_y": target_chunk_y, "route_destination_world_x": target_x,
                 "route_destination_world_y": target_y, "route_condition": "Local Maintained Road",
                 "activity": activity, "commute_purpose": str(plan["purpose"]),
             })
@@ -3519,16 +3583,64 @@ class NpcMixin:
     def invalidate_home_region_commuter_cache(self) -> None:
         cache = getattr(self, "_wilderness_travelers", None)
         if isinstance(cache, dict):
-            cache.pop(self.wilderness_traveler_cache_key(0, 0), None)
+            for chunk_x, chunk_y in self.home_world_authored_chunks():
+                cache.pop(self.wilderness_traveler_cache_key(chunk_x, chunk_y), None)
 
     def home_region_destination_for_current_location(self) -> str:
-        if self.on_farm():
+        if self.on_farm() or (
+            hasattr(self, "in_seamless_farm_district")
+            and self.in_seamless_farm_district()
+        ):
             return "home-farm"
         if self.on_mine() and int(getattr(self.state, "mine_floor", 1)) == 1:
             return "home-mine"
         return ""
 
     def home_region_destination_tile_open(self, x: int, y: int, used: set) -> bool:
+        seamless_farm = bool(
+            hasattr(self, "in_seamless_farm_district")
+            and self.in_seamless_farm_district()
+        )
+        if seamless_farm:
+            source_x, source_y = int(x), int(y)
+            if not (
+                0 <= source_y < self.farm_height()
+                and 0 <= source_x < self.farm_width()
+                and (source_x, source_y) not in used
+            ):
+                return False
+            player_source = self.home_world_farm_source_position(
+                int(self.state.player_x), int(self.state.player_y),
+            )
+            if player_source == (source_x, source_y):
+                return False
+            tile = self.base_map[source_y][source_x]
+            if tile in {"#", "~", "H", "T", "o", "*", "<"}:
+                return False
+            if self.crop_for_scope("Farm", source_x, source_y):
+                return False
+            for placed in self.placed_objects_for_scope("Farm"):
+                footprint = self.object_footprint_tiles(
+                    str(placed.get("name", "")),
+                    int(placed.get("x", -1)),
+                    int(placed.get("y", -1)),
+                )
+                if (source_x, source_y) in footprint:
+                    return False
+            if any(
+                self.farm_animal_actor_position(animal) == (source_x, source_y)
+                for animal in self.state.farm_animals
+            ):
+                return False
+            world_x, world_y = self.home_world_world_for_farm_position(source_x, source_y)
+            chunk_x, chunk_y, local_x, local_y = self.home_world_chunk_from_world(world_x, world_y)
+            if (
+                chunk_x == int(self.state.wilderness_chunk_x)
+                and chunk_y == int(self.state.wilderness_chunk_y)
+                and self.travel_follower_at(local_x, local_y)
+            ):
+                return False
+            return True
         if not self.in_active_bounds(x, y) or (int(x), int(y)) in used:
             return False
         if (int(x), int(y)) == (int(self.state.player_x), int(self.state.player_y)):
@@ -3551,13 +3663,18 @@ class NpcMixin:
         return False
 
     def home_region_destination_position(self, npc_id: str, used: set) -> Tuple[int, int]:
-        if self.on_farm():
+        seamless_farm = bool(
+            hasattr(self, "in_seamless_farm_district")
+            and self.in_seamless_farm_district()
+        )
+        if self.on_farm() or seamless_farm:
+            farm_width = self.farm_width()
             anchors = {
-                "cora_courier": (max(3, self.active_map_width() - 9), 10),
-                "rowan_orchard": (max(3, self.active_map_width() - 14), 15),
-                "hana_botanist": (max(3, self.active_map_width() - 18), 13),
+                "cora_courier": (max(3, farm_width - 9), 10),
+                "rowan_orchard": (max(3, farm_width - 14), 15),
+                "hana_botanist": (max(3, farm_width - 18), 13),
             }
-            anchor = anchors.get(str(npc_id), (max(3, self.active_map_width() - 10), 12))
+            anchor = anchors.get(str(npc_id), (max(3, farm_width - 10), 12))
         else:
             anchor = (24, 14)
         ax, ay = int(anchor[0]), int(anchor[1])
@@ -3572,6 +3689,8 @@ class NpcMixin:
             for x, y in candidates:
                 if self.home_region_destination_tile_open(x, y, used):
                     return int(x), int(y)
+        if seamless_farm:
+            return max(1, min(self.farm_width() - 2, ax)), max(1, min(self.farm_height() - 2, ay))
         return max(1, min(self.active_map_width() - 2, ax)), max(1, min(self.active_map_height() - 2, ay))
 
     def home_region_destination_npc_positions(self) -> Dict[Tuple[int, int], Dict[str, object]]:
@@ -3579,7 +3698,10 @@ class NpcMixin:
         if not destination_id or self.home_region_commute_band() != "working":
             return {}
         lookup: Dict[Tuple[int, int], Dict[str, object]] = {}
-        used = {(int(self.state.player_x), int(self.state.player_y))}
+        player_position = (int(self.state.player_x), int(self.state.player_y))
+        if hasattr(self, "home_world_farm_source_position") and self.in_seamless_farm_district():
+            player_position = self.home_world_farm_source_position(*player_position) or player_position
+        used = {player_position}
         for definition in TOWN_NPC_DEFINITIONS:
             npc = self.npc_record_by_id(str(definition.get("id", "")))
             if not npc or self.travel_follower_identity_for_npc_id(str(npc.get("id", ""))):
@@ -4103,7 +4225,11 @@ class NpcMixin:
             "mayor_ruth": "Mayor's House",
             "lulu_child": "Mayor's House",
         }
-        residence_id = AUTHORED_TOWN_RESIDENCE_ID_BY_NPC.get(npc_id, "")
+        residence_id = (
+            self.npc_family_home_residence_id(npc_id)
+            if hasattr(self, "npc_family_home_residence_id")
+            else ""
+        ) or AUTHORED_TOWN_RESIDENCE_ID_BY_NPC.get(npc_id, "")
         if residence_id:
             return str(AUTHORED_TOWN_RESIDENCE_DATA[residence_id]["label"])
         home = str(overrides.get(npc_id, npc.get("home", "")))
@@ -4874,7 +5000,7 @@ class NpcMixin:
             f"Birthday: {self.npc_birthday_label(npc)}",
             f"Mood: {self.town_npc_mood(npc)}",
             f"District: {npc.get('district')}",
-            f"Home: {npc.get('home')}",
+            f"Home: {self.town_npc_sleep_home_name(npc)}",
             f"Current location: {self.town_npc_location_label(npc)}",
             f"Routine: {self.town_npc_routine_brief(npc)}",
             self.town_npc_next_routine_line(npc),
@@ -5061,10 +5187,28 @@ class NpcMixin:
             if not isinstance(npc, dict):
                 continue
             npc_id = str(npc.get("id", ""))
-            if npc_id not in definitions:
+            family_generated = bool(
+                npc.get("family_generated") and npc_id.startswith("family:town:")
+            )
+            if npc_id not in definitions and not family_generated:
                 continue
-            base = definitions[npc_id]
-            birthday_month, birthday_day = NPC_BIRTHDAY_BY_ID.get(npc_id, (3, 1))
+            base = definitions.get(npc_id) or {
+                "id": npc_id,
+                "name": str(npc.get("name", "Town Child")),
+                "role": str(npc.get("role", "Kid")),
+                "home": str(npc.get("home", "Private Home")),
+                "x": int(npc.get("home_x", npc.get("x", 42))),
+                "y": int(npc.get("home_y", npc.get("y", 22))),
+                "district": str(npc.get("district", "Central Park")),
+                "wander_radius": int(npc.get("wander_radius", 4)),
+            }
+            birthday_month, birthday_day = NPC_BIRTHDAY_BY_ID.get(
+                npc_id,
+                (
+                    int(npc.get("birthday_month", 3)),
+                    int(npc.get("birthday_day", 1)),
+                ),
+            )
             existing_ids.add(npc_id)
             try:
                 x = int(npc.get("x", base["x"]))
@@ -5080,7 +5224,7 @@ class NpcMixin:
                 "id": npc_id,
                 "name": str(npc.get("name", base["name"])),
                 "symbol": "@",
-                "sex": NPC_SEX_BY_ID.get(npc_id, "Unknown"),
+                "sex": NPC_SEX_BY_ID.get(npc_id, str(npc.get("sex", "Unknown"))),
                 "birthday_month": birthday_month,
                 "birthday_day": birthday_day,
                 "role": str(npc.get("role", base["role"])),
@@ -5112,6 +5256,7 @@ class NpcMixin:
                 "social_activity": str(npc.get("social_activity", "")),
                 "social_day_key": str(npc.get("social_day_key", "")),
                 "social_phase": str(npc.get("social_phase", "")),
+                "family_generated": family_generated,
             })
             clean.append(npc)
         for npc_id, base in definitions.items():
@@ -5267,6 +5412,8 @@ class NpcMixin:
             return self.town_npc_residence_runtime_location(
                 str(getattr(self.state, "current_authored_residence_id", ""))
             )
+        if hasattr(self, "in_seamless_town_district") and self.in_seamless_town_district():
+            return "Town"
         return str(self.state.location)
 
     def is_household_child_npc(self, npc: Dict[str, object]) -> bool:
@@ -5824,9 +5971,15 @@ class NpcMixin:
             procedural_lookup = self.procedural_town_resident_position_lookup()
             if procedural_lookup:
                 return procedural_lookup
-        if self.on_farm() or self.on_mine():
+        seamless_farm = bool(
+            hasattr(self, "in_seamless_farm_district") and self.in_seamless_farm_district()
+        )
+        seamless_town = bool(
+            hasattr(self, "in_seamless_town_district") and self.in_seamless_town_district()
+        )
+        if self.on_farm() or self.on_mine() or seamless_farm:
             return self.home_region_destination_npc_positions()
-        if not (self.on_town() or self.on_town_interior() or self.on_house()):
+        if not (self.on_town() or self.on_town_interior() or self.on_house() or seamless_town):
             return {}
         self.normalize_town_npcs()
         lookup: Dict[Tuple[int, int], Dict[str, object]] = {}
@@ -5883,6 +6036,15 @@ class NpcMixin:
                     lookup[position] = visitor
             return lookup
 
+        return self.authored_town_exterior_npc_positions(normalize=False)
+
+    def authored_town_exterior_npc_positions(
+        self, *, normalize: bool = True,
+    ) -> Dict[Tuple[int, int], Dict[str, object]]:
+        """Return authored street actors without depending on the player's chunk."""
+        if normalize:
+            self.normalize_town_npcs()
+        lookup: Dict[Tuple[int, int], Dict[str, object]] = {}
         for npc in self.active_town_npcs():
             if self.travel_follower_identity_for_npc_id(str(npc.get("id", ""))):
                 continue
@@ -5898,7 +6060,14 @@ class NpcMixin:
         return lookup
 
     def town_npc_at(self, x: int, y: int) -> Optional[Dict[str, object]]:
-        return self.town_npc_position_lookup().get((int(x), int(y)))
+        lookup_x, lookup_y = int(x), int(y)
+        if hasattr(self, "home_world_town_source_position") and self.state.location == "Wilderness":
+            kind, source_x, source_y = self.home_world_source_at(lookup_x, lookup_y)
+            if kind == "mine":
+                return None
+            if kind in {"town", "farm"}:
+                lookup_x, lookup_y = source_x, source_y
+        return self.town_npc_position_lookup().get((lookup_x, lookup_y))
 
     def render_town_npc(self, npc: Dict[str, object]) -> str:
         if npc.get("procedural_caravan"):
@@ -5911,13 +6080,20 @@ class NpcMixin:
         return colorize(symbol, color)
 
     def town_npc_passable_tile(self, x: int, y: int, ignore_npc_id: Optional[str] = None) -> bool:
-        if not self.on_town():
+        seamless_town = bool(
+            hasattr(self, "in_seamless_town_district")
+            and self.in_seamless_town_district()
+        )
+        if not (self.on_town() or seamless_town):
             return False
-        if not self.in_active_bounds(x, y):
+        if not (0 <= int(x) < TOWN_WIDTH and 0 <= int(y) < TOWN_HEIGHT):
             return False
-        if x == self.state.player_x and y == self.state.player_y:
+        player_position = (int(self.state.player_x), int(self.state.player_y))
+        if seamless_town:
+            player_position = self.home_world_town_source_position(*player_position) or (-1, -1)
+        if (int(x), int(y)) == player_position:
             return False
-        if self.travel_follower_at(x, y):
+        if self.on_town() and self.travel_follower_at(x, y):
             return False
         for other in self.active_town_npcs():
             if str(other.get("id", "")) == str(ignore_npc_id or ""):
@@ -5938,7 +6114,7 @@ class NpcMixin:
                 continue
             if (int(other.get("x", -1)), int(other.get("y", -1))) == (int(x), int(y)):
                 return False
-        tile = self.active_map()[y][x]
+        tile = self.town_map[y][x]
         return tile in [".", "=", ":", ",", "?", "!"]
 
     def nearest_town_npc_passable_tile(self, x: int, y: int, ignore_npc_id: Optional[str] = None, radius_limit: int = 8) -> Tuple[int, int]:
@@ -5962,7 +6138,12 @@ class NpcMixin:
     def town_npc_town_route_tile(self, x: int, y: int, npc_id: str = "") -> bool:
         if not self.town_npc_town_static_tile(x, y):
             return False
-        if self.on_town() and (x, y) == (self.state.player_x, self.state.player_y):
+        player_town_position = (
+            self.home_world_town_source_position(self.state.player_x, self.state.player_y)
+            if hasattr(self, "in_seamless_town_district") and self.in_seamless_town_district()
+            else (self.state.player_x, self.state.player_y) if self.on_town() else None
+        )
+        if player_town_position == (x, y):
             return False
         for other in getattr(self.state, "town_npcs", []):
             if not isinstance(other, dict) or str(other.get("id", "")) == str(npc_id):
@@ -6200,7 +6381,14 @@ class NpcMixin:
                     subject["social_phase"] = phase
 
     def update_town_npcs(self, force_reanchor: bool = False):
-        if not (self.on_town() or self.on_town_interior()):
+        if not (
+            self.on_town()
+            or self.on_town_interior()
+            or (
+                hasattr(self, "in_seamless_town_district")
+                and self.in_seamless_town_district()
+            )
+        ):
             return
         self.normalize_town_npcs()
         for npc in self.active_town_npcs():
@@ -8228,6 +8416,10 @@ class NpcMixin:
             if partner:
                 link = self.town_npc_social_link_label(str(npc.get("id", "")), partner_id)
                 context_lines.append(f'"{partner.get("name", "A neighbor")} and I have become {link} through our repeated meetings."')
+        if hasattr(self, "npc_family_dialogue_line"):
+            family_line = self.npc_family_dialogue_line(npc)
+            if family_line:
+                context_lines.append(family_line)
         return [
             self.town_npc_context_line(npc),
             "",
@@ -8706,7 +8898,13 @@ class NpcMixin:
                 family_ok, family_reason = self.can_start_pregnancy_with_spouse(npc)
                 scene_key, scene_title = self.available_marriage_scene(npc)
                 items.append(MenuItem(
-                    label="Move to farm",
+                    label="Household dashboard",
+                    value="household_dashboard",
+                    enabled=True,
+                    hint=self.family_weekly_priority() if hasattr(self, "family_weekly_priority") else self.family_bond_rank(),
+                ))
+                items.append(MenuItem(
+                    label="Move in together",
                     value="move_spouse",
                     enabled=move_ok,
                     hint=move_reason,
@@ -8801,12 +8999,19 @@ class NpcMixin:
                     return
                 continue
             if choice.value == "wedding_plans":
-                self.vertical_panel_view(
-                    "Wedding Plans",
-                    self.marriage_status_lines(),
-                    LEFT_PANEL_WIDTH,
-                    LEFT_PANEL_HEIGHT,
-                )
+                if hasattr(self, "family_wedding_planning_menu"):
+                    self.family_wedding_planning_menu()
+                else:
+                    self.vertical_panel_view(
+                        "Wedding Plans",
+                        self.marriage_status_lines(),
+                        LEFT_PANEL_WIDTH,
+                        LEFT_PANEL_HEIGHT,
+                    )
+                continue
+            if choice.value == "household_dashboard":
+                if hasattr(self, "family_world_dashboard_menu") and self.family_world_dashboard_menu() == "changed":
+                    return
                 continue
             if choice.value == "move_spouse":
                 if self.invite_spouse_to_farm(npc):

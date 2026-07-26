@@ -724,6 +724,15 @@ def sanitize_procedural_settlement_populations(value: object) -> Dict[str, Dict[
                     )
                     if str(resident_id or "").strip()
                 ][:2],
+                "married_couple_ids": [
+                    str(resident_id)
+                    for resident_id in (
+                        raw_household.get("married_couple_ids", [])
+                        if isinstance(raw_household.get("married_couple_ids"), list)
+                        else []
+                    )
+                    if str(resident_id or "").strip()
+                ][:2],
             }
 
         residents: Dict[str, Dict[str, object]] = {}
@@ -832,6 +841,33 @@ def sanitize_procedural_settlement_populations(value: object) -> Dict[str, Dict[
                     )
                     if str(dependent_id or "").strip()
                 ],
+                "marital_status": str(raw_resident.get("marital_status", "Single") or "Single"),
+                "courtship_partner_id": str(raw_resident.get("courtship_partner_id", "") or ""),
+                "courtship_started_day": max(0, int(raw_resident.get("courtship_started_day", 0) or 0)),
+                "engagement_day": max(0, int(raw_resident.get("engagement_day", 0) or 0)),
+                "npc_spouse_id": str(raw_resident.get("npc_spouse_id", "") or ""),
+                "marriage_day": max(0, int(raw_resident.get("marriage_day", 0) or 0)),
+                "pregnancy_due_day": max(0, int(raw_resident.get("pregnancy_due_day", 0) or 0)),
+                "parent_ids": [
+                    str(parent_id)
+                    for parent_id in (
+                        raw_resident.get("parent_ids", [])
+                        if isinstance(raw_resident.get("parent_ids"), list)
+                        else []
+                    )
+                    if str(parent_id or "").strip()
+                ][:2],
+                "child_ids": [
+                    str(child_id)
+                    for child_id in (
+                        raw_resident.get("child_ids", [])
+                        if isinstance(raw_resident.get("child_ids"), list)
+                        else []
+                    )
+                    if str(child_id or "").strip()
+                ],
+                "generation": max(1, int(raw_resident.get("generation", 1) or 1)),
+                "last_birthday_year": max(0, int(raw_resident.get("last_birthday_year", 0) or 0)),
                 "personality_traits": traits or ["Practical", "Patient"],
                 "personality": str(raw_resident.get("personality", ", ".join(traits) or "Practical, Patient")),
                 "goal": str(raw_resident.get("goal", "Build a stable life in the settlement.")),
@@ -967,6 +1003,11 @@ def sanitize_procedural_settlement_populations(value: object) -> Dict[str, Dict[
                 for resident_id in household["guardian_ids"]
                 if resident_id in household["member_ids"]
             ][:2]
+            household["married_couple_ids"] = [
+                resident_id
+                for resident_id in household["married_couple_ids"]
+                if resident_id in household["member_ids"]
+            ][:2]
         for resident in residents.values():
             household_members = set(
                 households.get(resident["household_id"], {}).get("member_ids", [])
@@ -986,6 +1027,17 @@ def sanitize_procedural_settlement_populations(value: object) -> Dict[str, Dict[
                 for resident_id in resident["dependent_ids"]
                 if resident_id in household_members and resident_id != resident["id"]
             ]
+            resident["parent_ids"] = [
+                resident_id for resident_id in resident["parent_ids"]
+                if resident_id in valid_resident_ids and resident_id != resident["id"]
+            ][:2]
+            resident["child_ids"] = [
+                resident_id for resident_id in resident["child_ids"]
+                if resident_id in valid_resident_ids and resident_id != resident["id"]
+            ]
+            for link_field in ("courtship_partner_id", "npc_spouse_id"):
+                if resident[link_field] not in valid_resident_ids:
+                    resident[link_field] = ""
         clean[key] = {
             "version": PROCEDURAL_POPULATION_VERSION,
             "id": str(raw_population.get("id", f"population:{key}")),
@@ -1017,6 +1069,8 @@ def sanitize_procedural_settlement_populations(value: object) -> Dict[str, Dict[
                 )
                 if str(value or "").strip()
             ))[-80:],
+            "family_last_processed_day": max(0, int(raw_population.get("family_last_processed_day", 0) or 0)),
+            "next_family_resident_id": max(1, int(raw_population.get("next_family_resident_id", 1) or 1)),
             "notes": [
                 str(value)
                 for value in (
@@ -1355,6 +1409,17 @@ class ProceduralNpcBuilder:
             "family_member_ids": [],
             "guardian_ids": [],
             "dependent_ids": [],
+            "marital_status": "Single",
+            "courtship_partner_id": "",
+            "courtship_started_day": 0,
+            "engagement_day": 0,
+            "npc_spouse_id": "",
+            "marriage_day": 0,
+            "pregnancy_due_day": 0,
+            "parent_ids": [],
+            "child_ids": [],
+            "generation": 1,
+            "last_birthday_year": 0,
             "personality_traits": traits,
             "personality": ", ".join(traits),
             "goal": str(preferences.get("goal", ROLE_PREFERENCE_DATA["Settler"]["goal"])),
@@ -1502,6 +1567,8 @@ class ProceduralNpcBuilder:
             "residents": {},
             "job_vacancies": [],
             "departed_resident_ids": list((existing or {}).get("departed_resident_ids", []) or []),
+            "family_last_processed_day": max(0, int((existing or {}).get("family_last_processed_day", 0) or 0)),
+            "next_family_resident_id": max(1, int((existing or {}).get("next_family_resident_id", 1) or 1)),
             "notes": ["Population plan generated separately from the authored town NPC roster."],
         }
         if not residences:
@@ -1525,6 +1592,7 @@ class ProceduralNpcBuilder:
                 "household_style": "Independent",
                 "head_resident_id": "",
                 "guardian_ids": [],
+                "married_couple_ids": [],
             }
             household_order.append(household_id)
             household_capacity[household_id] = capacity
@@ -1710,6 +1778,17 @@ class ProceduralNpcBuilder:
                     "romanceable",
                     "social_connections",
                     "social_opinion",
+                    "marital_status",
+                    "courtship_partner_id",
+                    "courtship_started_day",
+                    "engagement_day",
+                    "npc_spouse_id",
+                    "marriage_day",
+                    "pregnancy_due_day",
+                    "parent_ids",
+                    "child_ids",
+                    "generation",
+                    "last_birthday_year",
                 ):
                     resident[field] = copy.deepcopy(old.get(field, resident[field]))
             departed = [
@@ -1739,7 +1818,18 @@ class ProceduralNpcBuilder:
             adults = [member for member in members if member["age_group"] == "Adult"]
             head = (adults or [member for member in members if member["age_group"] == "Elder"] or members)
             head_id = str(head[0]["id"]) if head else ""
-            guardian_ids = [str(member["id"]) for member in adults[:2]] if has_young else []
+            founding_wife = next((member for member in adults if member.get("sex") == "Female"), None)
+            founding_husband = next((member for member in adults if member.get("sex") == "Male"), None)
+            married_pair = (
+                [founding_wife, founding_husband]
+                if has_young and founding_wife is not None and founding_husband is not None
+                else []
+            )
+            guardian_ids = (
+                [str(member["id"]) for member in married_pair]
+                if married_pair
+                else ([str(adults[0]["id"])] if has_young and adults else [])
+            )
             dependent_ids = [
                 str(member["id"])
                 for member in members
@@ -1747,9 +1837,9 @@ class ProceduralNpcBuilder:
             ]
             household["head_resident_id"] = head_id
             household["guardian_ids"] = guardian_ids
+            household["married_couple_ids"] = [str(member["id"]) for member in married_pair]
             family_household = household["household_style"] == "Family"
             member_ids = [str(member["id"]) for member in members]
-            partner_assigned = False
             for member in members:
                 member_id = str(member["id"])
                 age_group = str(member["age_group"])
@@ -1761,9 +1851,8 @@ class ProceduralNpcBuilder:
                     household_role = "Teen"
                 elif age_group == "Elder":
                     household_role = "Elder Relative" if family_household else "Housemate"
-                elif family_household and not partner_assigned:
-                    household_role = "Partner"
-                    partner_assigned = True
+                elif member in married_pair:
+                    household_role = "Spouse"
                 else:
                     household_role = "Adult Relative" if family_household else "Housemate"
                 member["household_role"] = household_role
@@ -1782,6 +1871,15 @@ class ProceduralNpcBuilder:
                     if member_id in guardian_ids
                     else []
                 )
+                if member in married_pair:
+                    spouse = married_pair[1] if member is married_pair[0] else married_pair[0]
+                    member["marital_status"] = "Married"
+                    member["npc_spouse_id"] = str(spouse["id"])
+                    member["child_ids"] = list(dependent_ids)
+                else:
+                    member["marital_status"] = str(member.get("marital_status", "Single"))
+                if age_group in {"Child", "Teen"}:
+                    member["parent_ids"] = list(guardian_ids)
         population["status"] = "populated" if population["residents"] else "awaiting_residents"
         return population
 

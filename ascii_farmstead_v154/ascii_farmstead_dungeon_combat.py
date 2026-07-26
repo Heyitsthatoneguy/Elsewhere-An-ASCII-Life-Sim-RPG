@@ -56,7 +56,9 @@ class DungeonRoguelikeCombatMixin:
         combat.setdefault("active", False)
         combat.setdefault("turn", 0)
         combat.setdefault("guard_turns", 0)
+        combat.setdefault("prepared_guard_turns", 0)
         combat.setdefault("poison_turns", 0)
+        combat.setdefault("root_turns", 0)
         combat.setdefault("guardian_guard", 0)
         combat.setdefault("companion_cooldowns", {})
         combat.setdefault("companion_states", {})
@@ -134,13 +136,15 @@ class DungeonRoguelikeCombatMixin:
         combat = self.wilderness_field_combat_record()
         cx, cy = int(self.state.wilderness_chunk_x), int(self.state.wilderness_chunk_y)
         if not self.wilderness_field_combat_active():
+            prepared_guard_turns = max(0, int(combat.get("prepared_guard_turns", 0)))
             combat.clear()
             combat.update({
                 "active": True,
                 "chunk_x": cx,
                 "chunk_y": cy,
                 "turn": 0,
-                "guard_turns": 0,
+                "guard_turns": prepared_guard_turns,
+                "prepared_guard_turns": 0,
                 "poison_turns": 0,
                 "guardian_guard": 0,
                 "companion_cooldowns": {},
@@ -202,11 +206,16 @@ class DungeonRoguelikeCombatMixin:
         combat.setdefault("turn", 0)
         combat.setdefault("guard_turns", 0)
         combat.setdefault("poison_turns", 0)
+        combat.setdefault("root_turns", 0)
         combat.setdefault("guardian_guard", 0)
         combat.setdefault("companion_cooldowns", {})
         combat.setdefault("door_states", {})
+        combat.setdefault("explored_tiles", [])
+        combat.setdefault("revealed_rooms", [])
         combat.setdefault("revealed_traps", [])
         combat.setdefault("disarmed_traps", [])
+        combat.setdefault("passive_trap_checks", [])
+        combat.setdefault("active_trap_checks", {})
         combat.setdefault("companion_states", {})
         combat.setdefault("skill_zones", [])
         combat.setdefault("combat_log", [])
@@ -252,6 +261,7 @@ class DungeonRoguelikeCombatMixin:
             self.set_message("The doorway is occupied and cannot be closed.")
             return False
         self.dungeon_door_states()[self.dungeon_feature_key(x, y)] = bool(closed)
+        self._dungeon_visibility_cache_signature = None
         return True
 
     def dungeon_use_door(self, x: int, y: int, *, actor: str = "You") -> bool:
@@ -260,6 +270,8 @@ class DungeonRoguelikeCombatMixin:
         was_closed = self.dungeon_door_closed(x, y)
         if not self.dungeon_set_door_closed(x, y, not was_closed):
             return False
+        if was_closed:
+            self.dungeon_reveal_rooms_adjacent_to_door(x, y)
         action = "open" if was_closed else "close"
         owner = "You" if actor == "You" else actor
         self._dungeon_turn_messages = [f"{owner} {action}{'s' if actor != 'You' else ''} the old door."]
@@ -268,6 +280,212 @@ class DungeonRoguelikeCombatMixin:
 
     def render_dungeon_door(self, x: int, y: int) -> str:
         return colorize("+" if self.dungeon_door_closed(x, y) else "/", C.DOOR + C.BOLD)
+
+    def dungeon_structural_floor(self, x: int, y: int) -> bool:
+        tile = self.dungeon_terrain_tile(x, y)
+        return tile not in {"#", " ", "+"}
+
+    def dungeon_room_regions(
+        self,
+    ) -> Tuple[List[Set[Tuple[int, int]]], Dict[Tuple[int, int], str]]:
+        """Derive real room regions without changing old or custom dungeon maps."""
+        grid = self.active_map()
+        cache_key = (
+            str(getattr(self.state, "current_dungeon_key", "")),
+            int(getattr(self.state, "current_dungeon_floor", 1)),
+            id(grid),
+        )
+        cache = getattr(self, "_dungeon_room_region_cache", None)
+        if isinstance(cache, dict) and cache.get("key") == cache_key:
+            return cache["regions"], cache["lookup"]
+        height = len(grid)
+        width = len(grid[0]) if height else 0
+        core = set()
+        for y in range(1, max(1, height - 1)):
+            for x in range(1, max(1, width - 1)):
+                if not self.dungeon_structural_floor(x, y):
+                    continue
+                open_neighbors = sum(
+                    1
+                    for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1))
+                    if self.dungeon_structural_floor(x + dx, y + dy)
+                )
+                if open_neighbors >= 3:
+                    core.add((x, y))
+        regions: List[Set[Tuple[int, int]]] = []
+        lookup: Dict[Tuple[int, int], str] = {}
+        remaining = set(core)
+        while remaining:
+            start = min(remaining, key=lambda point: (point[1], point[0]))
+            component = {start}
+            queue = deque([start])
+            remaining.remove(start)
+            while queue:
+                x, y = queue.popleft()
+                for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    neighbor = (x + dx, y + dy)
+                    if neighbor in remaining:
+                        remaining.remove(neighbor)
+                        component.add(neighbor)
+                        queue.append(neighbor)
+            if len(component) < 4:
+                continue
+            region = set(component)
+            for x, y in list(component):
+                for dx, dy in (
+                    (1, 0), (-1, 0), (0, 1), (0, -1),
+                    (1, 1), (1, -1), (-1, 1), (-1, -1),
+                ):
+                    nx, ny = x + dx, y + dy
+                    if 0 <= ny < height and 0 <= nx < width and self.dungeon_structural_floor(nx, ny):
+                        region.add((nx, ny))
+            room_id = self.dungeon_feature_key(start[0], start[1])
+            regions.append(region)
+            for position in region:
+                lookup.setdefault(position, room_id)
+        self._dungeon_room_region_cache = {
+            "key": cache_key,
+            "regions": regions,
+            "lookup": lookup,
+        }
+        return regions, lookup
+
+    def dungeon_explored_tiles(self) -> Set[Tuple[int, int]]:
+        combat = self.dungeon_roguelike_record()
+        values = combat.setdefault("explored_tiles", [])
+        signature = (
+            str(getattr(self.state, "current_dungeon_key", "")),
+            int(getattr(self.state, "current_dungeon_floor", 1)),
+            len(values),
+        )
+        if getattr(self, "_dungeon_explored_cache_signature", None) == signature:
+            cached = getattr(self, "_dungeon_explored_tile_cache", None)
+            if isinstance(cached, set):
+                return cached
+        explored: Set[Tuple[int, int]] = set()
+        for value in values:
+            try:
+                _floor, coordinate = str(value).split(":", 1)
+                x_text, y_text = coordinate.split(",", 1)
+                explored.add((int(x_text), int(y_text)))
+            except (TypeError, ValueError):
+                continue
+        self._dungeon_explored_cache_signature = signature
+        self._dungeon_explored_tile_cache = explored
+        return explored
+
+    def dungeon_reveal_room_at(self, x: int, y: int) -> bool:
+        _regions, lookup = self.dungeon_room_regions()
+        room_id = lookup.get((int(x), int(y)))
+        if not room_id:
+            return False
+        combat = self.dungeon_roguelike_record()
+        revealed = combat.setdefault("revealed_rooms", [])
+        if room_id in revealed:
+            return False
+        revealed.append(room_id)
+        room = {position for position, value in lookup.items() if value == room_id}
+        explored = self.dungeon_explored_tiles()
+        expanded = set(room)
+        grid = self.active_map()
+        for rx, ry in room:
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                nx, ny = rx + dx, ry + dy
+                if 0 <= ny < len(grid) and 0 <= nx < len(grid[ny]):
+                    expanded.add((nx, ny))
+        explored.update(expanded)
+        combat["explored_tiles"] = [
+            self.dungeon_feature_key(px, py) for px, py in sorted(explored, key=lambda point: (point[1], point[0]))
+        ]
+        self._dungeon_explored_cache_signature = None
+        self._dungeon_visibility_cache_signature = None
+        return True
+
+    def dungeon_reveal_rooms_adjacent_to_door(self, x: int, y: int) -> int:
+        revealed = 0
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            for distance in range(1, 6):
+                tx, ty = int(x) + dx * distance, int(y) + dy * distance
+                if not self.in_active_bounds(tx, ty):
+                    break
+                if self.dungeon_terrain_tile(tx, ty) in {"#", " "}:
+                    break
+                if self.dungeon_reveal_room_at(tx, ty):
+                    revealed += 1
+                    break
+        return revealed
+
+    def dungeon_current_visible_tiles(self) -> Set[Tuple[int, int]]:
+        if not self.on_wilderness_dungeon():
+            return set()
+        self.dungeon_reveal_room_at(int(self.state.player_x), int(self.state.player_y))
+        combat = self.dungeon_roguelike_record()
+        signature = (
+            str(getattr(self.state, "current_dungeon_key", "")),
+            int(getattr(self.state, "current_dungeon_floor", 1)),
+            int(self.state.player_x),
+            int(self.state.player_y),
+            tuple(sorted(self.dungeon_door_states().items())),
+            tuple(combat.setdefault("revealed_rooms", [])),
+        )
+        if getattr(self, "_dungeon_visibility_cache_signature", None) == signature:
+            cached = getattr(self, "_dungeon_visible_tile_cache", None)
+            if isinstance(cached, set):
+                return cached
+        grid = self.active_map()
+        px, py = int(self.state.player_x), int(self.state.player_y)
+        _regions, room_lookup = self.dungeon_room_regions()
+        revealed_rooms = set(combat.setdefault("revealed_rooms", []))
+        visible: Set[Tuple[int, int]] = {(px, py)}
+        radius = 9
+        for y in range(max(0, py - radius), min(len(grid), py + radius + 1)):
+            for x in range(max(0, px - radius), min(len(grid[y]), px + radius + 1)):
+                if self.dungeon_distance((px, py), (x, y)) > radius:
+                    continue
+                room_id = room_lookup.get((x, y))
+                if room_id and room_id not in revealed_rooms:
+                    continue
+                if self.dungeon_has_line_of_sight((px, py), (x, y)):
+                    visible.add((x, y))
+        current_room_id = room_lookup.get((px, py))
+        if current_room_id:
+            current_room = {
+                position for position, room_id in room_lookup.items()
+                if room_id == current_room_id
+            }
+            visible.update(current_room)
+            for x, y in current_room:
+                for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    if 0 <= y + dy < len(grid) and 0 <= x + dx < len(grid[y + dy]):
+                        visible.add((x + dx, y + dy))
+        self._dungeon_visibility_cache_signature = signature
+        self._dungeon_visible_tile_cache = visible
+        return visible
+
+    def dungeon_update_exploration(self) -> None:
+        if not self.on_wilderness_dungeon():
+            return
+        visible = self.dungeon_current_visible_tiles()
+        explored = self.dungeon_explored_tiles()
+        if visible <= explored:
+            return
+        explored.update(visible)
+        self.dungeon_roguelike_record()["explored_tiles"] = [
+            self.dungeon_feature_key(x, y)
+            for x, y in sorted(explored, key=lambda point: (point[1], point[0]))
+        ]
+        self._dungeon_explored_cache_signature = None
+
+    def dungeon_tile_explored(self, x: int, y: int) -> bool:
+        if not self.on_wilderness_dungeon():
+            return True
+        self.dungeon_update_exploration()
+        return (int(x), int(y)) in self.dungeon_explored_tiles()
+
+    def dungeon_tile_currently_visible(self, x: int, y: int) -> bool:
+        if not self.on_wilderness_dungeon():
+            return True
+        return (int(x), int(y)) in self.dungeon_current_visible_tiles()
 
     def dungeon_trap_revealed(self, x: int, y: int) -> bool:
         key = self.dungeon_feature_key(x, y)
@@ -286,19 +504,48 @@ class DungeonRoguelikeCombatMixin:
             return colorize("!", C.HOSTILE)
         return colorize(".", C.DUNGEON_FLOOR)
 
+    def dungeon_trap_kind(self, x: int, y: int) -> str:
+        seed_text = (
+            f"{getattr(self.state, 'current_dungeon_key', '')}:"
+            f"{getattr(self.state, 'current_dungeon_floor', 1)}:{int(x)},{int(y)}"
+        )
+        seed = sum((index + 17) * ord(character) for index, character in enumerate(seed_text))
+        return ("needle", "snare", "alarm", "blast")[seed % 4]
+
+    def dungeon_trap_name(self, x: int, y: int) -> str:
+        return {
+            "needle": "poison-needle plate",
+            "snare": "barbed snare",
+            "alarm": "echo alarm",
+            "blast": "rune blast",
+        }[self.dungeon_trap_kind(x, y)]
+
     def dungeon_scout_bonus(self) -> float:
         return 0.22 if any(
             str(profile.get("expedition_role", "")) == "Scout"
             for profile in self.active_farmstead_companion_profiles()
         ) else 0.0
 
-    def dungeon_reveal_nearby_traps(self, radius: int = 1, guaranteed: bool = False) -> int:
+    def dungeon_reveal_nearby_traps(
+        self,
+        radius: int = 1,
+        guaranteed: bool = False,
+        active_search: bool = False,
+    ) -> int:
         px, py = int(self.state.player_x), int(self.state.player_y)
         grid = self.active_map()
         combat = self.dungeon_roguelike_record()
         revealed = combat.setdefault("revealed_traps", [])
         profile = farmstead_combat_profile(self.state)
-        chance = min(0.90, 0.20 + int(profile.get("level", 1)) * 0.025 + self.dungeon_scout_bonus())
+        chance = min(
+            0.92,
+            (0.52 if active_search else 0.12)
+            + int(profile.get("level", 1)) * (0.025 if active_search else 0.015)
+            + self.dungeon_scout_bonus()
+            + float(getattr(self, "container_passive_bonus", lambda _name: 0.0)("trap_scout")),
+        )
+        passive_checks = combat.setdefault("passive_trap_checks", [])
+        active_checks = combat.setdefault("active_trap_checks", {})
         found = 0
         for y in range(max(0, py - radius), min(len(grid), py + radius + 1)):
             for x in range(max(0, px - radius), min(len(grid[y]), px + radius + 1)):
@@ -307,11 +554,29 @@ class DungeonRoguelikeCombatMixin:
                 key = self.dungeon_feature_key(x, y)
                 if key in revealed or self.dungeon_trap_disarmed(x, y):
                     continue
+                if active_search:
+                    attempts = max(0, int(active_checks.get(key, 0)))
+                    if attempts >= 2:
+                        continue
+                    active_checks[key] = attempts + 1
+                else:
+                    if key in passive_checks:
+                        continue
+                    passive_checks.append(key)
                 if guaranteed or random.random() < chance:
                     revealed.append(key)
                     found += 1
         if found:
-            self.dungeon_combat_note(f"You notice {found} old trap plate{'s' if found != 1 else ''}.")
+            labels = [
+                self.dungeon_trap_name(x, y)
+                for y in range(max(0, py - radius), min(len(grid), py + radius + 1))
+                for x in range(max(0, px - radius), min(len(grid[y]), px + radius + 1))
+                if self.dungeon_feature_key(x, y) in revealed
+                and self.dungeon_distance((px, py), (x, y)) <= radius
+                and grid[y][x] == "!"
+            ]
+            detail = labels[-1] if found == 1 and labels else f"{found} concealed mechanisms"
+            self.dungeon_combat_note(f"Careful observation reveals {detail}.")
         return found
 
     def dungeon_disarm_trap(self, x: int, y: int) -> bool:
@@ -322,7 +587,13 @@ class DungeonRoguelikeCombatMixin:
             self.set_message("You have not spotted a trap there.")
             return False
         profile = farmstead_combat_profile(self.state)
-        chance = min(0.92, 0.48 + int(profile.get("level", 1)) * 0.025 + self.dungeon_scout_bonus())
+        chance = min(
+            0.94,
+            0.45
+            + int(profile.get("level", 1)) * 0.03
+            + self.dungeon_scout_bonus()
+            + float(getattr(self, "container_passive_bonus", lambda _name: 0.0)("trap_disarm")),
+        )
         self._dungeon_turn_messages = []
         if random.random() <= chance:
             key = self.dungeon_feature_key(x, y)
@@ -333,11 +604,13 @@ class DungeonRoguelikeCombatMixin:
             if key not in triggered:
                 triggered.append(key)
             self.active_map()[y][x] = ":"
-            self.dungeon_combat_note("You wedge the old trap mechanism safely open.")
+            add_inventory_items(self.state.inventory, {"Ruin Scrap": 1})
+            self.dungeon_combat_note(
+                f"You dismantle the {self.dungeon_trap_name(x, y)} and recover Ruin Scrap."
+            )
             self.advance_dungeon_roguelike_turn("disarm trap")
             return True
         self.trigger_wilderness_dungeon_trap(x, y)
-        self.dungeon_combat_note(str(self.state.message))
         self.advance_dungeon_roguelike_turn("failed disarm")
         return False
 
@@ -349,7 +622,14 @@ class DungeonRoguelikeCombatMixin:
             return False
         enemy = self.ensure_dungeon_roguelike_enemy(enemy)
         key = self.dungeon_feature_key(x, y)
-        damage = 5 + self.dungeon_tier_for_key(str(self.state.current_dungeon_key)) * 2
+        kind = self.dungeon_trap_kind(x, y)
+        tier = self.dungeon_tier_for_key(str(self.state.current_dungeon_key))
+        damage = {
+            "needle": 4 + tier,
+            "snare": 5 + tier,
+            "alarm": 1,
+            "blast": 8 + tier * 3,
+        }[kind]
         enemy["hp"] = max(0, int(enemy["hp"]) - damage)
         record = self.dungeon_record(str(self.state.current_dungeon_key))
         if key not in record.setdefault("triggered_traps", []):
@@ -357,8 +637,16 @@ class DungeonRoguelikeCombatMixin:
         if key not in self.dungeon_roguelike_record().setdefault("revealed_traps", []):
             self.dungeon_roguelike_record()["revealed_traps"].append(key)
         self.active_map()[y][x] = ":"
+        if kind == "needle" and int(enemy["hp"]) > 0:
+            statuses = enemy.setdefault("statuses", {})
+            statuses["poison"] = max(3, int(statuses.get("poison", 0)))
+        elif kind == "snare" and int(enemy["hp"]) > 0:
+            statuses = enemy.setdefault("statuses", {})
+            statuses["root"] = max(2, int(statuses.get("root", 0)))
+        if kind in {"alarm", "blast"}:
+            self.dungeon_emit_noise(x, y, 14 if kind == "alarm" else 10, label=self.dungeon_trap_name(x, y))
         self.dungeon_combat_note(
-            f"{enemy.get('species')} springs a floor trap for {damage} damage "
+            f"{enemy.get('species')} springs a {self.dungeon_trap_name(x, y)} for {damage} damage "
             f"({enemy['hp']}/{enemy['max_hp']} HP)."
         )
         if int(enemy["hp"]) <= 0:
@@ -613,6 +901,8 @@ class DungeonRoguelikeCombatMixin:
             conditions.append("Guarded")
         if int(combat.get("poison_turns", 0)) > 0:
             conditions.append("Poisoned")
+        if int(combat.get("root_turns", 0)) > 0:
+            conditions.append("Snared")
         active_zones = sum(
             1 for zone in self.dungeon_skill_zones()
             if int(zone.get("floor", 0)) == self.map_combat_floor()
@@ -995,6 +1285,13 @@ class DungeonRoguelikeCombatMixin:
             self.ensure_dungeon_roguelike_enemy(enemy)
             for enemy in self.map_combat_enemies()
             if (int(enemy.get("x", -99)), int(enemy.get("y", -99))) in tiles
+            and (
+                not self.on_wilderness_dungeon()
+                or self.dungeon_tile_currently_visible(
+                    int(enemy.get("x", -99)),
+                    int(enemy.get("y", -99)),
+                )
+            )
         ]
         if skill.shape == "multishot":
             candidates = [
@@ -1312,8 +1609,18 @@ class DungeonRoguelikeCombatMixin:
 
     def dungeon_nearest_enemy(self, origin: Tuple[int, int], max_range: int = 99, alerted_only: bool = False) -> Optional[Dict[str, object]]:
         candidates = []
+        player_origin = origin == (int(self.state.player_x), int(self.state.player_y))
         for enemy in self.map_combat_enemies():
             if alerted_only and not enemy.get("alert"):
+                continue
+            if (
+                player_origin
+                and self.on_wilderness_dungeon()
+                and not self.dungeon_tile_currently_visible(
+                    int(enemy.get("x", -99)),
+                    int(enemy.get("y", -99)),
+                )
+            ):
                 continue
             distance = self.dungeon_distance(origin, (int(enemy.get("x", -99)), int(enemy.get("y", -99))))
             if distance <= int(max_range):
@@ -1523,7 +1830,10 @@ class DungeonRoguelikeCombatMixin:
 
     def dungeon_enemy_apply_step(self, enemy: Dict[str, object], step: Tuple[int, int]) -> bool:
         if self.dungeon_door_closed(*step):
+            witnessed = self.dungeon_tile_currently_visible(*step)
             self.dungeon_set_door_closed(step[0], step[1], False)
+            if witnessed:
+                self.dungeon_reveal_rooms_adjacent_to_door(step[0], step[1])
             self.dungeon_combat_note(f"{enemy.get('species')} forces the door open.")
             self.dungeon_emit_noise(step[0], step[1], 4, label="a forced door")
             return False
@@ -1684,6 +1994,18 @@ class DungeonRoguelikeCombatMixin:
 
     def dungeon_player_defeated(self) -> None:
         self.state.mine_combat_defeats += 1
+        location_name = (
+            "a wilderness battle"
+            if self.wilderness_field_combat_active()
+            else "a dungeon expedition"
+        )
+        if self.handle_combat_defeat_mortality(
+            f"Killed during {location_name}",
+            source="map combat",
+        ):
+            if self.wilderness_field_combat_active():
+                self.wilderness_field_combat_record()["active"] = False
+            return
         self.state.combat_current_hp = 1
         self.advance_time(60)
         party_lines = self.companion_after_battle_lines("defeat")
@@ -1830,7 +2152,13 @@ class DungeonRoguelikeCombatMixin:
                 continue
             if key in MENU_CONFIRM_KEYS:
                 enemy = self.map_combat_enemy_at(cursor_x, cursor_y)
-                if not enemy:
+                if (
+                    not enemy
+                    or (
+                        self.on_wilderness_dungeon()
+                        and not self.dungeon_tile_currently_visible(cursor_x, cursor_y)
+                    )
+                ):
                     self.set_message("There is no enemy on that tile.")
                     continue
                 if self.dungeon_distance(origin, (cursor_x, cursor_y)) > max_range:
@@ -1864,9 +2192,11 @@ class DungeonRoguelikeCombatMixin:
         if not self.map_native_combat_active():
             return False
         self._dungeon_turn_messages = []
-        found = self.dungeon_reveal_nearby_traps(radius=3, guaranteed=True)
+        found = self.dungeon_reveal_nearby_traps(radius=3, active_search=True)
         if not found:
-            self.dungeon_combat_note("You search the nearby floor but find no new traps.")
+            self.dungeon_combat_note(
+                "You search nearby seams and flagstones but find no mechanism you can identify."
+            )
         return self.advance_dungeon_roguelike_turn("search")
 
     def dungeon_aim_noise_lure(self, max_range: int = 6) -> bool:
@@ -2142,7 +2472,7 @@ class DungeonRoguelikeCombatMixin:
             return False
         elif skill.effect == "cleanse":
             conditions = combat if is_player else runtime.setdefault("statuses", {})
-            if not any(int(conditions.get(name, 0)) > 0 for name in ("poison_turns", "poison", "root", "vulnerable")):
+            if not any(int(conditions.get(name, 0)) > 0 for name in ("poison_turns", "root_turns", "poison", "root", "vulnerable")):
                 self.set_message(f"{target.get('name')} has no harmful status to cleanse.")
                 return False
         self.state.combat_focus = max(0, int(self.state.combat_focus) - int(skill.mp_cost))
@@ -2167,6 +2497,7 @@ class DungeonRoguelikeCombatMixin:
         elif skill.effect == "cleanse":
             if is_player:
                 combat["poison_turns"] = 0
+                combat["root_turns"] = 0
             else:
                 runtime["statuses"] = {}
             self.dungeon_combat_note(f"{skill.name} removes harmful conditions from {target_name}.")
@@ -2236,7 +2567,12 @@ class DungeonRoguelikeCombatMixin:
                 hint=f"{effect}. {skill.description}",
             ))
         if self.on_wilderness_dungeon():
-            items.append(MenuItem("Search nearby floor", value="search", enabled=True, hint="Spend a turn revealing concealed traps within 3 tiles."))
+            items.append(MenuItem(
+                "Search nearby floor",
+                value="search",
+                enabled=True,
+                hint="Spend a turn making a skill-based search for concealed mechanisms within 3 tiles.",
+            ))
         items.extend([
             MenuItem("Throw Stone", value="lure", enabled=int(self.state.inventory.get("Stone", 0)) > 0, hint="Throw a Stone to lure enemies toward its sound."),
             MenuItem("Review combat log", value="log", enabled=True, hint="Review the latest map-combat actions without spending a turn."),

@@ -12,7 +12,7 @@ from ascii_farmstead_support import GAME_DATA_DIRECTORY
 from ascii_battle_prototype.combat.models import Skill
 
 
-CUSTOM_CONTENT_VERSION = 2
+CUSTOM_CONTENT_VERSION = 3
 CUSTOM_CONTENT_BACKUP_COUNT = 3
 CUSTOM_CONTENT_PATH = GAME_DATA_DIRECTORY / "custom_content.json"
 CUSTOM_CONTENT_EXPORT_PATH = GAME_DATA_DIRECTORY / "custom_content_export.json"
@@ -31,6 +31,7 @@ ABILITY_SHAPES = ("point", "burst", "strip", "cone", "cross", "multishot", "cust
 ABILITY_STATUSES = ("", "poison", "root", "vulnerable")
 ABILITY_ZONES = ("", "fire", "frost", "storm", "earth", "poison", "light", "shadow")
 ELEMENTS = ("Fire", "Frost", "Storm", "Earth", "Poison", "Light", "Shadow")
+WORLD_ABILITY_ELEMENTS = ("", "Fire", "Water", "Frost", "Earth", "Storm", "Wind", "Nature", "Poison", "Light", "Shadow")
 
 _CONTENT_CACHE_PATH: Optional[Path] = None
 _CONTENT_CACHE_SIGNATURE: Optional[Tuple[int, int]] = None
@@ -236,6 +237,9 @@ def sanitize_custom_ability(raw: object) -> Optional[Dict[str, object]]:
     combo_status = str(raw.get("combo_status", "") or "")
     if combo_status not in ABILITY_STATUSES:
         combo_status = ""
+    world_element = str(raw.get("world_element", "") or "")
+    if world_element not in WORLD_ABILITY_ELEMENTS:
+        world_element = ""
 
     ability: Dict[str, object] = {
         "name": name,
@@ -269,6 +273,7 @@ def sanitize_custom_ability(raw: object) -> Optional[Dict[str, object]]:
         "combo_damage_bonus": _clean_int(raw.get("combo_damage_bonus"), 0, 0, 10),
         "combo_ap_gain": _clean_int(raw.get("combo_ap_gain"), 0, 0, 1),
         "combo_mp_gain": _clean_int(raw.get("combo_mp_gain"), 0, 0, 8),
+        "world_element": world_element,
     }
 
     if effect != "damage":
@@ -699,6 +704,7 @@ def ability_summary(record: Dict[str, object]) -> List[str]:
         "",
         f"Effect: {effect.replace('_', ' ').title()}",
         f"MP cost: {ability['mp_cost']}",
+        f"World affinity: {ability['world_element'] or 'Automatic from ability name/zone'}",
         f"Balance estimate: {ability_balance_label(ability)}",
     ]
     if effect == "damage":
