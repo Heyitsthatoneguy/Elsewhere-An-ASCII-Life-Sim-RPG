@@ -4,6 +4,7 @@ import random
 from typing import Dict, List, Optional, Tuple
 
 from ascii_farmstead_data import FISH_DATA, FOOD_DATA
+from ascii_farmstead_random_loot import combat_equipment_data_for
 
 
 NATURAL_STAMINA_RECOVERY_INTERVAL_MINUTES = 5
@@ -1749,19 +1750,19 @@ def _safe_int(value: object, default: int) -> int:
         return default
 
 
-def normalized_combat_equipment_name(slot: str, name: object) -> str:
+def normalized_combat_equipment_name(slot: str, name: object, state: object = None) -> str:
     info = COMBAT_EQUIPMENT_SLOTS.get(str(slot))
     if not info:
         return str(name or "")
     _field_name, data, default = info
     raw = str(name or default)
-    return raw if raw in data else default
+    return raw if combat_equipment_data_for(state, str(slot), raw, data) else default
 
 
 def normalized_combat_equipment_names(state: object) -> Dict[str, str]:
     names: Dict[str, str] = {}
     for slot, (field_name, _data, default) in COMBAT_EQUIPMENT_SLOTS.items():
-        names[slot] = normalized_combat_equipment_name(slot, getattr(state, field_name, default))
+        names[slot] = normalized_combat_equipment_name(slot, getattr(state, field_name, default), state)
     return names
 
 
@@ -1772,7 +1773,7 @@ def sanitize_combat_equipment(state: object) -> List[str]:
         return messages
     for slot, (field_name, data, default) in COMBAT_EQUIPMENT_SLOTS.items():
         current = str(getattr(state, field_name, default) or default)
-        if current not in data:
+        if not combat_equipment_data_for(state, slot, current, data):
             setattr(state, field_name, default)
             messages.append(f"{slot.title()} reset to {default}.")
     return messages
@@ -1780,9 +1781,9 @@ def sanitize_combat_equipment(state: object) -> List[str]:
 
 def combat_equipment_mods(state: object) -> Dict[str, int]:
     names = normalized_combat_equipment_names(state)
-    weapon = COMBAT_WEAPON_DATA[names["weapon"]]
-    armor = COMBAT_ARMOR_DATA[names["armor"]]
-    accessory = COMBAT_ACCESSORY_DATA[names["accessory"]]
+    weapon = combat_equipment_data_for(state, "weapon", names["weapon"], COMBAT_WEAPON_DATA) or COMBAT_WEAPON_DATA[DEFAULT_COMBAT_WEAPON]
+    armor = combat_equipment_data_for(state, "armor", names["armor"], COMBAT_ARMOR_DATA) or COMBAT_ARMOR_DATA[DEFAULT_COMBAT_ARMOR]
+    accessory = combat_equipment_data_for(state, "accessory", names["accessory"], COMBAT_ACCESSORY_DATA) or COMBAT_ACCESSORY_DATA[DEFAULT_COMBAT_ACCESSORY]
     pieces = [weapon, armor, accessory]
     return {
         "attack": sum(int(piece.get("attack", 0) or 0) for piece in pieces),
@@ -1821,7 +1822,7 @@ def farmstead_combat_profile(state: object) -> Dict[str, object]:
     base_effective_max_focus = max(0, base_max_focus + mods["max_focus"])
     equipment_names = normalized_combat_equipment_names(state)
     weapon_name = equipment_names["weapon"]
-    weapon = COMBAT_WEAPON_DATA[weapon_name]
+    weapon = combat_equipment_data_for(state, "weapon", weapon_name, COMBAT_WEAPON_DATA) or COMBAT_WEAPON_DATA[DEFAULT_COMBAT_WEAPON]
     progress_store = getattr(state, "combat_party_progress", {}) or {}
     player_progress = progress_store.get("player", {}) if isinstance(progress_store, dict) else {}
     tactical_mods = player_tactical_stat_bonuses(state)

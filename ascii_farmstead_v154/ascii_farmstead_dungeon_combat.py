@@ -20,6 +20,7 @@ from ascii_farmstead_support import C, colorize, movement_delta_for_key, normali
 from ascii_farmstead_ui import MenuItem
 from ascii_battle_prototype.combat.classes import class_defs as tactical_class_defs
 from ascii_battle_prototype.combat.loot import loot_profile_for_enemy
+from ascii_farmstead_random_loot import add_random_reward_items
 from ascii_battle_prototype.combat.models import Skill
 from ascii_battle_prototype.combat.skills import create_default_skills
 
@@ -1407,6 +1408,27 @@ class DungeonRoguelikeCombatMixin:
         money, items = translated_battle_loot(raw)
         if not raw:
             items = {"Ruin Scrap": 1}
+        depth = max(1, int(getattr(self.state, "current_dungeon_floor", 1) or 1))
+        if self.on_wilderness():
+            depth = max(depth, int(getattr(self.state, "combat_level", 1) or 1))
+        elite = str(species).startswith("Elite ")
+        loot_sequence = max(0, int(getattr(self.state, "mine_enemies_defeated", 0) or 0))
+        source_key = (
+            f"enemy:{getattr(self.state, 'current_dungeon_key', '')}:"
+            f"{getattr(self.state, 'wilderness_chunk_x', 0)},{getattr(self.state, 'wilderness_chunk_y', 0)}:"
+            f"{depth}:{x},{y}:{species}:{loot_sequence}"
+        )
+        items = add_random_reward_items(
+            self.state,
+            items,
+            source_key,
+            depth,
+            gear_chance=0.52 if boss else (0.10 if elite else 0.035),
+            consumable_chance=0.55 if boss else (0.22 if elite else 0.09),
+            valuable_chance=0.48 if boss else (0.18 if elite else 0.06),
+            quality_bonus=4 if boss else (2 if elite else 0),
+            rng=random,
+        )
         pile = {
             "x": int(x), "y": int(y), "source": str(species),
             "money": int(money), "items": {str(k): int(v) for k, v in items.items() if int(v) > 0},

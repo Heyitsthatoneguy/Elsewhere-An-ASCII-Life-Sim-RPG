@@ -6,15 +6,32 @@ import hashlib
 import random
 from typing import Dict, List, Optional, Tuple
 
-from ascii_farmstead_data import LEFT_PANEL_HEIGHT, LEFT_PANEL_WIDTH, MENU_BACK
+from ascii_farmstead_data import (
+    INFRASTRUCTURE_DATA,
+    LEFT_PANEL_HEIGHT,
+    LEFT_PANEL_WIDTH,
+    MENU_BACK,
+)
+from ascii_farmstead_excavation import EXCAVATION_FIND_DATA
 from ascii_farmstead_inventory import CapacityInventory, capacity_inventory
+from ascii_farmstead_random_loot import (
+    add_random_reward_items,
+    apply_equipment_enhancement,
+    equipped_inventory_reserve,
+    generated_equipment_record,
+)
 from ascii_farmstead_ui import MenuItem
+from ascii_farmstead_game_tables import rare_recovered_game_table
 
 
 BASE_BACKPACK_CAPACITY = 200
 BACKPACK_UPGRADE_SIZE = 50
 
 CONTAINER_ITEM_DATA: Dict[str, Dict[str, object]] = {
+    "Tempering Shard": {
+        "value": 32,
+        "description": "A dense fragment recovered by dismantling singular gear. Blacksmiths use it for enhancement and reforging.",
+    },
     "Dog-Eared Field Guide": {"value": 34, "description": "A practical guide full of penciled trail notes and pressed leaves."},
     "Water-Stained Journal": {"value": 42, "description": "Several pages are illegible, but the remaining entries describe a long river journey."},
     "Old Town Ledger": {"value": 55, "description": "A book of purchases, debts, and names from a settlement that no longer exists."},
@@ -75,6 +92,14 @@ CONTAINER_ITEM_DATA: Dict[str, Dict[str, object]] = {
         "passive": "trap_disarm", "amount": 0.12,
     },
 }
+
+CONTAINER_ITEM_DATA.update({
+    item_name: {
+        "value": int(data.get("value", 0) or 0),
+        "description": str(data.get("description", "A carefully recovered field specimen.")),
+    }
+    for item_name, data in EXCAVATION_FIND_DATA.items()
+})
 
 CONTAINER_PROFILES: Dict[str, Dict[str, object]] = {
     "bookshelf": {
@@ -358,6 +383,29 @@ class ContainerSystemMixin:
             ])
             for item_name, qty in materials.items():
                 contents[item_name] = contents.get(item_name, 0) + qty
+        if profile in {"ruin_chest", "encounter_cache"}:
+            level = max(1, int(getattr(self.state, "combat_level", 1) or 1))
+            contents = add_random_reward_items(
+                self.state,
+                contents,
+                f"world_container:{key}",
+                level,
+                gear_chance=0.11 if profile == "ruin_chest" else 0.07,
+                consumable_chance=0.34,
+                valuable_chance=0.52 if profile == "ruin_chest" else 0.30,
+                quality_bonus=1 if profile == "ruin_chest" else 0,
+                rng=rng,
+            )
+        recovered_table = rare_recovered_game_table(
+            key,
+            0.045
+            if profile == "ruin_chest"
+            else 0.012
+            if profile in {"encounter_cache", "crate"}
+            else 0.0,
+        )
+        if recovered_table:
+            contents[recovered_table] = contents.get(recovered_table, 0) + 1
         return contents
 
     def create_container_record(
@@ -852,14 +900,26 @@ class ContainerSystemMixin:
         return contents, max(1, int(record.get("capacity", 200) or 200)), str(record.get("take_policy", "free"))
 
     def container_item_description(self, item_name: str) -> str:
+        generated = generated_equipment_record(self.state, item_name)
+        if generated:
+            return str(generated.get("description", "A singular piece of recovered equipment."))
         data = CONTAINER_ITEM_DATA.get(item_name)
         if data:
             return str(data.get("description", "A recovered object."))
+        infrastructure = INFRASTRUCTURE_DATA.get(item_name)
+        if infrastructure:
+            return str(infrastructure.get("description", "A placeable object."))
         if item_name.endswith(" Seeds"):
             return "A packet of plantable seeds."
         return "A useful material or object that can be carried, stored, used, or sold."
 
     def container_item_sell_price(self, item_name: str) -> int:
+        generated = generated_equipment_record(self.state, item_name)
+        if generated:
+            enhanced = apply_equipment_enhancement(
+                self.state, str(generated.get("slot", "")), item_name, generated
+            )
+            return max(0, int(enhanced.get("value", 0) or 0))
         return max(0, int(CONTAINER_ITEM_DATA.get(item_name, {}).get("value", 0) or 0))
 
     def container_item_is_usable(self, item_name: str) -> bool:
@@ -881,6 +941,40 @@ class ContainerSystemMixin:
         }.get(effect, "")
 
     def container_item_detail_lines(self, item_name: str) -> List[str]:
+        generated = generated_equipment_record(self.state, item_name)
+        if generated:
+            generated = apply_equipment_enhancement(
+                self.state, str(generated.get("slot", "")), item_name, generated
+            )
+            affixes = [str(value) for value in generated.get("affixes", []) if str(value)]
+            stats = []
+            for key, label in (
+                ("attack", "Attack"),
+                ("defense", "Defense"),
+                ("max_hp", "Max HP"),
+                ("max_focus", "Max Focus"),
+            ):
+                amount = int(generated.get(key, 0) or 0)
+                if amount:
+                    stats.append(f"+{amount} {label}")
+            if str(generated.get("slot", "")) == "weapon":
+                range_min = max(1, int(generated.get("range_min", 1) or 1))
+                range_max = max(range_min, int(generated.get("range_max", range_min) or range_min))
+                stats.append(f"Range {range_min}-{range_max}")
+            lines = [
+                str(generated.get("description", "A singular piece of recovered equipment.")),
+                f"Rarity: {generated.get('rarity', 'Common')} | Item level: {generated.get('item_level', 1)}",
+                f"Slot: {str(generated.get('slot', '')).title()} | Value: ${int(generated.get('value', 0) or 0)}",
+            ]
+            if int(generated.get("enhancement", 0) or 0):
+                lines.append(
+                    f"Enhancement: +{generated.get('enhancement')} / +{generated.get('enhancement_cap')}"
+                )
+            if stats:
+                lines.append(f"Equipment: {', '.join(stats)}")
+            if affixes:
+                lines.append(f"Traits: {', '.join(affixes)}")
+            return lines
         data = CONTAINER_ITEM_DATA.get(item_name)
         if not data:
             return []
@@ -1114,7 +1208,11 @@ class ContainerSystemMixin:
             self.set_message("You cannot store your belongings in this container.")
             return False
         free = max(0, capacity - self.container_used(contents))
-        carried = [(name, int(qty)) for name, qty in sorted(self.state.inventory.items()) if int(qty or 0) > 0]
+        carried = [
+            (name, max(0, int(qty) - equipped_inventory_reserve(self.state, name)))
+            for name, qty in sorted(self.state.inventory.items())
+            if int(qty or 0) - equipped_inventory_reserve(self.state, name) > 0
+        ]
         items = [MenuItem(label=name, value=name, enabled=free > 0, hint=f"x{qty}") for name, qty in carried]
         items.append(MenuItem(label="Back", value=MENU_BACK, enabled=True))
         choice = self.vertical_panel_select("Store Item", items, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT, return_back=True)
@@ -1142,7 +1240,10 @@ class ContainerSystemMixin:
         free = max(0, capacity - self.container_used(contents))
         stored = 0
         for item_name, carried in sorted(self.state.inventory.items()):
-            carried = max(0, int(carried or 0))
+            carried = max(
+                0,
+                int(carried or 0) - equipped_inventory_reserve(self.state, item_name),
+            )
             if carried <= 0 or free <= 0:
                 continue
             quantity = min(carried, free)

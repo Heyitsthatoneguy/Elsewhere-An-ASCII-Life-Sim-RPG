@@ -414,6 +414,8 @@ class NpcMixin:
             return str(npc.get("social_activity"))
         role = str(npc.get("role", "Villager"))
         phase = self.town_npc_current_routine_phase(npc)
+        if phase == "late" and not self.town_npc_is_indoor(npc):
+            return "walking home to sleep"
         entry = self.town_npc_schedule_raw_value(npc)
         entry_activity = str(entry.get("activity", "")) if isinstance(entry, dict) else ""
         if entry_activity:
@@ -550,6 +552,8 @@ class NpcMixin:
             family_lines = self.npc_family_status_lines(str(npc.get("id", "")))
             if family_lines:
                 lines.extend(["", *family_lines])
+        if hasattr(self, "npc_adventure_profile_lines"):
+            lines.extend(self.npc_adventure_profile_lines(npc))
         if self.is_marriageable_npc(npc):
             lines.append("")
             lines.extend(self.town_npc_romance_lines(npc))
@@ -3059,6 +3063,8 @@ class NpcMixin:
         life.setdefault("npc_social_links", {})
         life.setdefault("journeys", {})
         life.setdefault("resident_trips", {})
+        life.setdefault("npc_progression", {})
+        life.setdefault("npc_adventure_checks", {})
         life.setdefault("event_log", [])
         return life
 
@@ -3178,7 +3184,11 @@ class NpcMixin:
         for npc_id, trip in self.regional_town_life_state().get("resident_trips", {}).items():
             if not isinstance(trip, dict):
                 continue
-            npc_name = self.town_npc_name(str(npc_id))
+            npc_name = str(
+                trip.get("resident_name")
+                or self.town_npc_name(str(npc_id))
+                or "Resident"
+            )
             destination = str(trip.get("destination_name", "a regional destination"))
             if target_day == int(trip.get("depart_day_number", -1)):
                 events.append(f"Regional departure: {npc_name} leaves for {destination}")
@@ -3815,6 +3825,8 @@ class NpcMixin:
             if plan:
                 rows.append(f"- {npc.get('name')}: {plan.get('destination_name')} ({status_labels.get(band, band)})")
         lines.extend(rows or ["- None scheduled under today's conditions."])
+        if hasattr(self, "npc_adventure_journal_lines"):
+            lines.extend(self.npc_adventure_journal_lines())
         return lines
 
     def regional_circulation_travelers_for_chunk(self, chunk_x: int, chunk_y: int) -> List[Dict[str, object]]:
@@ -3876,36 +3888,66 @@ class NpcMixin:
             duration = float(returning - depart)
             elapsed = (current_day - depart) + max(0, hour - 6) / 18.0
             journey_progress = max(0.0, min(0.999, elapsed / duration))
-            path = self.regional_circulation_route_chunks(
-                int(trip.get("chunk_x", 0)), int(trip.get("chunk_y", 0)), str(npc_id),
-            )
+            if (
+                str(trip.get("trip_kind", "")) == "regional_adventure"
+                and hasattr(self, "npc_adventure_route_chunks")
+            ):
+                path = self.npc_adventure_route_chunks(trip, str(npc_id))
+            else:
+                path = self.regional_circulation_route_chunks(
+                    int(trip.get("chunk_x", 0)), int(trip.get("chunk_y", 0)), str(npc_id),
+                )
             if journey_progress < 0.45:
                 road_progress = 1.0 - journey_progress / 0.45
                 destination_name = str(trip.get("destination_name", "a regional destination"))
             elif journey_progress > 0.55:
                 road_progress = (journey_progress - 0.55) / 0.45
-                destination_name = "Elsewhere"
+                destination_name = str(trip.get("origin_name", "Elsewhere"))
             else:
                 continue
             index = min(len(path) - 1, max(0, int(road_progress * len(path))))
             if path[index] != (int(chunk_x), int(chunk_y)):
                 continue
             npc = self.npc_record_by_id(str(npc_id))
+            if not npc and trip.get("resident_name"):
+                npc = {
+                    "id": str(npc_id),
+                    "name": str(trip.get("resident_name", "Town Resident")),
+                    "role": str(trip.get("resident_role", "Traveler")),
+                    "age_group": "Adult",
+                }
             if not npc:
                 continue
-            destination_chunk_x = int(trip.get("chunk_x", 0)) if destination_name != "Elsewhere" else 0
-            destination_chunk_y = int(trip.get("chunk_y", 0)) if destination_name != "Elsewhere" else 0
+            returning_home = destination_name == str(trip.get("origin_name", "Elsewhere"))
+            destination_chunk_x = int(trip.get("origin_chunk_x", 0)) if returning_home else int(trip.get("chunk_x", 0))
+            destination_chunk_y = int(trip.get("origin_chunk_y", 0)) if returning_home else int(trip.get("chunk_y", 0))
+            progression = (
+                self.npc_progression_record(npc)
+                if hasattr(self, "npc_progression_record")
+                else {}
+            )
             results.append({
                 "id": str(npc_id), "name": str(npc.get("name", "Town Resident")),
                 "role": str(npc.get("role", "Traveler")),
-                "regional_circulation": True, "authored_resident_trip": True, "road_route": True,
-                "route_destination_id": str(trip.get("destination_id", "")) if destination_name != "Elsewhere" else "main-town",
+                "regional_circulation": True,
+                "authored_resident_trip": not bool(trip.get("generated_resident", False)),
+                "resident_adventure_trip": str(trip.get("trip_kind", "")) == "regional_adventure",
+                "generated_resident_trip": bool(trip.get("generated_resident", False)),
+                "road_route": True,
+                "route_destination_id": str(trip.get("destination_id", "")) if not returning_home else str(trip.get("origin_name", "home")),
                 "route_destination_name": destination_name,
-                "route_destination_kind": str(trip.get("destination_kind", "road_service")) if destination_name != "Elsewhere" else "main_town",
+                "route_destination_kind": str(trip.get("destination_kind", "road_service")) if not returning_home else "home_town",
                 "route_destination_chunk_x": destination_chunk_x,
                 "route_destination_chunk_y": destination_chunk_y,
-                "activity": f"traveling for town business toward {destination_name}",
+                "activity": f"{trip.get('purpose', 'handling regional fieldwork')} toward {destination_name}",
                 "route_condition": str(trip.get("route_condition", "Open")),
+                "adventure_level": int(progression.get("level", 1) or 1),
+                "adventure_weapon": str(progression.get("weapon", "Walking Staff")),
+                "danger_response": (
+                    "stands ready to protect nearby travelers"
+                    if int(progression.get("courage", 25) or 25) >= 50
+                    else "will leave the road and avoid a superior threat"
+                ),
             })
         results.extend(self.home_region_commuters_for_chunk(chunk_x, chunk_y))
         return results
@@ -4070,8 +4112,18 @@ class NpcMixin:
                     ),
                 }
             trips.pop(npc_id, None)
+            outcome = ""
+            if (
+                str(active_trip.get("trip_kind", "")) == "regional_adventure"
+                and hasattr(self, "resolve_npc_adventure_trip")
+            ):
+                outcome = self.resolve_npc_adventure_trip(npc, active_trip)
             log = life.setdefault("event_log", [])
-            log.append(f"{self.town_npc_day_key()}: {npc.get('name', 'A resident')} returned from {active_trip.get('destination_name', 'a regional trip')}.")
+            log.append(
+                f"{self.town_npc_day_key()}: {npc.get('name', 'A resident')} returned from "
+                f"{active_trip.get('destination_name', 'a regional trip')}."
+                + (f" {outcome.capitalize()}." if outcome else "")
+            )
             life["event_log"] = log[-24:]
         occasion = self.todays_town_public_occasion()
         kind = str(occasion.get("kind", ""))
@@ -4142,18 +4194,26 @@ class NpcMixin:
                 "Tailor": "sourcing regional cloth and taking measurements",
             }.get(str(npc.get("role", "")), "handling a scheduled regional errand")
             expected_return = self.regional_return_date_label(int(route["travel_days"]))
-            trips[npc_id] = {
-                "destination_id": str(destination.get("id", "")),
-                "destination_name": str(destination.get("name", "Regional Roads")),
-                "destination_kind": str(destination.get("kind", "road_service")),
-                "chunk_x": int(destination.get("chunk_x", 0)),
-                "chunk_y": int(destination.get("chunk_y", 0)),
-                "depart_day_number": current_day,
-                "return_day_number": current_day + int(route["travel_days"]),
-                "expected_return": expected_return,
-                "purpose": purpose,
-                "route_condition": str(route["route_condition"]),
-            }
+            if hasattr(self, "npc_adventure_prepare_trip") and self.npc_adventure_eligible(npc):
+                trips[npc_id] = self.npc_adventure_prepare_trip(
+                    npc,
+                    destination,
+                    route,
+                    purpose=purpose,
+                )
+            else:
+                trips[npc_id] = {
+                    "destination_id": str(destination.get("id", "")),
+                    "destination_name": str(destination.get("name", "Regional Roads")),
+                    "destination_kind": str(destination.get("kind", "road_service")),
+                    "chunk_x": int(destination.get("chunk_x", 0)),
+                    "chunk_y": int(destination.get("chunk_y", 0)),
+                    "depart_day_number": current_day,
+                    "return_day_number": current_day + int(route["travel_days"]),
+                    "expected_return": expected_return,
+                    "purpose": purpose,
+                    "route_condition": str(route["route_condition"]),
+                }
             npc["regional_destination"] = str(destination.get("name", "Regional Roads"))
             npc["regional_destination_id"] = str(destination.get("id", ""))
             npc["regional_destination_kind"] = str(destination.get("kind", "road_service"))
@@ -5751,12 +5811,21 @@ class NpcMixin:
         grid = getattr(self, map_attr, None) if map_attr else None
         return grid if isinstance(grid, list) else []
 
-    def authored_town_interior_passable(self, location: str, x: int, y: int) -> bool:
+    def authored_town_interior_passable(
+        self,
+        location: str,
+        x: int,
+        y: int,
+        allow_closed_doors: bool = False,
+    ) -> bool:
         grid = self.authored_town_interior_grid(location)
         return bool(
             0 <= y < len(grid)
             and 0 <= x < len(grid[y])
-            and grid[y][x] in {".", ":", ",", "D"}
+            and (
+                grid[y][x] in {".", ":", ",", "D", "|"}
+                or (allow_closed_doors and grid[y][x] == "_")
+            )
         )
 
     def town_npc_nearest_interior_tile(
@@ -6198,18 +6267,35 @@ class NpcMixin:
     def town_npc_move_interior_toward(self, npc: Dict[str, object], location: str, target: Tuple[int, int]) -> bool:
         npc_id = str(npc.get("id", ""))
         start = (int(npc.get("interior_x", 27)), int(npc.get("interior_y", 18)))
+        self.town_npc_close_used_interior_door(npc, location, start)
         if start == target:
             npc["route_blocked"] = False
             return True
         step = self.town_npc_path_step(
             start,
             target,
-            lambda x, y: self.authored_town_interior_passable(location, x, y),
+            lambda x, y: self.authored_town_interior_passable(
+                location,
+                x,
+                y,
+                allow_closed_doors=True,
+            ),
             max_nodes=700,
         )
         if step is None:
             npc["route_blocked"] = True
             return False
+        grid = self.authored_town_interior_grid(location)
+        if (
+            step != start
+            and 0 <= step[1] < len(grid)
+            and 0 <= step[0] < len(grid[step[1]])
+            and grid[step[1]][step[0]] == "_"
+        ):
+            grid[step[1]][step[0]] = "|"
+            npc["runtime_opened_interior_door_location"] = str(location)
+            npc["runtime_opened_interior_door_x"] = int(step[0])
+            npc["runtime_opened_interior_door_y"] = int(step[1])
         if step != start and not self.town_npc_interior_route_tile(location, step[0], step[1], npc_id):
             alternatives = [
                 point for point in ((start[0] + 1, start[1]), (start[0] - 1, start[1]), (start[0], start[1] + 1), (start[0], start[1] - 1))
@@ -6225,6 +6311,39 @@ class NpcMixin:
         npc["steps_today"] = int(npc.get("steps_today", 0)) + 1
         npc["route_blocked"] = False
         return step == target
+
+    def town_npc_close_used_interior_door(
+        self,
+        npc: Dict[str, object],
+        location: str,
+        current: Tuple[int, int],
+    ) -> None:
+        if str(npc.get("runtime_opened_interior_door_location", "")) != str(location):
+            return
+        door_x = int(npc.get("runtime_opened_interior_door_x", -1) or -1)
+        door_y = int(npc.get("runtime_opened_interior_door_y", -1) or -1)
+        if door_x < 0 or door_y < 0 or abs(current[0] - door_x) + abs(current[1] - door_y) <= 1:
+            return
+        if self.state.location == location and (
+            int(getattr(self.state, "player_x", -1)),
+            int(getattr(self.state, "player_y", -1)),
+        ) == (door_x, door_y):
+            return
+        for other in getattr(self.state, "town_npcs", []):
+            if (
+                isinstance(other, dict)
+                and str(other.get("id", "")) != str(npc.get("id", ""))
+                and self.town_npc_actual_location(other) == location
+                and (int(other.get("interior_x", -1)), int(other.get("interior_y", -1)))
+                == (door_x, door_y)
+            ):
+                return
+        grid = self.authored_town_interior_grid(location)
+        if 0 <= door_y < len(grid) and 0 <= door_x < len(grid[door_y]) and grid[door_y][door_x] == "|":
+            grid[door_y][door_x] = "_"
+        npc["runtime_opened_interior_door_location"] = ""
+        npc["runtime_opened_interior_door_x"] = -1
+        npc["runtime_opened_interior_door_y"] = -1
 
     def town_npc_move_town_toward(self, npc: Dict[str, object], target: Tuple[int, int]) -> bool:
         npc_id = str(npc.get("id", ""))
@@ -6401,6 +6520,17 @@ class NpcMixin:
                 npc["routine_day_key"] = self.town_npc_day_key()
                 desired = self.town_npc_desired_location(npc)
                 actual = self.town_npc_actual_location(npc)
+                if (
+                    phase == "late"
+                    and int(getattr(self.state, "hour", 0) or 0) >= 23
+                    and desired != "Town"
+                    and actual != desired
+                ):
+                    # Night routes are allowed time to play out visibly, but a
+                    # blocked route must never leave somebody "sleeping" on a
+                    # street for the rest of the night.
+                    self.town_npc_place_at_destination(npc, desired)
+                    actual = desired
                 npc["runtime_target_location"] = desired
                 npc["activity"] = self.town_npc_activity_label(npc)
 
@@ -8420,6 +8550,10 @@ class NpcMixin:
             family_line = self.npc_family_dialogue_line(npc)
             if family_line:
                 context_lines.append(family_line)
+        if hasattr(self, "npc_adventure_dialogue_line"):
+            adventure_line = self.npc_adventure_dialogue_line(npc)
+            if adventure_line:
+                context_lines.append(adventure_line)
         return [
             self.town_npc_context_line(npc),
             "",
@@ -8558,7 +8692,19 @@ class NpcMixin:
         self.advance_time(minutes)
         assistance[key] = 1
         traveler["route_condition"] = "Traveler Assisted"
-        if traveler.get("authored_resident_trip"):
+        if traveler.get("resident_adventure_trip"):
+            trip = life.setdefault("resident_trips", {}).get(traveler_id, {})
+            if isinstance(trip, dict):
+                trip["route_condition"] = "Traveler Assisted"
+                trip["danger"] = max(0, int(trip.get("danger", 0) or 0) - 12)
+            if traveler.get("authored_resident_trip"):
+                gain = self.adjust_town_npc_relationship(traveler_id, 2)
+                connection_text = f"relationship +{gain}; journey risk reduced"
+            else:
+                bonds = life.setdefault("visitor_bonds", {})
+                bonds[traveler_id] = min(250, int(bonds.get(traveler_id, 0) or 0) + 2)
+                connection_text = "regional connection +2; journey risk reduced"
+        elif traveler.get("authored_resident_trip"):
             gain = self.adjust_town_npc_relationship(traveler_id, 2)
             trip = life.setdefault("resident_trips", {}).get(traveler_id, {})
             if isinstance(trip, dict):

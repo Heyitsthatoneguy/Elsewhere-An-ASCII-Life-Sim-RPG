@@ -26,8 +26,21 @@ import ascii_farmstead_custom_content as custom_content
 import ascii_farmstead_custom_extended as custom_extended
 import ascii_farmstead_custom_menus as custom_menus
 import ascii_farmstead_dynasty as dynasty
+import ascii_farmstead_excavation as excavation
+import ascii_farmstead_board_visuals as board_visuals
+import ascii_farmstead_checkers as checkers
+import ascii_farmstead_chess as chess
+import ascii_farmstead_mancala as mancala
+import ascii_farmstead_holdem as holdem
+import ascii_farmstead_hearts as hearts
+import ascii_farmstead_solitaire as solitaire
+import ascii_farmstead_cards as playing_cards
+import ascii_farmstead_ur as royal_ur
+import ascii_farmstead_game_tables as game_tables
 import ascii_farmstead_helpers as helpers
 import ascii_farmstead_inventory as inventory
+import ascii_farmstead_random_loot as random_loot
+import ascii_farmstead_minigame_ui as minigame_ui
 import ascii_farmstead_npcs as npcs
 import ascii_farmstead_saves as saves
 import ascii_farmstead_state as state
@@ -37,8 +50,10 @@ import ascii_farmstead_npc_dialogue as npc_dialogue
 import ascii_farmstead_procedural_towns as procedural_towns
 import ascii_farmstead_wilderness as wilderness_system
 import ascii_farmstead_support as support
+import ascii_farmstead_tavern_games as tavern_games
 import ascii_farmstead_ui as ui
 import ascii_farmstead_visuals as visuals
+import ascii_farmstead_victory as victory
 import ascii_farmstead_v154_item_alias_fixes as farmstead_main
 import elsewhere
 from ascii_battle_prototype.combat.game import Game as BattleGame
@@ -70,7 +85,7 @@ def visible_terminal_len(text: object) -> int:
 def main() -> int:
     assert support.GAME_TITLE == "Elsewhere: an ASCII Life-Sim RPG"
     assert support.GAME_SHORT_TITLE == "Elsewhere"
-    assert support.GAME_VERSION == "0.9.0-beta.4"
+    assert support.GAME_VERSION == "0.9.0-beta.5"
     assert support.movement_delta_for_key("NUM7") == (-1, -1)
     assert support.movement_delta_for_key("NUM8") == (0, -1)
     assert support.movement_delta_for_key("NUM3") == (1, 1)
@@ -1025,8 +1040,124 @@ def main() -> int:
         interactive=False,
     )
     assert true_death_game.state.player_run_ended
+    assert true_death_game.state.player_run_outcome == "death"
     assert true_death_game.state.combat_current_hp == 0
     assert any("final test dragon" in line for line in true_death_game.player_memorial_lines())
+
+    deterministic_contract_a = victory.build_victory_contract(
+        player_name="Aster",
+        birth_year=76,
+        starting_class="Fighter",
+        wilderness_seed=1337,
+        start_month=3,
+        start_day=1,
+        start_year=100,
+    )
+    deterministic_contract_b = victory.build_victory_contract(
+        player_name="Aster",
+        birth_year=76,
+        starting_class="Fighter",
+        wilderness_seed=1337,
+        start_month=3,
+        start_day=1,
+        start_year=100,
+    )
+    assert deterministic_contract_a == deterministic_contract_b
+    assert len(deterministic_contract_a["objectives"]) == 5
+    assert {objective["category"] for objective in deterministic_contract_a["objectives"]} == {
+        "Economy", "Exploration", "Mastery", "Community", "Legacy",
+    }
+    assert len({objective["metric"] for objective in deterministic_contract_a["objectives"]}) == 5
+    assert not victory.sanitize_victory_contract({
+        "objectives": [{"category": "Economy", "metric": "wealth", "target": 1}],
+    })
+
+    malformed_finite_state = GameState(
+        victory_mode=victory.VICTORY_MODE_FINITE,
+        victory_contract={
+            "objectives": [{"category": "Economy", "metric": "wealth", "target": 1}],
+        },
+    )
+    assert malformed_finite_state.victory_mode == victory.VICTORY_MODE_OPEN
+    assert malformed_finite_state.victory_contract == {}
+
+    synthetic_contract = victory.sanitize_victory_contract({
+        "id": "smoke-victory",
+        "title": "The Tested Legacy",
+        "created_month": 3,
+        "created_day": 1,
+        "created_year": 100,
+        "objectives": [
+            {
+                "category": "Economy", "metric": "wealth", "title": "Reserve",
+                "description": "Hold funds.", "target": 100, "unit": "g",
+            },
+            {
+                "category": "Exploration", "metric": "explored_chunks", "title": "Survey",
+                "description": "Explore regions.", "target": 2, "unit": "regions",
+            },
+            {
+                "category": "Mastery", "metric": "combat_level", "title": "Train",
+                "description": "Gain levels.", "target": 2, "unit": "level",
+            },
+            {
+                "category": "Community", "metric": "town_stage", "title": "Restore",
+                "description": "Develop town.", "target": 1, "unit": "stage",
+            },
+            {
+                "category": "Legacy", "metric": "gear_enhancement", "title": "Temper",
+                "description": "Enhance gear.", "target": 1, "unit": "ranks",
+            },
+        ],
+    })
+    assert synthetic_contract
+    victory_game = FarmGame()
+    victory_game.save = lambda *args, **kwargs: True
+    victory_game.configure_victory_mode(victory.VICTORY_MODE_FINITE, synthetic_contract)
+    victory_game.state.money = 0
+    assert not victory_game.check_victory_completion(interactive=False)
+    victory_game.state.money = 100
+    victory_game.state.wilderness_chunks_visited = 2
+    victory_game.state.combat_level = 2
+    victory_game.state.town_development_stage = 1
+    victory_game.state.inventory[DEFAULT_COMBAT_WEAPON] = 1
+    victory_game.state.equipment_workshop = {
+        DEFAULT_COMBAT_WEAPON: {"enhancement": 1, "reforge_count": 0},
+    }
+    assert victory_game.victory_completed_objective_count() == 5
+    assert victory_game.check_victory_completion(interactive=False)
+    assert victory_game.state.player_run_ended
+    assert victory_game.state.player_run_outcome == "victory"
+    assert victory_game.state.victory_contract["completed"]
+    assert victory_game.state.victory_record["contract_title"] == "The Tested Legacy"
+    assert victory_game.state.victory_record["objectives"]
+    assert any("read-only" in line for line in victory_game.victory_summary_lines())
+    assert not victory_game.check_victory_completion(interactive=False)
+
+    victory_round_trip = GameState(**prepare_loaded_state_data({
+        "player_run_ended": True,
+        "player_run_outcome": "victory",
+        "victory_mode": victory.VICTORY_MODE_FINITE,
+        "victory_contract": victory_game.state.victory_contract,
+        "victory_record": victory_game.state.victory_record,
+    }))
+    assert victory_round_trip.player_run_ended
+    assert victory_round_trip.player_run_outcome == "victory"
+    assert victory_round_trip.victory_contract["completed"]
+    with TemporaryDirectory() as victory_temp_dir:
+        victory_save_path = Path(victory_temp_dir) / "victory.json"
+        victory_save_path.write_text(json.dumps({
+            "state": {
+                "player_run_ended": True,
+                "player_run_outcome": "victory",
+                "victory_record": victory_game.state.victory_record,
+                "player_name": "Aster",
+                "month": 3,
+                "day": 8,
+                "year": 100,
+            },
+        }), encoding="utf-8")
+        assert victory_game.save_file_summary(victory_save_path).startswith("VICTORY | Aster")
 
     immortal_game = FarmGame()
     immortal_game.set_mortality_mode("Immortal", autosave=False)
@@ -1153,6 +1284,26 @@ def main() -> int:
     assert loaded_state.museum_donation_counts == {}
     assert loaded_state.museum_reward_claims == []
     assert loaded_state.museum_exhibit_unlocks == []
+    assert loaded_state.excavation_sites == {}
+    assert loaded_state.excavation_discoveries == []
+    assert loaded_state.excavation_exp == 0
+    assert loaded_state.archaeology_finds == 0
+    assert loaded_state.paleontology_finds == 0
+    assert loaded_state.tavern_blackjack_stats == {}
+    assert loaded_state.tavern_checkers_stats == {}
+    assert loaded_state.tavern_checkers_match == {}
+    assert loaded_state.tavern_chess_stats == {}
+    assert loaded_state.tavern_chess_match == {}
+    assert loaded_state.tavern_mancala_stats == {}
+    assert loaded_state.tavern_mancala_match == {}
+    assert loaded_state.tavern_holdem_stats == {}
+    assert loaded_state.tavern_hearts_stats == {}
+    assert loaded_state.tavern_hearts_match == {}
+    assert loaded_state.tavern_solitaire_stats == {}
+    assert loaded_state.tavern_solitaire_match == {}
+    assert loaded_state.tavern_ur_stats == {}
+    assert loaded_state.tavern_ur_match == {}
+    assert loaded_state.tavern_game_discoveries == []
     assert loaded_state.marriage_month == 0
     assert loaded_state.family_event_log == []
     assert loaded_state.family_event_flags == []
@@ -2553,6 +2704,26 @@ def main() -> int:
     ) == "D"
     mine_arrival = home_world_game.home_world_destination_world_positions()["mine"]
     assert home_world_tile(home_world_game, mine_arrival[0], mine_arrival[1] - 1) == "V"
+    # The old source-map rectangles no longer draw an impassable wall around
+    # either district. Actual roads and player-built fences remain intact.
+    for source_kind, source_map, world_for_source in (
+        ("town", home_world_game.town_map, home_world_game.home_world_world_for_town_position),
+        ("farm", home_world_game.base_map, home_world_game.home_world_world_for_farm_position),
+    ):
+        source_height = len(source_map)
+        perimeter_wall = next(
+            (x, y)
+            for y, row in enumerate(source_map)
+            for x, tile in enumerate(row)
+            if tile == "#"
+            and (x in {0, len(row) - 1} or y in {0, source_height - 1})
+        )
+        perimeter_world = world_for_source(*perimeter_wall)
+        assert home_world_tile(home_world_game, *perimeter_world) != "#"
+        home_world_game.set_player_home_world_position(*perimeter_world)
+        assert home_world_game.home_world_open_perimeter_at(
+            source_kind, *perimeter_wall
+        )
 
     # Farm debris remains canonical in the embedded world. Clearing with the
     # normal F-tool route must update both the visible chunk and base_map so a
@@ -2837,6 +3008,28 @@ def main() -> int:
         player_x, player_y,
     )
 
+    # Capital A is both the Animal Store façade and the outpost-door glyph.
+    # No authored building surface may dispatch a wilderness transition merely
+    # because its character resembles a site marker.
+    facade_game = FarmGame()
+    authored_door_positions = set(data.TOWN_DOORS.values()) | set(
+        data.AUTHORED_TOWN_RESIDENCE_ID_BY_DOOR
+    )
+    facade_symbols = {"G", "C", "X", "L", "M", "I", "Y", "A", "H", "R", "P", "U", "Q", "h"}
+    checked_facades = 0
+    for source_y, row in enumerate(facade_game.town_map):
+        for source_x, tile in enumerate(row):
+            if tile not in facade_symbols or (source_x, source_y) in authored_door_positions:
+                continue
+            facade_game.return_to_seamless_town(source_x, source_y)
+            local_x, local_y = facade_game.state.player_x, facade_game.state.player_y
+            assert not facade_game.current_wilderness_outpost_door_at(local_x, local_y)
+            assert not facade_game.current_wilderness_structure_door_at(local_x, local_y)
+            assert not facade_game.try_enter_wilderness_transition_at(local_x, local_y)
+            assert facade_game.on_wilderness()
+            checked_facades += 1
+    assert checked_facades > 100
+
     # Exterior doors retain spatially correct interior round trips.
     home_world_game.return_to_seamless_farm(5, 6, facing="UP")
     home_world_game.move(0, -1)
@@ -2985,7 +3178,7 @@ def main() -> int:
     destination_workers = commute_game.home_region_destination_npc_positions()
     assert {npc["id"] for npc in destination_workers.values()} == {"cora_courier", "hana_botanist"}
     assert all(commute_game.is_interactable_tile(x, y) for x, y in destination_workers)
-    assert all(not commute_game.passable(x, y) for x, y in destination_workers)
+    assert all(commute_game.passable(x, y) for x, y in destination_workers)
     local_helper = next(npc for npc in destination_workers.values() if npc["id"] == "cora_courier")
     money_before_local_help = commute_game.state.money
     stamina_before_local_help = commute_game.state.stamina
@@ -3649,7 +3842,7 @@ def main() -> int:
     assert not hinterland_game.work_procedural_town_hinterland()
     assert hinterland_game.overworld_chunk_preview_symbol(*hinterland_chunk) in {"h", "V"}
     assert procedural_town_plan["map_applied"] is True
-    assert int(procedural_town_plan["runtime_version"]) >= 13
+    assert int(procedural_town_plan["runtime_version"]) >= 14
     assert procedural_town_plan.get("regional_approaches")
     assert any(tile != "#" for tile in procedural_town_map[0])
     assert any(tile != "#" for tile in procedural_town_map[-1])
@@ -3755,6 +3948,139 @@ def main() -> int:
         procedural_town_x,
         procedural_town_y,
     ) == {"errors": [], "warnings": []}
+    district_growth_game = FarmGame()
+    district_growth_game.autosave_with_message = (
+        lambda message: district_growth_game.set_message(message)
+    )
+    district_growth_game.state.wilderness_seed = procedural_town_game.state.wilderness_seed
+    district_growth_game._procedural_town_site_cache = {}
+    district_plan = district_growth_game.ensure_procedural_town_plan(
+        procedural_town_x,
+        procedural_town_y,
+    )
+    district_community = district_growth_game.ensure_procedural_town_community(
+        district_plan
+    )
+    district_community["development_points"] = 170
+    assert district_growth_game.refresh_procedural_town_growth(district_plan) == 6
+    districts = district_community["districts"]
+    assert len(districts) == 6
+    assert district_community["district_count"] == 6
+    district_community["development_points"] = 570
+    assert district_growth_game.procedural_town_district_target_count(district_plan) == 22
+    district_community["development_points"] = 170
+    footprint = {
+        (procedural_town_x, procedural_town_y),
+        *{
+            (int(district["chunk_x"]), int(district["chunk_y"]))
+            for district in districts
+        },
+    }
+    assert len(footprint) == 7
+    assert all(
+        any(
+            neighbor in footprint
+            for neighbor in (
+                (int(district["chunk_x"]) + 1, int(district["chunk_y"])),
+                (int(district["chunk_x"]) - 1, int(district["chunk_y"])),
+                (int(district["chunk_x"]), int(district["chunk_y"]) + 1),
+                (int(district["chunk_x"]), int(district["chunk_y"]) - 1),
+            )
+        )
+        for district in districts
+    )
+    for district in districts:
+        district_chunk = (int(district["chunk_x"]), int(district["chunk_y"]))
+        assert (
+            district_growth_game.procedural_town_plan(*district_chunk)
+            is district_plan
+        )
+        local_buildings = district_growth_game.procedural_town_buildings_for_chunk(
+            district_plan,
+            *district_chunk,
+        )
+        assert local_buildings
+        assert all(
+            int(building["district_chunk_x"]) == district_chunk[0]
+            and int(building["district_chunk_y"]) == district_chunk[1]
+            and int(building["phase_index"]) == 3
+            for building in local_buildings
+        )
+        assert all(
+            43 not in range(int(building["x"]), int(building["x"]) + int(building["width"]))
+            and 19 not in range(int(building["y"]), int(building["y"]) + int(building["height"]))
+            for building in local_buildings
+        )
+        district_map = district_growth_game.get_wilderness_chunk_map(
+            *district_chunk
+        )
+        assert district["map_applied"] is True
+        assert district_map[19][43] == ":"
+        assert sum(
+            row.count(procedural_towns.PROCEDURAL_TOWN_DOOR_SYMBOL)
+            for row in district_map
+        ) == len([
+            building
+            for building in local_buildings
+            if building["type_id"] not in procedural_towns.PROCEDURAL_TOWN_OPEN_BUILDINGS
+        ])
+    district_population = district_growth_game.procedural_settlement_population(
+        procedural_town_x,
+        procedural_town_y,
+    )
+    assert district_population
+    assert district_growth_game.procedural_settlement_population_validation(
+        procedural_town_x,
+        procedural_town_y,
+    ) == {"errors": [], "warnings": []}
+    assert any(
+        district_growth_game.procedural_town_building_chunk(
+            district_plan,
+            district_plan["buildings"].get(str(resident.get("home_building_id", ""))),
+        )
+        != (procedural_town_x, procedural_town_y)
+        for resident in district_population["residents"].values()
+    )
+    district_growth_game.state.hour = 12
+    assert sum(
+        bool(district_growth_game.procedural_town_stream_resident_lookup(
+            int(district["chunk_x"]),
+            int(district["chunk_y"]),
+        ))
+        for district in districts
+    ) >= 2
+    entry_district = districts[0]
+    entry_chunk = (
+        int(entry_district["chunk_x"]),
+        int(entry_district["chunk_y"]),
+    )
+    district_growth_game.state.location = "Wilderness"
+    district_growth_game.set_wilderness_chunk(*entry_chunk)
+    assert "District" in district_growth_game.location_label()
+    entry_building = next(
+        building
+        for building in district_growth_game.procedural_town_buildings_for_chunk(
+            district_plan,
+            *entry_chunk,
+        )
+        if building["type_id"] not in procedural_towns.PROCEDURAL_TOWN_OPEN_BUILDINGS
+    )
+    assert district_growth_game.procedural_town_building_door_at(
+        int(entry_building["door_x"]),
+        int(entry_building["door_y"]),
+    )["id"] == entry_building["id"]
+    assert district_growth_game.enter_procedural_town_building(entry_building)
+    assert district_growth_game.current_procedural_town_plan() is district_plan
+    assert district_growth_game.exit_procedural_town_building()
+    assert (
+        district_growth_game.state.wilderness_chunk_x,
+        district_growth_game.state.wilderness_chunk_y,
+    ) == entry_chunk
+    district_report = "\n".join(
+        district_growth_game.procedural_town_report_lines(*entry_chunk)
+    )
+    assert "Developed footprint: 7 chunks" in district_report
+    assert "Current district:" in district_report
     procedural_town_game.state.location = "Wilderness"
     procedural_town_game.set_wilderness_chunk(
         procedural_town_x,
@@ -3973,6 +4299,31 @@ def main() -> int:
         procedural_town_game.procedural_town_resident_runtime_destination = (
             original_runtime_destination
         )
+    assert procedural_town_game.procedural_town_resident_runtime_activity(
+        "building:home", "outdoor", "sleeping at home", "late"
+    ) == "walking home to sleep"
+    original_runtime_hour = procedural_town_game.state.hour
+    procedural_town_game.state.hour = 23
+    procedural_town_game.ensure_procedural_town_resident_runtime(
+        force_reanchor=True
+    )
+    assert all(
+        str(resident.get("runtime_location", ""))
+        == f"building:{resident.get('home_building_id')}"
+        for resident in procedural_runtime_population["residents"].values()
+        if (
+            not resident.get("deceased")
+            and resident.get("home_building_id")
+            and str(resident.get("id", ""))
+            not in procedural_town_game.regional_town_life_state().get(
+                "resident_trips", {}
+            )
+        )
+    )
+    procedural_town_game.state.hour = original_runtime_hour
+    procedural_town_game.ensure_procedural_town_resident_runtime(
+        force_reanchor=True
+    )
 
     procedural_resident_ids = set(
         procedural_runtime_population["residents"]
@@ -4048,7 +4399,7 @@ def main() -> int:
         iter(runtime_resident_positions.items())
     )
     assert procedural_town_game.town_npc_at(*runtime_resident_position) is runtime_resident
-    assert not procedural_town_game.passable(*runtime_resident_position)
+    assert procedural_town_game.passable(*runtime_resident_position)
     assert runtime_resident["name"] in procedural_town_game.interaction_hint(
         *runtime_resident_position
     )
@@ -4404,6 +4755,36 @@ def main() -> int:
     procedural_blocking_tiles = procedural_town_game.procedural_town_interior_blocking_tiles()
     assert " " in procedural_blocking_tiles
     assert not procedural_town_game.procedural_town_interior_tile_passable(" ")
+    procedural_interior_community = procedural_town_game.ensure_procedural_town_community(
+        procedural_town_plan
+    )
+    variant_probe_building = next(
+        building
+        for building in procedural_interior_buildings
+        if building["type_id"] == "general_store"
+    )
+    variant_probe_grids = [
+        procedural_town_game.procedural_town_generated_ground_floor_map(
+            procedural_town_plan,
+            variant_probe_building,
+            1,
+            None,
+            None,
+            procedural_interior_community,
+            layout_variant,
+            0,
+        )
+        for layout_variant in range(4)
+    ]
+    variant_probe_signatures = {
+        tuple("".join("." if tile != " " else " " for tile in row) for row in variant_grid)
+        for variant_grid in variant_probe_grids
+    }
+    assert len(variant_probe_signatures) == 4, "Same-type procedural interiors do not vary structurally"
+    assert all(
+        all(tile not in {"|", "_"} for row in variant_grid for tile in row)
+        for variant_grid in variant_probe_grids
+    ), "Public room connections should be open archways, not decorative doors"
     expected_tiles_by_type = {
         "general_store": {"&", "$", "s"},
         "market_stall": {"&", "$", "s"},
@@ -4505,7 +4886,10 @@ def main() -> int:
                     if (
                         (nx, ny) in seen
                         or not (0 <= ny < len(grid) and 0 <= nx < len(grid[ny]))
-                        or grid[ny][nx] in procedural_blocking_tiles
+                        or (
+                            grid[ny][nx] in procedural_blocking_tiles
+                            and grid[ny][nx] != "_"
+                        )
                     ):
                         continue
                     seen.add((nx, ny))
@@ -4566,6 +4950,100 @@ def main() -> int:
         if generated_building_counts_by_type.get(type_id, 0) >= 2
     )
     assert len(generated_service_positions) >= 2
+    progression_probe = next(
+        resident
+        for resident in procedural_town_game.procedural_settlement_residents(
+            int(procedural_town_plan["chunk_x"]),
+            int(procedural_town_plan["chunk_y"]),
+        )
+        if procedural_town_game.npc_adventure_eligible(resident)
+    )
+    progression_record = procedural_town_game.npc_progression_record(progression_probe)
+    assert progression_record["level"] == 1
+    procedural_town_game.award_npc_adventure_xp(progression_probe, 300)
+    assert progression_record["level"] >= 3
+    assert progression_record["gear_tier"] >= 1
+    assert progression_record["weapon"].startswith("Tempered ")
+    progression_lines = procedural_town_game.npc_adventure_profile_lines(
+        progression_probe
+    )
+    assert any("Regional experience" in line for line in progression_lines)
+    adventure_destination = {
+        "id": "adventure-test",
+        "name": "Distant Test Camp",
+        "kind": "outpost",
+        "chunk_x": int(procedural_town_plan["chunk_x"]) + 4,
+        "chunk_y": int(procedural_town_plan["chunk_y"]) + 2,
+    }
+    adventure_route = {
+        "travel_days": 2,
+        "distance_chunks": 6,
+        "route_condition": "Hazardous",
+    }
+    adventure_trip = procedural_town_game.npc_adventure_prepare_trip(
+        progression_probe,
+        adventure_destination,
+        adventure_route,
+        origin=(
+            int(procedural_town_plan["chunk_x"]),
+            int(procedural_town_plan["chunk_y"]),
+        ),
+        origin_name=str(procedural_town_plan["name"]),
+        generated=True,
+    )
+    adventure_path = procedural_town_game.npc_adventure_route_chunks(
+        adventure_trip,
+        str(progression_probe["id"]),
+    )
+    assert adventure_path[0] == (
+        adventure_destination["chunk_x"],
+        adventure_destination["chunk_y"],
+    )
+    assert adventure_path[-1] == (
+        int(procedural_town_plan["chunk_x"]),
+        int(procedural_town_plan["chunk_y"]),
+    )
+    journeys_before = int(progression_record["journeys"])
+    outcome = procedural_town_game.resolve_npc_adventure_trip(
+        progression_probe,
+        adventure_trip,
+    )
+    assert outcome
+    assert int(progression_record["journeys"]) == journeys_before + 1
+    xp_after_resolution = int(progression_record["xp"])
+    procedural_town_game.resolve_npc_adventure_trip(
+        progression_probe,
+        adventure_trip,
+    )
+    assert int(progression_record["xp"]) == xp_after_resolution
+    progression_state_probe = GameState(
+        regional_town_life={
+            "npc_progression": {
+                "resident:test": {
+                    **progression_record,
+                    "history": ["A" * 300],
+                }
+            },
+            "resident_trips": {
+                "resident:test": {
+                    **adventure_trip,
+                    "danger": 999,
+                }
+            },
+            "npc_adventure_checks": {"4,2": 18},
+        }
+    )
+    saved_progression = progression_state_probe.regional_town_life[
+        "npc_progression"
+    ]["resident:test"]
+    saved_trip = progression_state_probe.regional_town_life[
+        "resident_trips"
+    ]["resident:test"]
+    assert saved_progression["level"] == progression_record["level"]
+    assert len(saved_progression["history"][0]) == 240
+    assert saved_trip["trip_kind"] == "regional_adventure"
+    assert saved_trip["danger"] == 100
+    assert saved_trip["generated_resident"] is True
     assert all(
         procedural_town_game.procedural_town_local_stock(building)
         for building in local_service_buildings
@@ -4672,6 +5150,32 @@ def main() -> int:
         for building in local_service_buildings
         if building["type_id"] == "inn"
     )
+    expected_inn_games = game_tables.venue_game_ids(
+        f"{procedural_town_plan.get('id')}:{inn_building.get('id')}",
+        "inn",
+        count=2,
+    )
+    procedural_inn_map = procedural_town_game.procedural_town_interior_map(
+        inn_building
+    )
+    procedural_inn_glyphs = set("".join("".join(row) for row in procedural_inn_map))
+    assert {
+        str(game_tables.GAME_TABLE_DATA[game_id]["glyph"])
+        for game_id in expected_inn_games
+    } <= procedural_inn_glyphs
+    assert len(expected_inn_games) == 2
+    assert {
+        str(game_tables.GAME_TABLE_DATA[game_id]["category"])
+        for game_id in expected_inn_games
+    } == {"card", "board"}
+    assert "|" not in procedural_inn_glyphs
+    assert 1 <= sum(row.count("_") for row in procedural_inn_map) <= 6
+    procedural_store_map = procedural_town_game.procedural_town_interior_map(
+        general_store_building
+    )
+    assert not ({"|", "_"} & set(
+        "".join("".join(row) for row in procedural_store_map)
+    ))
     procedural_town_game.state.stamina = 20
     assert procedural_town_game.use_procedural_town_special_service(inn_building)
     assert procedural_town_game.state.stamina == min(
@@ -6276,12 +6780,843 @@ def main() -> int:
         hm, hd, hy = helpers.advance_date(hm, hd, hy)
     assert hazard_found
 
+    # Every card game shares the player's authored card faces. Single-character
+    # ranks and the wider ten intentionally use different spacing.
+    king_heart = [line.rstrip() for line in playing_cards.plain_card_lines(("K", "H"))]
+    ten_spade = [line.rstrip() for line in playing_cards.plain_card_lines(("10", "S"))]
+    assert king_heart == [
+        "+-----+",
+        "|K    |",
+        "|     |",
+        "|  ♥  |",
+        "|     |",
+        "|    K|",
+        "+-----+",
+    ]
+    assert ten_spade == [
+        "+-----+",
+        "|10   |",
+        "|     |",
+        "|  ♠  |",
+        "|     |",
+        "|   10|",
+        "+-----+",
+    ]
+    assert all(
+        len(line) == playing_cards.CARD_RENDER_WIDTH
+        for line in playing_cards.plain_card_lines(("9", "C"))
+    )
+    assert playing_cards.card_suit_glyph("D") == "♦"
+    assert playing_cards.card_suit_glyph("C") == "♣"
+    assert playing_cards.card_color(("Q", "H")) == support.C.ROOF_RED
+    assert playing_cards.card_color(("Q", "S")) == support.C.TUNDRA
+    hidden_card = playing_cards.plain_card_lines(("A", "S"), hidden=True)
+    assert any("?" in line for line in hidden_card)
+    wrapped_cards = playing_cards.rendered_card_rows(
+        [f"{rank}H" for rank in ("A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K")],
+        max_per_row=7,
+        cursor=8,
+        selected=[8],
+        show_numbers=True,
+    )
+    assert sum("+-----+" in ui.strip_ansi(line) for line in wrapped_cards) == 4
+    assert any("^SELECTED^" in line for line in wrapped_cards)
+
+    # Game access is physically distributed among venue fixtures and movable furniture.
+    assert len(game_tables.GAME_TABLE_DATA) == 8
+    assert game_tables.venue_game_ids("Mae's Inn", "maes_inn") == (
+        "blackjack",
+        "hearts",
+        "checkers",
+    )
+    stable_venue_games = game_tables.venue_game_ids("settlement:12,9:inn:2", "inn", count=3)
+    assert stable_venue_games == game_tables.venue_game_ids(
+        "settlement:12,9:inn:2", "inn", count=3
+    )
+    assert len(stable_venue_games) == 3
+    assert {
+        game_tables.GAME_TABLE_DATA[game_id]["category"]
+        for game_id in stable_venue_games
+    } == {"card", "board"}
+    rotating_tables = game_tables.rotating_game_furniture("1:Spring:0", count=2)
+    assert len(rotating_tables) == 2
+    assert all(name in game_tables.GAME_TABLE_BY_FURNITURE for name in rotating_tables)
+    assert game_tables.rare_recovered_game_table("ruin:test", 1.0) in game_tables.GAME_TABLE_BY_FURNITURE
+    for game_id, table in game_tables.GAME_TABLE_DATA.items():
+        furniture = data.INFRASTRUCTURE_DATA[str(table["name"])]
+        assert furniture["game_id"] == game_id
+        assert furniture["category"] == "furniture"
+        assert furniture["footprint"] == [3, 1]
+    game_table_game = FarmGame()
+    opened_game_tables = []
+    game_table_game.blackjack_table_menu = (
+        lambda venue: opened_game_tables.append(("blackjack", venue))
+    )
+    assert game_table_game.use_game_table_furniture(
+        "Blackjack Table",
+        "Smoke Test Game Room",
+    )
+    assert opened_game_tables == [("blackjack", "Smoke Test Game Room")]
+    assert game_table_game.state.tavern_game_discoveries == ["blackjack"]
+    game_table_game.discover_game_tables(("checkers", "invalid", "blackjack"))
+    assert game_table_game.state.tavern_game_discoveries == ["blackjack", "checkers"]
+    game_table_game.state.location = "HouseInterior"
+    game_table_game.state.inventory["Chess Table"] = 1
+    chess_table_position = next(
+        (x, y)
+        for y, row in enumerate(game_table_game.house_map)
+        for x, _tile in enumerate(row)
+        if game_table_game.can_place_object("Chess Table", x, y)[0]
+    )
+    assert game_table_game.place_inventory_object_at(
+        "Chess Table", *chess_table_position, autosave=False
+    )
+    chess_table_key, chess_table_name, chess_table_x, chess_table_y = (
+        game_table_game.placed_object_at(chess_table_position[0] + 1, chess_table_position[1])
+    )
+    assert chess_table_key == game_table_game.obj_key(*chess_table_position)
+    assert chess_table_name == "Chess Table"
+    assert (chess_table_x, chess_table_y) == chess_table_position
+    game_table_game.chess_menu = (
+        lambda venue: opened_game_tables.append(("chess", venue))
+    )
+    game_table_game.use_house_furniture("Chess Table")
+    assert opened_game_tables[-1] == ("chess", "Home Game Room")
+    assert "chess" in game_table_game.state.tavern_game_discoveries
+    sanitized_game_table_state = GameState(**prepare_loaded_state_data({
+        "tavern_game_discoveries": ["invalid", "chess", "chess"],
+    }))
+    assert sanitized_game_table_state.tavern_game_discoveries == ["chess"]
+    assert {"1", "3", "5"} <= set(
+        "".join("".join(row) for row in game_table_game.inn_interior_map)
+    )
+    authored_public_interiors = (
+        game_table_game.general_store_map,
+        game_table_game.blacksmith_interior_map,
+        game_table_game.library_interior_map,
+        game_table_game.furniture_store_map,
+        game_table_game.carpenter_store_map,
+        game_table_game.museum_interior_map,
+    )
+    assert all(
+        "|" not in "".join("".join(row) for row in interior)
+        for interior in authored_public_interiors
+    )
+    assert sum(row.count("_") for row in game_table_game.inn_interior_map) == 3
+    roadside_table_game = FarmGame()
+    roadside_table_game.state.location = "WildernessStructure"
+    roadside_table_game.state.wilderness_chunk_x = 91
+    roadside_table_game.state.wilderness_chunk_y = 73
+    roadside_table_game.state.current_wilderness_structure_key = "91,73"
+    roadside_record = roadside_table_game.wilderness_structure_record()
+    roadside_record.update({
+        "type_id": "roadside_inn",
+        "name": "Smoke Test Roadside Inn",
+        "repaired": True,
+    })
+    roadside_map = roadside_table_game.wilderness_structure_map()
+    expected_roadside_games = game_tables.venue_game_ids(
+        "91,73", "roadside_inn", count=2
+    )
+    roadside_glyph_positions = {
+        tile: (x, y)
+        for y, row in enumerate(roadside_map)
+        for x, tile in enumerate(row)
+        if tile in game_tables.GAME_TABLE_BY_GLYPH
+    }
+    assert {
+        str(game_tables.GAME_TABLE_DATA[game_id]["glyph"])
+        for game_id in expected_roadside_games
+    } == set(roadside_glyph_positions)
+    opened_roadside_tables = []
+    roadside_table_game.open_physical_game_table = (
+        lambda game_id, venue: opened_roadside_tables.append((game_id, venue))
+    )
+    roadside_glyph = str(
+        game_tables.GAME_TABLE_DATA[expected_roadside_games[0]]["glyph"]
+    )
+    roadside_table_game.use_wilderness_structure_action(
+        *roadside_glyph_positions[roadside_glyph]
+    )
+    assert opened_roadside_tables == [
+        (expected_roadside_games[0], "Smoke Test Roadside Inn")
+    ]
+
+    # Tavern blackjack uses a deterministic, UI-independent rules engine.
+    assert len(tavern_games.make_blackjack_deck(random.Random(17))) == 52
+    assert len(set(tavern_games.make_blackjack_deck(random.Random(17)))) == 52
+    assert tavern_games.blackjack_hand_value([("A", "S"), ("9", "H")]) == (20, True)
+    assert tavern_games.blackjack_hand_value([("A", "S"), ("A", "H"), ("9", "D"), ("K", "C")]) == (21, False)
+
+    # A table sitting now uses one countable 52-card shoe across rounds.
+    expected_shoe_order = tavern_games.make_blackjack_deck(random.Random(117))
+    countable_shoe = tavern_games.BlackjackShoe(random.Random(117))
+    assert countable_shoe.cards_remaining == 52
+    assert countable_shoe.cards_seen == 0
+    assert not countable_shoe.prepare_round()
+    countable_shoe.start_round()
+    first_shoe_round = tavern_games.BlackjackRound(10, shoe=countable_shoe)
+    assert first_shoe_round.player_hands[0]["cards"] == [
+        expected_shoe_order[0], expected_shoe_order[2],
+    ]
+    assert first_shoe_round.dealer_cards == [
+        expected_shoe_order[1], expected_shoe_order[3],
+    ]
+    first_shoe_round.stand(0)
+    first_shoe_round.settle()
+    countable_shoe.finish_round(first_shoe_round)
+    cards_after_first_round = countable_shoe.cards_remaining
+    next_counted_card = countable_shoe.deck[0]
+    assert len(countable_shoe.deck) + len(countable_shoe.discard) == 52
+    assert countable_shoe.cards_seen == 52 - cards_after_first_round
+    assert not countable_shoe.prepare_round()
+    countable_shoe.start_round()
+    second_shoe_round = tavern_games.BlackjackRound(10, shoe=countable_shoe)
+    assert second_shoe_round.player_hands[0]["cards"][0] == next_counted_card
+    second_shoe_round.stand(0)
+    second_shoe_round.settle()
+    countable_shoe.finish_round(second_shoe_round)
+    assert countable_shoe.shuffle_count == 1
+    cut_order = tavern_games.make_blackjack_deck(random.Random(118))
+    countable_shoe.deck[:] = cut_order[:tavern_games.BLACKJACK_CUT_CARD_REMAINING]
+    countable_shoe.discard[:] = cut_order[tavern_games.BLACKJACK_CUT_CARD_REMAINING:]
+    assert countable_shoe.needs_shuffle
+    assert countable_shoe.prepare_round()
+    assert countable_shoe.cards_remaining == 52
+    assert countable_shoe.cards_seen == 0
+    assert not countable_shoe.discard
+    assert countable_shoe.shuffle_count == 2
+
+    natural_round = tavern_games.BlackjackRound(10, deck=[
+        ("A", "S"), ("9", "H"), ("K", "D"), ("7", "C"), ("2", "S"),
+    ])
+    natural_results = natural_round.settle()
+    assert natural_results[0]["outcome"] == "blackjack"
+    assert natural_results[0]["payout"] == 25
+    assert natural_results[0]["profit"] == 15
+    assert len(natural_round.dealer_cards) == 2
+
+    dealer_natural_round = tavern_games.BlackjackRound(10, deck=[
+        ("10", "S"), ("A", "H"), ("9", "D"), ("K", "C"),
+    ])
+    dealer_natural_results = dealer_natural_round.settle()
+    assert dealer_natural_results[0]["outcome"] == "loss"
+
+    soft_seventeen_round = tavern_games.BlackjackRound(10, deck=[
+        ("10", "S"), ("A", "H"), ("7", "D"), ("6", "C"), ("K", "S"),
+    ])
+    soft_seventeen_round.stand(0)
+    soft_seventeen_results = soft_seventeen_round.settle()
+    assert soft_seventeen_results[0]["outcome"] == "push"
+    assert len(soft_seventeen_round.dealer_cards) == 2
+
+    double_round = tavern_games.BlackjackRound(10, deck=[
+        ("5", "S"), ("9", "H"), ("6", "D"), ("7", "C"),
+        ("10", "H"), ("2", "D"),
+    ])
+    assert double_round.can_double(0)
+    double_round.double(0)
+    double_results = double_round.settle()
+    assert double_results[0]["outcome"] == "win"
+    assert double_results[0]["wager"] == 20
+    assert double_results[0]["profit"] == 20
+
+    split_round = tavern_games.BlackjackRound(10, deck=[
+        ("8", "S"), ("9", "H"), ("8", "D"), ("7", "C"),
+        ("3", "H"), ("K", "D"), ("4", "S"),
+    ])
+    assert split_round.can_split(0)
+    split_round.split(0)
+    assert len(split_round.player_hands) == 2
+    assert all(int(hand["wager"]) == 10 for hand in split_round.player_hands)
+    split_round.stand(0)
+    split_round.stand(1)
+    assert len(split_round.settle()) == 2
+
+    blackjack_game = FarmGame()
+    blackjack_game.save = lambda *args, **kwargs: True
+    blackjack_game.state.money = 100
+    played_natural = tavern_games.BlackjackRound(10, deck=[
+        ("A", "S"), ("9", "H"), ("K", "D"), ("7", "C"), ("2", "S"),
+    ])
+    assert blackjack_game.play_blackjack_round(
+        10, "Smoke Test Inn", round_state=played_natural, show_result=False,
+    )[0]["outcome"] == "blackjack"
+    assert blackjack_game.state.money == 115
+    assert blackjack_game.state.tavern_blackjack_stats["rounds_played"] == 1
+    assert blackjack_game.state.tavern_blackjack_stats["naturals"] == 1
+    assert blackjack_game.state.tavern_blackjack_stats["net_winnings"] == 15
+    assert any("Blackjack:" in line for line in blackjack_game.journal_overview_lines())
+    prepared_blackjack_state = prepare_loaded_state_data({
+        "tavern_blackjack_stats": blackjack_game.state.tavern_blackjack_stats,
+    })
+    reloaded_blackjack_state = GameState(**prepared_blackjack_state)
+    assert reloaded_blackjack_state.tavern_blackjack_stats["naturals"] == 1
+    assert reloaded_blackjack_state.tavern_blackjack_stats["net_winnings"] == 15
+
+    # Grid board games use explicit white/dark-grey backgrounds instead of
+    # relying on invisible terminal spaces.
+    assert board_visuals.board_tile_is_light(0, 0)
+    assert not board_visuals.board_tile_is_light(1, 0)
+    assert board_visuals.board_tile_background(0, 0) == board_visuals.BOARD_LIGHT_BG
+    assert board_visuals.board_tile_background(1, 0) == board_visuals.BOARD_DARK_BG
+    assert board_visuals.BOARD_LIGHT_BG != board_visuals.BOARD_DARK_BG
+    assert ui.visible_text_len(board_visuals.board_tile("[ ]", 0, 0, "cursor")) == 3
+    assert ui.visible_text_len(board_visuals.board_tile("(.)", 1, 0, "destination")) == 3
+    minigame_controls_output = io.StringIO()
+    with contextlib.redirect_stdout(minigame_controls_output):
+        minigame_ui.minigame_controls(
+            "WASD/arrows/numpad: move",
+            "1-7: jump to option",
+            "Z/Enter/Space: confirm",
+            "R: suggested action",
+            "H: rules",
+            "X/Esc/Q: pause",
+        )
+    minigame_control_lines = minigame_controls_output.getvalue().splitlines()
+    assert minigame_control_lines
+    assert all(ui.visible_text_len(line) <= minigame_ui.MINIGAME_WIDTH for line in minigame_control_lines)
+    assert "CONTROLS" in ui.strip_ansi(minigame_control_lines[0])
+    assert ui.visible_text_len(minigame_ui.minigame_meter("Progress", 3, 7, width=14)) > 20
+
+    # American checkers enforces captures, chained jumps, kings, and resumable state.
+    starting_checkers_board = checkers.new_checkers_board()
+    assert sum(piece in {"r", "R"} for row in starting_checkers_board for piece in row) == 12
+    assert sum(piece in {"b", "B"} for row in starting_checkers_board for piece in row) == 12
+    assert len(checkers.checkers_legal_moves(starting_checkers_board, "player")) == 7
+
+    capture_board = [[checkers.CHECKERS_EMPTY for _x in range(8)] for _y in range(8)]
+    capture_board[5][2] = "r"
+    capture_board[4][3] = "b"
+    capture_board[5][6] = "r"
+    mandatory_moves = checkers.checkers_legal_moves(capture_board, "player")
+    assert len(mandatory_moves) == 1
+    assert mandatory_moves[0]["from"] == (2, 5)
+    assert mandatory_moves[0]["to"] == (4, 3)
+    assert mandatory_moves[0]["capture"] == (3, 4)
+
+    chain_board = [[checkers.CHECKERS_EMPTY for _x in range(8)] for _y in range(8)]
+    chain_board[6][1] = "r"
+    chain_board[5][2] = "b"
+    chain_board[3][4] = "b"
+    first_jump = checkers.checkers_legal_moves(chain_board, "player")[0]
+    first_jump_result = checkers.apply_checkers_move(chain_board, first_jump)
+    assert first_jump_result["captured"]
+    continuation = checkers.checkers_legal_moves(chain_board, "player", only_from=(3, 4))
+    assert len(continuation) == 1
+    assert continuation[0]["to"] == (5, 2)
+
+    promotion_board = [[checkers.CHECKERS_EMPTY for _x in range(8)] for _y in range(8)]
+    promotion_board[1][2] = "r"
+    promotion_move = next(
+        move for move in checkers.checkers_legal_moves(promotion_board, "player")
+        if move["to"] == (1, 0)
+    )
+    assert checkers.apply_checkers_move(promotion_board, promotion_move)["promoted"]
+    assert promotion_board[0][1] == "R"
+    assert any(
+        move["to"][1] == 1
+        for move in checkers.checkers_piece_moves(promotion_board, 1, 0)
+    )
+
+    ai_board = [[checkers.CHECKERS_EMPTY for _x in range(8)] for _y in range(8)]
+    ai_board[2][3] = "b"
+    ai_board[3][4] = "r"
+    ai_moves = checkers.checkers_legal_moves(ai_board, "ai")
+    assert ai_moves and all(move["capture"] for move in ai_moves)
+    chosen_ai_move = checkers.choose_checkers_ai_move(
+        ai_board, ai_moves, "Expert", random.Random(44),
+    )
+    assert chosen_ai_move["capture"] == (4, 3)
+
+    checkers_game = FarmGame()
+    checkers_game.save = lambda *args, **kwargs: True
+    active_checkers_match = checkers_game.new_checkers_match("Practiced", "Smoke Test Inn")
+    assert checkers_game.valid_checkers_match(active_checkers_match)
+    opening_move = checkers.checkers_legal_moves(active_checkers_match["board"], "player")[0]
+    checkers_game._checkers_complete_turn(active_checkers_match, "player", opening_move)
+    assert active_checkers_match["turn"] == "ai"
+    checkers_game._checkers_ai_turn(active_checkers_match)
+    assert active_checkers_match["turn"] == "player"
+    assert active_checkers_match["move_count"] >= 2
+    checkers_game.pause_checkers_match()
+    assert checkers_game.state.tavern_checkers_match
+    prepared_checkers_state = prepare_loaded_state_data({
+        "tavern_checkers_stats": checkers_game.state.tavern_checkers_stats,
+        "tavern_checkers_match": checkers_game.state.tavern_checkers_match,
+    })
+    reloaded_checkers_state = GameState(**prepared_checkers_state)
+    assert reloaded_checkers_state.tavern_checkers_match["difficulty"] == "Practiced"
+    reloaded_checkers_game = FarmGame()
+    reloaded_checkers_game.state = reloaded_checkers_state
+    reloaded_checkers_game.ensure_checkers_state()
+    assert reloaded_checkers_game.valid_checkers_match(
+        reloaded_checkers_game.state.tavern_checkers_match,
+    )
+    reloaded_checkers_game.save = lambda *args, **kwargs: True
+    reloaded_checkers_game.finish_checkers_match("loss", resigned=True)
+    assert reloaded_checkers_game.state.tavern_checkers_stats["games_played"] == 1
+    assert reloaded_checkers_game.state.tavern_checkers_stats["losses"] == 1
+    assert not reloaded_checkers_game.state.tavern_checkers_match
+    assert any("CHECKERS RECORD" in line for line in reloaded_checkers_game.tavern_game_record_lines())
+
+    # Chess covers legal movement, special moves, endings, AI, and resumable state.
+    starting_chess_board = chess.new_chess_board()
+    assert sum(piece.isupper() for row in starting_chess_board for piece in row if piece != ".") == 16
+    assert sum(piece.islower() for row in starting_chess_board for piece in row if piece != ".") == 16
+    chess_game = FarmGame()
+    chess_game.save = lambda *args, **kwargs: True
+    active_chess_match = chess_game.new_chess_match("Practiced", "Smoke Test Inn")
+    assert chess_game.valid_chess_match(active_chess_match)
+    assert len(chess.chess_legal_moves(active_chess_match, "player")) == 20
+    e4_move = next(
+        move for move in chess.chess_legal_moves(active_chess_match, "player")
+        if move["from"] == (4, 6) and move["to"] == (4, 4)
+    )
+    chess.apply_chess_move(active_chess_match, e4_move)
+    assert active_chess_match["board"][4][4] == "P"
+    assert active_chess_match["en_passant"] == [4, 5]
+    assert active_chess_match["turn"] == "ai"
+    chosen_chess_move = chess.choose_chess_ai_move(
+        active_chess_match, "Expert", random.Random(45),
+    )
+    assert chosen_chess_move in chess.chess_legal_moves(active_chess_match, "ai")
+
+    en_passant_board = [[chess.CHESS_EMPTY for _x in range(8)] for _y in range(8)]
+    en_passant_board[7][4] = "K"
+    en_passant_board[0][4] = "k"
+    en_passant_board[3][4] = "P"
+    en_passant_board[1][3] = "p"
+    en_passant_match = chess_game.new_chess_match("Friendly", "Rules Table")
+    en_passant_match.update({
+        "board": en_passant_board, "turn": "ai", "castling": "",
+        "en_passant": None, "halfmove_clock": 0, "position_counts": {},
+    })
+    d5_move = next(
+        move for move in chess.chess_legal_moves(en_passant_match, "ai")
+        if move["from"] == (3, 1) and move["to"] == (3, 3)
+    )
+    chess.apply_chess_move(en_passant_match, d5_move)
+    en_passant_move = next(
+        move for move in chess.chess_legal_moves(en_passant_match, "player")
+        if move["from"] == (4, 3) and move["to"] == (3, 2)
+    )
+    assert en_passant_move.get("en_passant")
+    chess.apply_chess_move(en_passant_match, en_passant_move)
+    assert en_passant_match["board"][2][3] == "P"
+    assert en_passant_match["board"][3][3] == chess.CHESS_EMPTY
+
+    castle_board = [[chess.CHESS_EMPTY for _x in range(8)] for _y in range(8)]
+    castle_board[7][4], castle_board[7][7], castle_board[0][4] = "K", "R", "k"
+    castle_match = chess_game.new_chess_match("Friendly", "Rules Table")
+    castle_match.update({
+        "board": castle_board, "turn": "player", "castling": "K",
+        "en_passant": None, "halfmove_clock": 0, "position_counts": {},
+    })
+    castle_move = next(
+        move for move in chess.chess_legal_moves(castle_match, "player", (4, 7))
+        if move.get("castle") == "king"
+    )
+    castled = chess.clone_chess_match(castle_match)
+    chess.apply_chess_move(castled, castle_move)
+    assert castled["board"][7][6] == "K" and castled["board"][7][5] == "R"
+    castle_match["board"][0][5] = "r"
+    assert not any(
+        move.get("castle")
+        for move in chess.chess_legal_moves(castle_match, "player", (4, 7))
+    )
+
+    pin_board = [[chess.CHESS_EMPTY for _x in range(8)] for _y in range(8)]
+    pin_board[7][4], pin_board[6][4], pin_board[0][4], pin_board[0][0] = "K", "R", "r", "k"
+    pin_match = chess_game.new_chess_match("Friendly", "Rules Table")
+    pin_match.update({
+        "board": pin_board, "turn": "player", "castling": "",
+        "en_passant": None, "halfmove_clock": 0, "position_counts": {},
+    })
+    assert not any(
+        move["to"][0] != 4
+        for move in chess.chess_legal_moves(pin_match, "player", (4, 6))
+    )
+
+    promotion_board = [[chess.CHESS_EMPTY for _x in range(8)] for _y in range(8)]
+    promotion_board[7][4], promotion_board[0][7], promotion_board[1][0] = "K", "k", "P"
+    promotion_match = chess_game.new_chess_match("Friendly", "Rules Table")
+    promotion_match.update({
+        "board": promotion_board, "turn": "player", "castling": "",
+        "en_passant": None, "halfmove_clock": 0, "position_counts": {},
+    })
+    promotion_moves = [
+        move for move in chess.chess_legal_moves(promotion_match, "player", (0, 1))
+        if move["to"] == (0, 0)
+    ]
+    assert {move.get("promotion") for move in promotion_moves} == {"Q", "R", "B", "N"}
+    queen_promotion = next(move for move in promotion_moves if move.get("promotion") == "Q")
+    chess.apply_chess_move(promotion_match, queen_promotion)
+    assert promotion_match["board"][0][0] == "Q"
+
+    mate_match = chess_game.new_chess_match("Friendly", "Rules Table")
+    for source, target in (
+        ((5, 6), (5, 5)), ((4, 1), (4, 3)),
+        ((6, 6), (6, 4)), ((3, 0), (7, 4)),
+    ):
+        side = str(mate_match["turn"])
+        move = next(
+            candidate for candidate in chess.chess_legal_moves(mate_match, side)
+            if candidate["from"] == source and candidate["to"] == target
+        )
+        chess.apply_chess_move(mate_match, move)
+    assert chess.chess_match_outcome(mate_match) == "loss_checkmate"
+
+    stalemate_board = [[chess.CHESS_EMPTY for _x in range(8)] for _y in range(8)]
+    stalemate_board[0][0], stalemate_board[2][2], stalemate_board[2][1] = "k", "K", "Q"
+    stalemate_match = chess_game.new_chess_match("Friendly", "Rules Table")
+    stalemate_match.update({
+        "board": stalemate_board, "turn": "ai", "castling": "",
+        "en_passant": None, "halfmove_clock": 0, "position_counts": {},
+    })
+    assert chess.chess_match_outcome(stalemate_match) == "draw_stalemate"
+    material_match = chess.clone_chess_match(stalemate_match)
+    material_match["board"][2][1] = chess.CHESS_EMPTY
+    material_match["turn"] = "player"
+    assert chess.chess_match_outcome(material_match) == "draw_material"
+    repetition_match = chess_game.new_chess_match("Friendly", "Rules Table")
+    repetition_match["position_counts"][chess.chess_position_key(repetition_match)] = 3
+    assert chess.chess_match_outcome(repetition_match) == "draw_repetition"
+
+    persistent_chess_match = chess_game.new_chess_match("Practiced", "Smoke Test Inn")
+    chess_game._apply_live_chess_move(
+        persistent_chess_match,
+        next(
+            move for move in chess.chess_legal_moves(persistent_chess_match, "player")
+            if move["from"] == (4, 6) and move["to"] == (4, 4)
+        ),
+    )
+    chess_game._chess_ai_turn(persistent_chess_match)
+    assert persistent_chess_match["turn"] == "player"
+    assert len(persistent_chess_match["move_history"]) == 2
+    chess_game.pause_chess_match()
+    prepared_chess_state = prepare_loaded_state_data({
+        "tavern_chess_stats": chess_game.state.tavern_chess_stats,
+        "tavern_chess_match": chess_game.state.tavern_chess_match,
+    })
+    reloaded_chess_state = GameState(**prepared_chess_state)
+    reloaded_chess_game = FarmGame()
+    reloaded_chess_game.state = reloaded_chess_state
+    reloaded_chess_game.ensure_chess_state()
+    assert reloaded_chess_game.valid_chess_match(
+        reloaded_chess_game.state.tavern_chess_match,
+    )
+    reloaded_chess_game.save = lambda *args, **kwargs: True
+    reloaded_chess_game.finish_chess_match("loss", resigned=True)
+    assert reloaded_chess_game.state.tavern_chess_stats["games_played"] == 1
+    assert reloaded_chess_game.state.tavern_chess_stats["losses"] == 1
+    assert not reloaded_chess_game.state.tavern_chess_match
+    assert any("CHESS RECORD" in line for line in reloaded_chess_game.tavern_game_record_lines())
+
+    # Kalah-style mancala covers sowing, stores, captures, extra turns, AI, and wagers.
+    starting_mancala_board = mancala.new_mancala_board()
+    assert len(starting_mancala_board) == 14
+    assert sum(starting_mancala_board) == 48
+    assert mancala.mancala_legal_pits(starting_mancala_board, "player") == list(range(6))
+    assert mancala.mancala_legal_pits(starting_mancala_board, "ai") == list(range(7, 13))
+    assert mancala.mancala_sow_path(starting_mancala_board, "player", 2) == [3, 4, 5, 6]
+    extra_turn_board = list(starting_mancala_board)
+    extra_turn_result = mancala.apply_mancala_move(extra_turn_board, "player", 2)
+    assert extra_turn_result["extra_turn"]
+    assert extra_turn_board[6] == 1
+    assert sum(extra_turn_board) == 48
+
+    skip_store_board = [0] * 14
+    skip_store_board[5] = 8
+    skip_store_board[7] = 1
+    skip_path = mancala.mancala_sow_path(skip_store_board, "player", 5)
+    assert skip_path == [6, 7, 8, 9, 10, 11, 12, 0]
+    assert 13 not in skip_path
+
+    capture_mancala_board = [0] * 14
+    capture_mancala_board[0] = 1
+    capture_mancala_board[11] = 5
+    capture_result = mancala.apply_mancala_move(capture_mancala_board, "player", 0)
+    assert capture_result["captured"] == 6
+    assert capture_mancala_board[6] == 6
+    assert capture_mancala_board[1] == capture_mancala_board[11] == 0
+
+    sweep_board = [0] * 14
+    sweep_board[5] = 1
+    sweep_board[7] = 2
+    sweep_result = mancala.apply_mancala_move(sweep_board, "player", 5)
+    assert sweep_result["game_over"]
+    assert sweep_board[6] == 1 and sweep_board[13] == 2
+    assert mancala.mancala_board_outcome(sweep_board) == "loss"
+
+    for difficulty in ("Friendly", "Practiced", "Expert"):
+        ai_pit = mancala.choose_mancala_ai_pit(
+            starting_mancala_board, difficulty, random.Random(46),
+        )
+        assert ai_pit in mancala.mancala_legal_pits(starting_mancala_board, "ai")
+    assert mancala.mancala_profit_for_win(100, "Friendly") == 100
+    assert mancala.mancala_profit_for_win(100, "Practiced") == 150
+    assert mancala.mancala_profit_for_win(100, "Expert") == 200
+
+    mancala_game = FarmGame()
+    mancala_game.save = lambda *args, **kwargs: True
+    mancala_game.state.money = 1000
+    active_mancala_match = mancala_game.new_mancala_match(
+        "Practiced", "Smoke Test Inn", 100,
+    )
+    assert mancala_game.valid_mancala_match(active_mancala_match)
+    assert mancala_game.state.money == 900
+    mancala_game._mancala_complete_move(active_mancala_match, "player", 2)
+    assert active_mancala_match["turn"] == "player"
+    assert active_mancala_match["player_extra_turns"] == 1
+    active_mancala_match["board"] = [0] * 14
+    active_mancala_match["board"][6] = 30
+    active_mancala_match["board"][13] = 18
+    mancala_game.finish_mancala_match("win")
+    assert mancala_game.state.money == 1150
+    assert mancala_game.state.tavern_mancala_stats["games_played"] == 1
+    assert mancala_game.state.tavern_mancala_stats["wins"] == 1
+    assert mancala_game.state.tavern_mancala_stats["net_winnings"] == 150
+
+    persisted_mancala_match = mancala_game.new_mancala_match(
+        "Expert", "Smoke Test Inn", 50,
+    )
+    assert mancala_game.state.money == 1100
+    mancala_game._mancala_complete_move(persisted_mancala_match, "player", 0)
+    mancala_game.pause_mancala_match()
+    prepared_mancala_state = prepare_loaded_state_data({
+        "money": mancala_game.state.money,
+        "tavern_mancala_stats": mancala_game.state.tavern_mancala_stats,
+        "tavern_mancala_match": mancala_game.state.tavern_mancala_match,
+    })
+    reloaded_mancala_state = GameState(**prepared_mancala_state)
+    reloaded_mancala_game = FarmGame()
+    reloaded_mancala_game.state = reloaded_mancala_state
+    reloaded_mancala_game.ensure_mancala_state()
+    assert reloaded_mancala_game.valid_mancala_match(
+        reloaded_mancala_game.state.tavern_mancala_match,
+    )
+    assert reloaded_mancala_game.state.tavern_mancala_match["wager"] == 50
+    reloaded_mancala_game.save = lambda *args, **kwargs: True
+    reloaded_mancala_game.finish_mancala_match("loss", resigned=True)
+    assert reloaded_mancala_game.state.money == 1100
+    assert reloaded_mancala_game.state.tavern_mancala_stats["games_played"] == 2
+    assert reloaded_mancala_game.state.tavern_mancala_stats["losses"] == 1
+    assert reloaded_mancala_game.state.tavern_mancala_stats["net_winnings"] == 100
+    assert not reloaded_mancala_game.state.tavern_mancala_match
+    assert any("MANCALA RECORD" in line for line in reloaded_mancala_game.tavern_game_record_lines())
+
+    # Hold'em evaluates all standard hands and returns uncommitted table stakes.
+    assert holdem.poker_five_card_rank([
+        ("A", "S"), ("K", "S"), ("Q", "S"), ("J", "S"), ("10", "S"),
+    ]) == (8, 14)
+    assert holdem.poker_five_card_rank([
+        ("A", "S"), ("2", "D"), ("3", "C"), ("4", "H"), ("5", "S"),
+    ]) == (4, 5)
+    full_house = holdem.poker_best_rank([
+        ("K", "S"), ("K", "D"), ("K", "C"), ("4", "H"), ("4", "S"), ("2", "C"), ("A", "D"),
+    ])
+    assert full_house[:3] == (6, 13, 4)
+    holdem_game = FarmGame()
+    holdem_game.save = lambda *args, **kwargs: True
+    holdem_game.state.money = 1000
+    holdem_game._holdem_player_bet = lambda table, _difficulty: table.player_call()
+    holdem_result = holdem_game.play_holdem_hand(100, "Practiced", "Smoke Test Inn", show_result=False)
+    assert holdem_result is not None
+    assert holdem_game.state.tavern_holdem_stats["hands_played"] == 1
+    assert holdem_game.state.money == 1000 + int(holdem_result["profit"])
+    assert int(holdem_result["payout"]) >= 0
+
+    # Hearts enforces passing, opening lead, suit following, points, and moon scoring.
+    hearts_match = {"scores": [0, 0, 0, 0], "round_index": 0}
+    hearts.deal_hearts_round(hearts_match, random.Random(47))
+    assert all(len(hand) == 13 for hand in hearts_match["hands"])
+    player_pass = list(hearts_match["hands"][0][:3])
+    hearts.apply_hearts_passes(hearts_match, player_pass)
+    assert hearts_match["phase"] == "play"
+    assert all(len(hand) == 13 for hand in hearts_match["hands"])
+    holder = next(seat for seat, hand in enumerate(hearts_match["hands"]) if "2C" in hand)
+    assert hearts_match["turn"] == holder
+    opening_result = hearts.play_hearts_card(hearts_match, holder, "2C")
+    assert not opening_result["trick_complete"]
+    assert hearts.hearts_trick_points([
+        {"seat": 0, "card": "2H"}, {"seat": 1, "card": "QS"},
+    ]) == 14
+    assert hearts.hearts_round_scores([26, 0, 0, 0]) == [0, 26, 26, 26]
+    simulated_hearts_round = {"scores": [0, 0, 0, 0], "round_index": 0}
+    hearts.deal_hearts_round(simulated_hearts_round, random.Random(71))
+    hearts.apply_hearts_passes(
+        simulated_hearts_round,
+        hearts.choose_hearts_pass(simulated_hearts_round["hands"][0]),
+    )
+    hearts_ai_rng = random.Random(72)
+    final_hearts_play = {}
+    for _play_index in range(52):
+        acting_seat = int(simulated_hearts_round["turn"])
+        chosen_card = hearts.choose_hearts_ai_card(
+            simulated_hearts_round["hands"][acting_seat],
+            simulated_hearts_round["trick"],
+            bool(simulated_hearts_round["hearts_broken"]),
+            int(simulated_hearts_round["trick_number"]) == 0,
+            hearts_ai_rng,
+        )
+        final_hearts_play = hearts.play_hearts_card(
+            simulated_hearts_round, acting_seat, chosen_card,
+        )
+    assert final_hearts_play["round_complete"]
+    assert sum(simulated_hearts_round["round_points"]) == 26
+    assert not any(simulated_hearts_round["hands"])
+    hearts_game = FarmGame()
+    hearts_game.save = lambda *args, **kwargs: True
+    saved_hearts_match = hearts_game.new_hearts_match("Smoke Test Inn")
+    assert hearts_game.valid_hearts_match(saved_hearts_match)
+    hearts_game.pause_hearts_match()
+    prepared_hearts_state = prepare_loaded_state_data({
+        "tavern_hearts_stats": hearts_game.state.tavern_hearts_stats,
+        "tavern_hearts_match": hearts_game.state.tavern_hearts_match,
+    })
+    reloaded_hearts_game = FarmGame()
+    reloaded_hearts_game.state = GameState(**prepared_hearts_state)
+    reloaded_hearts_game.ensure_hearts_state()
+    assert reloaded_hearts_game.valid_hearts_match(reloaded_hearts_game.state.tavern_hearts_match)
+
+    # Draw-one Klondike preserves all cards and supports stock, tableau, and foundations.
+    solitaire_match = solitaire.new_solitaire_match(random.Random(48), "Smoke Test Inn")
+    assert sum(len(pile) for pile in solitaire_match["tableau"]) == 28
+    assert len(solitaire_match["stock"]) == 24
+    assert solitaire.SolitaireMixin.valid_solitaire_match(solitaire_match)
+    assert solitaire.solitaire_can_tableau("QH", "KS")
+    assert not solitaire.solitaire_can_tableau("QS", "KS")
+    assert solitaire.solitaire_can_foundation("AS", [])
+    move_fixture = {
+        "stock": [], "waste": ["AS"], "foundations": {suit: [] for suit in solitaire.SOLITAIRE_SUITS},
+        "tableau": [[] for _ in range(7)], "moves": 0, "foundation_moves": 0,
+    }
+    assert solitaire.solitaire_move_waste_to_foundation(move_fixture, "S")
+    assert move_fixture["foundations"]["S"] == ["AS"]
+    solitaire_game = FarmGame()
+    solitaire_game.save = lambda *args, **kwargs: True
+    saved_solitaire = solitaire_game.new_solitaire_game("Smoke Test Inn")
+    assert solitaire_game.valid_solitaire_match(saved_solitaire)
+    solitaire.solitaire_draw_stock(saved_solitaire)
+    solitaire_game.pause_solitaire_game()
+    prepared_solitaire_state = prepare_loaded_state_data({
+        "tavern_solitaire_stats": solitaire_game.state.tavern_solitaire_stats,
+        "tavern_solitaire_match": solitaire_game.state.tavern_solitaire_match,
+    })
+    reloaded_solitaire_game = FarmGame()
+    reloaded_solitaire_game.state = GameState(**prepared_solitaire_state)
+    reloaded_solitaire_game.ensure_solitaire_state()
+    assert reloaded_solitaire_game.valid_solitaire_match(
+        reloaded_solitaire_game.state.tavern_solitaire_match,
+    )
+
+    # The Royal Game of Ur handles exact entry/exit, captures, safe rosettes, AI, and wagers.
+    ur_match = {
+        "positions": {"player": [royal_ur.UR_HOME] * 7, "ai": [royal_ur.UR_HOME] * 7},
+    }
+    assert royal_ur.ur_legal_pieces(ur_match, "player", 4) == list(range(7))
+    rosette_move = royal_ur.apply_ur_move(ur_match, "player", 0, 4)
+    assert rosette_move["extra_turn"] and ur_match["positions"]["player"][0] == 3
+    ur_match["positions"]["player"][0] = 3
+    ur_match["positions"]["ai"][0] = 4
+    capture_move = royal_ur.apply_ur_move(ur_match, "player", 0, 1)
+    assert capture_move["captured_piece"] == 0
+    assert ur_match["positions"]["ai"][0] == royal_ur.UR_HOME
+    safe_match = {
+        "positions": {
+            "player": [3] + [royal_ur.UR_HOME] * 6,
+            "ai": [7] + [royal_ur.UR_HOME] * 6,
+        },
+    }
+    assert 0 not in royal_ur.ur_legal_pieces(safe_match, "player", 4)
+    assert royal_ur.ur_board_coordinate("player", 0) == (3, 2)
+    assert royal_ur.ur_board_coordinate("ai", 0) == (3, 0)
+    assert royal_ur.ur_board_coordinate("player", 4) == (0, 1)
+    assert royal_ur.ur_board_coordinate("player", 13) == (6, 2)
+    ur_capture_display = {
+        "positions": {
+            "player": [4] + [royal_ur.UR_HOME] * 6,
+            "ai": [6] + [royal_ur.UR_HOME] * 6,
+        },
+        "roll": 2,
+    }
+    ur_board_lines = [
+        ui.strip_ansi(line)
+        for line in royal_ur.render_ur_board_lines(ur_capture_display, [0], 0)
+    ]
+    assert len(ur_board_lines) == 7
+    assert all(ui.visible_text_len(line) == 33 for line in ur_board_lines)
+    assert ur_board_lines[0] == "┌───┬───┬───┬───┐       ┌───┬───┐"
+    assert ur_board_lines[-1] == "└───┴───┴───┴───┘       └───┴───┘"
+    assert "@" in "".join(ur_board_lines)
+    assert "×" in "".join(ur_board_lines)
+    assert "".join(ur_board_lines).count("✦") == 5
+    assert royal_ur.choose_ur_ai_piece(
+        {"positions": {"player": [royal_ur.UR_HOME] * 7, "ai": [royal_ur.UR_HOME] * 7}},
+        "Expert", 4, random.Random(49),
+    ) in range(7)
+    simulated_ur = {
+        "positions": {
+            "player": [royal_ur.UR_HOME] * 7,
+            "ai": [royal_ur.UR_HOME] * 7,
+        },
+    }
+    ur_rng = random.Random(50)
+    ur_turn = "player"
+    ur_winner = ""
+    for _ur_turn_index in range(2000):
+        ur_roll = royal_ur.ur_roll_total(royal_ur.roll_ur_dice(ur_rng))
+        legal_ur_pieces = royal_ur.ur_legal_pieces(simulated_ur, ur_turn, ur_roll)
+        if not legal_ur_pieces:
+            ur_turn = royal_ur.ur_opponent(ur_turn)
+            continue
+        if ur_turn == "ai":
+            ur_piece = royal_ur.choose_ur_ai_piece(
+                simulated_ur, "Expert", ur_roll, ur_rng,
+            )
+        else:
+            ur_piece = max(
+                legal_ur_pieces,
+                key=lambda piece: royal_ur.ur_move_score(
+                    simulated_ur, "player", piece, ur_roll,
+                ),
+            )
+        simulated_ur_result = royal_ur.apply_ur_move(
+            simulated_ur, ur_turn, ur_piece, ur_roll,
+        )
+        if simulated_ur_result["won"]:
+            ur_winner = ur_turn
+            break
+        if not simulated_ur_result["extra_turn"]:
+            ur_turn = royal_ur.ur_opponent(ur_turn)
+    assert ur_winner in {"player", "ai"}
+    ur_game = FarmGame()
+    ur_game.save = lambda *args, **kwargs: True
+    ur_game.state.money = 1000
+    winning_ur_match = ur_game.new_ur_match("Expert", "Smoke Test Inn", 100)
+    winning_ur_match["positions"]["player"] = [royal_ur.UR_FINISHED] * 6 + [13]
+    winning_ur_match["roll"] = 1
+    winning_ur_match["dice"] = [1, 0, 0, 0]
+    win_move = ur_game._complete_ur_move(winning_ur_match, "player", 6)
+    assert win_move["won"]
+    ur_game.finish_ur_match("win")
+    assert ur_game.state.money == 1200
+    assert ur_game.state.tavern_ur_stats["wins"] == 1
+    assert ur_game.state.tavern_ur_stats["net_winnings"] == 200
+    assert any("TEXAS HOLD'EM RECORD" in line for line in ur_game.tavern_game_record_lines())
+    assert any("HEARTS RECORD" in line for line in ur_game.tavern_game_record_lines())
+    assert any("SOLITAIRE RECORD" in line for line in ur_game.tavern_game_record_lines())
+    assert any("ROYAL GAME OF UR RECORD" in line for line in ur_game.tavern_game_record_lines())
+
     original_game_save = game.save
     game.save = lambda *args, **kwargs: True
     museum_catalog = game.museum_donation_catalog()
     assert "agriculture:Turnip" in museum_catalog
     assert "fishing:Pond Minnow" in museum_catalog
     assert "geology:Crystal Shard" in museum_catalog
+    assert "archaeology:Painted Pottery Sherd" in museum_catalog
+    assert "paleontology:Trackway Slab" in museum_catalog
     assert "engineering:Sprinkler" in museum_catalog
     assert "bestiary:Wisp:Crystal Shard" in museum_catalog
     assert game.museum_total_possible() >= len(data.CROP_DATA) + len(data.FISH_DATA)
@@ -6302,6 +7637,83 @@ def main() -> int:
     assert any("Museum specimen: Crystal Shard (donated)" in line for line in wisp_bestiary)
     assert any("Weaknesses and Prep:" in line for line in wisp_bestiary)
     assert any("Likely Floors:" in line for line in wisp_bestiary)
+
+    # Archaeology and paleontology share a persistent, deterministic field
+    # framework while retaining different layer depth and tool risks.
+    archaeology_site = game.excavation_site("archaeology", 10, 8, "smoke_ruin")
+    matching_archaeology_site = game._new_excavation_site(
+        archaeology_site["id"], "archaeology", archaeology_site["week"],
+    )
+    assert archaeology_site["cells"] == matching_archaeology_site["cells"]
+    archaeology_find_index = next(
+        index for index, cell in enumerate(archaeology_site["cells"]) if cell.get("find_id")
+    )
+    archaeology_x = archaeology_find_index % game.EXCAVATION_WIDTH
+    archaeology_y = archaeology_find_index // game.EXCAVATION_WIDTH
+    archaeology_cell = archaeology_site["cells"][archaeology_find_index]
+    archaeology_item = archaeology_cell["find_id"]
+    assert game.excavation_apply_action(
+        archaeology_site, archaeology_x, archaeology_y, "survey",
+    )["success"]
+    while archaeology_cell["layers"] > 0:
+        assert game.excavation_apply_action(
+            archaeology_site, archaeology_x, archaeology_y, "brush",
+        )["success"]
+    assert game.excavation_apply_action(
+        archaeology_site, archaeology_x, archaeology_y, "stabilize",
+    )["success"]
+    recovered = game.excavation_apply_action(
+        archaeology_site, archaeology_x, archaeology_y, "recover",
+    )
+    assert recovered["success"]
+    assert game.state.inventory.get(archaeology_item, 0) == 1
+    assert game.state.archaeology_finds == 1
+    assert game.state.excavation_exp > 0
+    assert game.state.excavation_discoveries[-1]["condition"] == 100
+    assert game.state.excavation_discoveries[-1]["context_score"] >= 1
+    assert excavation.EXCAVATION_FIND_DATA[archaeology_item]["value"] > 0
+    archaeology_record_id = game.museum_record_id("archaeology", archaeology_item)
+    assert any(
+        record.get("id") == archaeology_record_id
+        for record in game.museum_donation_candidates()
+    )
+    assert game.donate_museum_record(archaeology_record_id)
+    assert game.state.museum_donation_counts.get("archaeology") == 1
+
+    paleontology_site = game.excavation_site("paleontology", 12, 9, "smoke_fossil")
+    paleontology_find_index = next(
+        index for index, cell in enumerate(paleontology_site["cells"]) if cell.get("find_id")
+    )
+    paleontology_x = paleontology_find_index % game.EXCAVATION_WIDTH
+    paleontology_y = paleontology_find_index // game.EXCAVATION_WIDTH
+    paleontology_cell = paleontology_site["cells"][paleontology_find_index]
+    paleontology_cell["layers"] = 2
+    paleontology_cell["hardness"] = 2
+    condition_before_pick = paleontology_cell["condition"]
+    assert game.excavation_apply_action(
+        paleontology_site, paleontology_x, paleontology_y, "pick",
+    )["success"]
+    assert paleontology_cell["layers"] == 0
+    assert paleontology_cell["condition"] < condition_before_pick
+    assert game.excavation_apply_action(
+        paleontology_site, paleontology_x, paleontology_y, "recover",
+    )["success"]
+    assert game.state.paleontology_finds == 1
+    assert any("Field research:" in line for line in game.journal_overview_lines())
+    assert any("Recent finds:" in line for line in game.excavation_journal_lines())
+    prepared_excavation_state = prepare_loaded_state_data({
+        "excavation_sites": game.state.excavation_sites,
+        "excavation_discoveries": game.state.excavation_discoveries,
+        "excavation_exp": game.state.excavation_exp,
+        "archaeology_finds": game.state.archaeology_finds,
+        "paleontology_finds": game.state.paleontology_finds,
+    })
+    reloaded_excavation_state = GameState(**prepared_excavation_state)
+    assert reloaded_excavation_state.excavation_sites
+    assert len(reloaded_excavation_state.excavation_discoveries) == 2
+    assert reloaded_excavation_state.archaeology_finds == 1
+    assert reloaded_excavation_state.paleontology_finds == 1
+
     game.state.location = "MuseumInterior"
     assert game.location_label() == "Museum"
     assert game.active_map()[19][27] == "D"
@@ -6516,6 +7928,12 @@ def main() -> int:
         ("MarketRowInterior", "market_row_map", {"D", "&", "P", "v", "f", "r", "t", "m"}),
         ("MuseumInterior", "museum_interior_map", {"D", "d", "&", "P", "C", "F", "G", "M", "A", "E", "S"}),
     ]
+    authored_private_door_counts = {
+        "MayorHouseInterior": 1,
+        "InnInterior": 3,
+        "ClinicInterior": 1,
+        "TownHallInterior": 2,
+    }
     authored_layout_signatures = set()
     for location, map_attr, required_tiles in interior_audit_specs:
         game.state.location = location
@@ -6525,6 +7943,12 @@ def main() -> int:
         authored_layout_signatures.add(tuple("".join(row) for row in grid))
         assert grid[19][27] == "D", f"{location} missing exit"
         assert game.passable(27, 18), f"{location} entry lane is blocked"
+        assert not any(
+            tile == "|" for row in grid for tile in row
+        ), f"{location} public room connections should be open archways"
+        assert sum(row.count("_") for row in grid) == authored_private_door_counts.get(
+            location, 0
+        ), f"{location} should only retain purposeful private doors"
         full_width_spoke_rows = sum(
             1
             for lane_y in (8, 11, 14, 16)
@@ -6538,7 +7962,14 @@ def main() -> int:
         while queue:
             x, y = queue.popleft()
             for nx, ny in [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)]:
-                if (nx, ny) in seen or not game.in_active_bounds(nx, ny) or not game.passable(nx, ny):
+                if (
+                    (nx, ny) in seen
+                    or not game.in_active_bounds(nx, ny)
+                    or (
+                        not game.passable(nx, ny)
+                        and grid[ny][nx] != "_"
+                    )
+                ):
                     continue
                 seen.add((nx, ny))
                 queue.append((nx, ny))
@@ -6554,6 +7985,40 @@ def main() -> int:
             ), f"{location} tile {tile!r} is not reachable"
         assert "leave" in game.interaction_hint(27, 19)
     assert len(authored_layout_signatures) >= len(interior_audit_specs) - 1, "Authored town interiors are too visually repetitive"
+    game.state.location = "InnInterior"
+    inn_closed_door = next(
+        (x, y)
+        for y, row in enumerate(game.inn_interior_map)
+        for x, tile in enumerate(row)
+        if tile == "_"
+    )
+    assert game.use_town_room_door_action(*inn_closed_door)
+    assert game.inn_interior_map[inn_closed_door[1]][inn_closed_door[0]] == "|"
+    assert game.use_town_room_door_action(*inn_closed_door)
+    assert game.inn_interior_map[inn_closed_door[1]][inn_closed_door[0]] == "_"
+    door_route_game = FarmGame()
+    door_route_game.state.town_npcs = []
+    door_test_npc = {
+        "id": "authored_door_test",
+        "interior_x": 14,
+        "interior_y": 8,
+        "steps_today": 0,
+    }
+    assert door_route_game.inn_interior_map[8][13] == "_"
+    door_route_game.town_npc_move_interior_toward(
+        door_test_npc,
+        "InnInterior",
+        (12, 8),
+    )
+    assert (door_test_npc["interior_x"], door_test_npc["interior_y"]) == (13, 8)
+    assert door_route_game.inn_interior_map[8][13] == "|"
+    door_test_npc["interior_x"], door_test_npc["interior_y"] = 11, 8
+    door_route_game.town_npc_close_used_interior_door(
+        door_test_npc,
+        "InnInterior",
+        (11, 8),
+    )
+    assert door_route_game.inn_interior_map[8][13] == "_"
 
     service_action_specs = [
         ("GeneralStoreInterior", "general_store_map", "use_general_store_action", "General Store closed."),
@@ -6609,6 +8074,21 @@ def main() -> int:
     assert len(set(inn_positions.values())) == 3, "Inn sleepers should occupy separate rooms"
     inn_bed_anchors = set(routine_game.town_npc_fixture_room_anchors("InnInterior", {"B"}))
     assert set(inn_positions.values()) == inn_bed_anchors
+    # Late travelers describe the trip home instead of appearing to sleep on
+    # the street, and the 11 PM fallback resolves every blocked route indoors.
+    routine_game.state.location = "Wilderness"
+    routine_game.return_to_seamless_town(50, 24)
+    routine_game.state.hour, routine_game.state.minute = 22, 0
+    late_npc = next(npc for npc in routine_game.active_town_npcs() if npc.get("id") != routine_game.state.spouse_npc_id)
+    late_npc["runtime_location"] = "Town"
+    late_npc["indoors"] = False
+    assert routine_game.town_npc_activity_label(late_npc) == "walking home to sleep"
+    routine_game.state.hour = 23
+    routine_game.update_town_npcs(force_reanchor=True)
+    assert all(
+        routine_game.town_npc_actual_location(npc) != "Town"
+        for npc in routine_game.active_town_npcs()
+    )
 
     assert len(data.AUTHORED_TOWN_RESIDENCE_DATA) == 6
     assigned_residents = [
@@ -7935,6 +9415,207 @@ def main() -> int:
     assert forge_game.purchase_combat_gear("Fang Spear", equip_now=True)
     fang_profile = build_player_combat_profile(forge_game.state)
     assert fang_profile["weapon"] == "Fang Spear"
+
+    # Procedural equipment keeps a persistent stat identity while travelling
+    # through the ordinary backpack, containers, shipping, and loadout systems.
+    generated_game = FarmGame()
+    generated_game.autosave_with_message = lambda message: generated_game.set_message(message)
+    generated_name = random_loot.generate_random_equipment(
+        generated_game.state,
+        "smoke:dungeon:chest:1",
+        item_level=14,
+        quality_bonus=2,
+        slot="weapon",
+    )
+    generated_record = generated_game.state.generated_equipment[generated_name]
+    assert generated_record["slot"] == "weapon"
+    assert generated_record["rarity"] in random_loot.GENERATED_EQUIPMENT_RARITIES
+    assert 1 <= generated_record["range_min"] <= generated_record["range_max"] <= 6
+    assert generated_game.container_item_sell_price(generated_name) == generated_record["value"]
+    assert any("Equipment:" in line for line in generated_game.container_item_detail_lines(generated_name))
+    generated_game.state.inventory[generated_name] = 1
+    assert generated_name in generated_game.owned_combat_equipment_names("weapon")
+    assert generated_game.equip_combat_item("weapon", generated_name)
+    generated_profile = build_player_combat_profile(generated_game.state)
+    assert generated_profile["weapon"] == generated_name
+    assert generated_profile["weapon_range_min"] == generated_record["range_min"]
+    assert generated_profile["weapon_range_max"] == generated_record["range_max"]
+    assert generated_profile["attack"] == generated_game.state.combat_attack + generated_record["attack"]
+    generated_game.shipping_bin_target = lambda: (1, 1)
+    assert not generated_game.ship_inventory_item(generated_name)
+    assert generated_game.state.inventory[generated_name] == 1
+    generated_storage = generated_game.create_container_record(
+        "generated-gear-storage", 1, 1, "crate",
+        take_policy="player", allow_deposit=True, contents={},
+    )
+    assert generated_game.deposit_all_into_container(generated_storage) >= 0
+    assert generated_game.state.inventory[generated_name] == 1
+    assert generated_name not in generated_storage["contents"]
+    generated_round_trip = state.GameState(
+        generated_equipment=dict(generated_game.state.generated_equipment),
+        equipped_weapon=generated_name,
+        inventory={generated_name: 1},
+    )
+    assert generated_round_trip.equipped_weapon == generated_name
+    assert generated_name in generated_round_trip.generated_equipment
+
+    # The blacksmith workshop applies real combat bonuses, previews deterministic
+    # reforges, escalates costs, and salvages only unequipped generated gear.
+    workshop_game = FarmGame()
+    workshop_game.autosave_with_message = lambda message: workshop_game.set_message(message)
+    for item_name in list(workshop_game.state.inventory):
+        workshop_game.state.inventory[item_name] = 0
+    workshop_name = random_loot.generate_random_equipment(
+        workshop_game.state, "workshop-smoke", item_level=12, slot="weapon"
+    )
+    workshop_record = workshop_game.state.generated_equipment[workshop_name]
+    workshop_record.update({
+        "rarity": "Rare",
+        "attack": 5,
+        "defense": 1,
+        "max_hp": 0,
+        "max_focus": 0,
+        "affixes": ["Keen", "Guarded"],
+    })
+    workshop_game.state.inventory[workshop_name] = 1
+    workshop_game.state.inventory["Copper Bar"] = 3
+    workshop_game.state.inventory["Coal"] = 5
+    workshop_game.state.inventory["Crystal Shard"] = 5
+    workshop_game.state.inventory[random_loot.WORKSHOP_SALVAGE_ITEM] = 8
+    workshop_game.state.money = 50_000
+    assert workshop_game.equip_combat_item("weapon", workshop_name)
+    workshop_attack_before = build_player_combat_profile(workshop_game.state)["attack"]
+    workshop_value_before = workshop_game.container_item_sell_price(workshop_name)
+    first_upgrade_cost = random_loot.equipment_enhancement_cost(workshop_game.state, workshop_name)
+    money_before_upgrade = workshop_game.state.money
+    copper_before_upgrade = workshop_game.state.inventory["Copper Bar"]
+    assert random_loot.can_afford_workshop_cost(workshop_game.state, first_upgrade_cost)
+    assert random_loot.enhance_equipment(workshop_game.state, workshop_name)
+    assert random_loot.equipment_enhancement_level(workshop_game.state, workshop_name) == 1
+    assert build_player_combat_profile(workshop_game.state)["attack"] == workshop_attack_before + 1
+    assert workshop_game.container_item_sell_price(workshop_name) > workshop_value_before
+    assert workshop_game.state.money == money_before_upgrade - first_upgrade_cost[0]
+    assert workshop_game.state.inventory["Copper Bar"] == copper_before_upgrade - 1
+    assert any("Enhancement: +1" in line for line in workshop_game.container_item_detail_lines(workshop_name))
+
+    old_affix = "Keen"
+    replacement_affix = random_loot.preview_reforge_affix(
+        workshop_game.state, workshop_name, old_affix
+    )
+    assert replacement_affix and replacement_affix not in workshop_record["affixes"]
+    reforge_cost_before = random_loot.equipment_reforge_cost(workshop_game.state, workshop_name)
+    stats_before_reforge = {
+        stat: int(workshop_record.get(stat, 0) or 0)
+        for stat in ["attack", "defense", "max_hp", "max_focus"]
+    }
+    assert random_loot.reforge_generated_equipment(
+        workshop_game.state, workshop_name, old_affix
+    ) == replacement_affix
+    assert old_affix not in workshop_record["affixes"]
+    assert replacement_affix in workshop_record["affixes"]
+    for stat in stats_before_reforge:
+        expected = (
+            stats_before_reforge[stat]
+            - int(random_loot.AFFIX_BONUS_BY_LABEL[old_affix].get(stat, 0))
+            + int(random_loot.AFFIX_BONUS_BY_LABEL[replacement_affix].get(stat, 0))
+        )
+        assert int(workshop_record.get(stat, 0) or 0) == max(0, expected)
+    assert random_loot.equipment_reforge_cost(workshop_game.state, workshop_name)[0] > reforge_cost_before[0]
+    assert not random_loot.salvage_generated_equipment(workshop_game.state, workshop_name)
+    workshop_game.state.equipped_weapon = DEFAULT_COMBAT_WEAPON
+    expected_salvage = random_loot.generated_equipment_salvage_yield(
+        workshop_game.state, workshop_name
+    )
+    recovered_salvage = random_loot.salvage_generated_equipment(
+        workshop_game.state, workshop_name
+    )
+    assert recovered_salvage == expected_salvage
+    assert workshop_game.state.inventory[workshop_name] == 0
+    assert workshop_game.state.inventory[random_loot.WORKSHOP_SALVAGE_ITEM] >= expected_salvage[random_loot.WORKSHOP_SALVAGE_ITEM]
+
+    workshop_round_trip = state.GameState(
+        generated_equipment=dict(workshop_game.state.generated_equipment),
+        equipment_workshop=dict(workshop_game.state.equipment_workshop),
+        inventory={workshop_name: 1},
+    )
+    assert random_loot.equipment_enhancement_level(workshop_round_trip, workshop_name) == 1
+    assert workshop_round_trip.equipment_workshop[workshop_name]["reforge_count"] == 1
+
+    static_workshop_state = state.GameState(
+        money=5000,
+        inventory={"Copper Bar": 2, "Coal": 2},
+    )
+    static_attack_before = build_player_combat_profile(static_workshop_state)["attack"]
+    assert random_loot.enhance_equipment(static_workshop_state, DEFAULT_COMBAT_WEAPON)
+    assert build_player_combat_profile(static_workshop_state)["attack"] == static_attack_before + 1
+    assert random_loot.equipment_enhancement_cap(static_workshop_state, DEFAULT_COMBAT_WEAPON) == 3
+
+    workshop_menu_game = FarmGame()
+    workshop_menu_game.state.location = "BlacksmithInterior"
+    workshop_menu_game.ensure_current_town_service_unlocked = lambda: True
+    workshop_menu_game.is_town_building_unlocked = lambda _building: True
+    workshop_menu_labels = []
+    workshop_menu_game.vertical_panel_select = lambda _title, items, *args, **kwargs: (
+        workshop_menu_labels.extend(item.label for item in items)
+        or MenuItem(label="Leave", value="leave")
+    )
+    workshop_menu_game.blacksmith_menu()
+    assert "Gear Workshop" in workshop_menu_labels
+    remote_workshop_game = FarmGame()
+    remote_workshop_game.state.location = "Wilderness"
+    remote_workshop_labels = []
+    remote_workshop_game.vertical_panel_select = lambda _title, items, *args, **kwargs: (
+        remote_workshop_labels.extend(item.label for item in items)
+        or MenuItem(label="Leave", value="leave")
+    )
+    remote_workshop_game.blacksmith_menu(service_override=True)
+    assert "Gear Workshop" in remote_workshop_labels
+
+    deterministic_state_a = state.GameState()
+    deterministic_state_b = state.GameState()
+    deterministic_name_a = random_loot.generate_random_equipment(
+        deterministic_state_a, "same-source", item_level=9, slot="armor"
+    )
+    deterministic_name_b = random_loot.generate_random_equipment(
+        deterministic_state_b, "same-source", item_level=9, slot="armor"
+    )
+    assert deterministic_name_a == deterministic_name_b
+    assert deterministic_state_a.generated_equipment[deterministic_name_a] == deterministic_state_b.generated_equipment[deterministic_name_b]
+    idempotent_name = random_loot.generate_random_equipment(
+        deterministic_state_a, "same-source", item_level=9, slot="armor"
+    )
+    assert idempotent_name == deterministic_name_a
+    collision_rng_seed = 77881
+    collision_name_a = random_loot.generate_random_equipment(
+        deterministic_state_a, "collision-source-a", item_level=9, slot="armor",
+        rng=random.Random(collision_rng_seed),
+    )
+    collision_name = random_loot.generate_random_equipment(
+        deterministic_state_a, "collision-source-b", item_level=9, slot="armor",
+        rng=random.Random(collision_rng_seed),
+    )
+    assert collision_name_a != deterministic_name_a or collision_name != deterministic_name_a
+    assert collision_name != deterministic_name_a
+    assert collision_name == f"{collision_name_a} 2"
+
+    reward_state_a = state.GameState()
+    reward_state_b = state.GameState()
+    reward_a = random_loot.add_random_reward_items(
+        reward_state_a, {"Ruin Scrap": 1}, "reward-smoke", 18,
+        gear_chance=1.0, consumable_chance=1.0, valuable_chance=1.0,
+        quality_bonus=3,
+    )
+    reward_b = random_loot.add_random_reward_items(
+        reward_state_b, {"Ruin Scrap": 1}, "reward-smoke", 18,
+        gear_chance=1.0, consumable_chance=1.0, valuable_chance=1.0,
+        quality_bonus=3,
+    )
+    assert reward_a == reward_b
+    assert len(reward_state_a.generated_equipment) == 1
+    reward_gear_name = next(iter(reward_state_a.generated_equipment))
+    assert reward_a[reward_gear_name] == 1
+    assert any(name in reward_a for name in random_loot.RANDOM_CONSUMABLES)
+    assert any(name in reward_a for name in random_loot.RANDOM_VALUABLES)
     assert fang_profile["weapon_range_max"] == 2
 
     gated_gear_game = FarmGame()
@@ -8466,11 +10147,28 @@ def main() -> int:
     stronghold_game.state.player_name = "Avery"
     stronghold_game.state.wilderness_seed = 24681357
     stronghold_coords = None
+
+    def stronghold_has_expansion_land(cx, cy):
+        for nx, ny in ((cx + 1, cy), (cx - 1, cy), (cx, cy + 1), (cx, cy - 1)):
+            water_samples = sum(
+                1
+                for local_y in (4, 11, 19, 27, 34)
+                for local_x in (6, 23, 43, 63, 79)
+                if stronghold_game.wilderness_world_water_tile(
+                    nx * 86 + local_x,
+                    ny * 38 + local_y,
+                )
+            )
+            if water_samples <= 15:
+                return True
+        return False
+
     for cy in range(-80, 81):
         for cx in range(-80, 81):
             if (
                 stronghold_game.wilderness_chunk_has_stronghold(cx, cy)
                 and not stronghold_game.wilderness_chunk_has_procedural_settlement(cx, cy)
+                and stronghold_has_expansion_land(cx, cy)
             ):
                 stronghold_coords = (cx, cy)
                 break
@@ -8630,6 +10328,177 @@ def main() -> int:
         resident.get("job_profile", {}).get("title")
         for resident in population["residents"].values()
     )
+    frontier = stronghold_game.founded_town_frontier_candidates(stronghold_record)
+    assert frontier
+    expansion_chunk = frontier[0]
+    expansion_cost = stronghold_game.founded_town_expansion_cost(stronghold_record)
+    stronghold_game.state.money = max(stronghold_game.state.money, expansion_cost + 5000)
+    money_before_expansion = stronghold_game.state.money
+    expansion_district = stronghold_game.expand_founded_town(
+        expansion_chunk[0],
+        expansion_chunk[1],
+        "Market",
+        scx,
+        scy,
+        autosave=False,
+    )
+    assert expansion_district is not None
+    assert stronghold_game.state.money == money_before_expansion - expansion_cost
+    assert stronghold_game.founded_town_root_context(*expansion_chunk)[0:2] == (scx, scy)
+    assert stronghold_game.wilderness_settlement_plan(*expansion_chunk) is None
+    assert stronghold_game.overworld_chunk_preview_symbol(*expansion_chunk) == procedural_towns.PROCEDURAL_TOWN_OVERWORLD_SYMBOL
+    assert any(
+        "Market District" in line
+        for line in stronghold_game.overworld_chunk_detail_lines(*expansion_chunk)
+    )
+    expansion_map = stronghold_game.get_wilderness_chunk_map(*expansion_chunk)
+    parent_chunk = (
+        int(expansion_district["parent_chunk_x"]),
+        int(expansion_district["parent_chunk_y"]),
+    )
+    dx = expansion_chunk[0] - parent_chunk[0]
+    dy = expansion_chunk[1] - parent_chunk[1]
+    if dx:
+        edge_x = 0 if dx > 0 else len(expansion_map[0]) - 1
+        assert expansion_map[19][edge_x] == ":"
+    else:
+        edge_y = 0 if dy > 0 else len(expansion_map) - 1
+        assert expansion_map[edge_y][43] == ":"
+    stronghold_game.set_wilderness_chunk(*expansion_chunk)
+    district_board = stronghold_game.ensure_reclaimed_stronghold_build_board(
+        *expansion_chunk
+    )
+    assert district_board is not None
+    assert stronghold_game.reclaimed_stronghold_build_board_at(
+        *district_board,
+        *expansion_chunk,
+    )
+    assert "Market District" in stronghold_game.location_label()
+    district_catalog = stronghold_game.reclaimed_stronghold_build_catalog(
+        *expansion_chunk
+    )
+    assert district_catalog["building:market_stall"]["district_fit"] == "favored"
+    assert district_catalog["building:market_stall"]["cost"] < district_catalog["building:market_stall"]["base_cost"]
+    assert district_catalog["building:clinic"]["district_fit"] == "outside specialization"
+    assert district_catalog["building:clinic"]["cost"] > district_catalog["building:clinic"]["base_cost"]
+
+    def first_valid_district_build_position(item_id):
+        grid = stronghold_game.active_map()
+        for yy in range(2, len(grid) - 2):
+            for xx in range(2, len(grid[0]) - 2):
+                ok, _reason = stronghold_game.can_place_reclaimed_stronghold_build_item(
+                    item_id,
+                    xx,
+                    yy,
+                    expansion_chunk[0],
+                    expansion_chunk[1],
+                )
+                if ok:
+                    return xx, yy
+        return None
+
+    clinic_pos = first_valid_district_build_position("building:clinic")
+    assert clinic_pos is not None
+    assert stronghold_game.place_reclaimed_stronghold_build_item(
+        "building:clinic",
+        clinic_pos[0],
+        clinic_pos[1],
+        expansion_chunk[0],
+        expansion_chunk[1],
+        autosave=False,
+    )
+    municipality = stronghold_game.ensure_founded_town_municipality(
+        stronghold_record
+    )
+    municipality["treasury"] = 1000
+    first_market_pos = first_valid_district_build_position("building:market_stall")
+    assert first_market_pos is not None
+    money_before_subsidized_build = stronghold_game.state.money
+    assert stronghold_game.place_reclaimed_stronghold_build_item(
+        "building:market_stall",
+        first_market_pos[0],
+        first_market_pos[1],
+        expansion_chunk[0],
+        expansion_chunk[1],
+        autosave=False,
+    )
+    first_market_feature = next(
+        feature
+        for feature in stronghold_game.reclaimed_stronghold_feature_records(
+            stronghold_record,
+            *expansion_chunk,
+        ).values()
+        if feature.get("type_id") == "market_stall"
+    )
+    assert int(first_market_feature["municipal_subsidy"]) > 0
+    assert stronghold_game.state.money > (
+        money_before_subsidized_build - int(first_market_feature["project_cost"])
+    )
+    second_market_pos = first_valid_district_build_position("building:market_stall")
+    assert second_market_pos is not None
+    assert stronghold_game.place_reclaimed_stronghold_build_item(
+        "building:market_stall",
+        second_market_pos[0],
+        second_market_pos[1],
+        expansion_chunk[0],
+        expansion_chunk[1],
+        autosave=False,
+    )
+    market_metrics = stronghold_game.founded_town_site_metrics(
+        stronghold_record,
+        expansion_district,
+    )
+    assert market_metrics["kind"] == "Market"
+    assert market_metrics["label"] in {"Established", "Thriving"}
+    assert not any(
+        "Market Stall" in demand
+        for demand in stronghold_game.founded_town_site_demands(
+            stronghold_record,
+            expansion_district,
+        )
+    )
+    expanded_population_plan = stronghold_game.reclaimed_stronghold_population_plan(
+        *expansion_chunk
+    )
+    assert expanded_population_plan is not None
+    district_clinic = next(
+        building
+        for building in expanded_population_plan["buildings"].values()
+        if building["type_id"] == "clinic"
+        and (
+            int(building["district_chunk_x"]),
+            int(building["district_chunk_y"]),
+        ) == expansion_chunk
+    )
+    assert district_clinic["district_maturity"] in {"Established", "Thriving"}
+    revenue_week = stronghold_game.civic_date_ordinal() // 7
+    municipality["last_revenue_week"] = revenue_week - 1
+    treasury_before_revenue = int(municipality["treasury"])
+    weekly_revenue = stronghold_game.process_founded_town_revenue(
+        stronghold_record
+    )
+    assert weekly_revenue > 0
+    assert int(municipality["treasury"]) == treasury_before_revenue + weekly_revenue
+    assert any(
+        "Favored construction costs 15% less" in line
+        for line in stronghold_game.founded_town_site_status_lines(
+            *expansion_chunk
+        )
+    )
+    stronghold_game.state.hour = 12
+    assert stronghold_game.enter_procedural_town_building(district_clinic)
+    assert stronghold_game.exit_procedural_town_building()
+    assert (
+        stronghold_game.state.wilderness_chunk_x,
+        stronghold_game.state.wilderness_chunk_y,
+    ) == expansion_chunk
+    expanded_overview = "\n".join(
+        stronghold_game.reclaimed_stronghold_town_overview_lines(*expansion_chunk)
+    )
+    assert "Developed footprint: 2 chunk(s)" in expanded_overview
+    assert "Town treasury: $" in expanded_overview
+    assert "Market / Established" in expanded_overview or "Market / Thriving" in expanded_overview
+    stronghold_game.set_wilderness_chunk(scx, scy)
     current_population_plan = stronghold_game.current_procedural_town_plan()
     assert current_population_plan is not None
     assert current_population_plan["source"] == "reclaimed_stronghold"
@@ -8952,7 +10821,7 @@ def main() -> int:
     )
     traveler_x, traveler_y = int(traveler["x"]), int(traveler["y"])
     assert wilderness_balance_game.wilderness_traveler_at(traveler_x, traveler_y) is traveler
-    assert not wilderness_balance_game.passable(traveler_x, traveler_y)
+    assert wilderness_balance_game.passable(traveler_x, traveler_y)
     assert traveler["name"] in wilderness_balance_game.describe_tile(traveler_x, traveler_y)
     assert "talk" in wilderness_balance_game.interaction_hint(traveler_x, traveler_y).lower()
     traveler_lookup = wilderness_balance_game.frame_actor_position_lookups(len(wilderness_balance_game.active_map()[0]), len(wilderness_balance_game.active_map()))["wilderness_travelers"]
@@ -9036,6 +10905,9 @@ def main() -> int:
     outpost_positions = [(x, y) for y, row in enumerate(wilderness_balance_game.active_map()) for x, tile in enumerate(row) if tile == "A"]
     assert outpost_positions
     outpost_x, outpost_y = outpost_positions[0]
+    assert wilderness_balance_game.current_wilderness_outpost_door_at(
+        outpost_x, outpost_y
+    )
     outpost_side = wilderness_balance_game.wilderness_exterior_door_side(
         wilderness_balance_game.active_map(), outpost_x, outpost_y
     )
@@ -9095,10 +10967,10 @@ def main() -> int:
     assert keeper is wilderness_balance_game.wilderness_outpost_keeper(*outpost_chunk)
     assert keeper_name in wilderness_balance_game.describe_tile(*keeper_position)
     assert keeper_name in wilderness_balance_game.interaction_hint(*keeper_position)
-    assert not wilderness_balance_game.passable(*keeper_position)
+    assert wilderness_balance_game.passable(*keeper_position)
     assert recurring_record["name"] in wilderness_balance_game.describe_tile(*specialist_home_position)
     assert recurring_record["name"] in wilderness_balance_game.interaction_hint(*specialist_home_position)
-    assert not wilderness_balance_game.passable(*specialist_home_position)
+    assert wilderness_balance_game.passable(*specialist_home_position)
     assert wilderness_balance_game.is_interactable_tile(*specialist_home_position)
     wilderness_balance_game.vertical_panel_view = lambda *args, **kwargs: None
     keeper_topic_lines = {
@@ -9781,6 +11653,81 @@ def main() -> int:
     assert not wilderness_poi_game.search_wilderness_ruin(ruin_pos[0], ruin_pos[1])
     assert wilderness_poi_game.state.wilderness_poi_state
 
+    # Every random-landmark menu must treat the selector's explicit Back
+    # sentinel as cancellation instead of redrawing a parent loop.
+    landmark_back_game = FarmGame()
+    landmark_back_game.state.location = "Wilderness"
+    landmark_back_calls = []
+    landmark_back_game.vertical_panel_select = (
+        lambda title, *_args, **_kwargs: (
+            landmark_back_calls.append(str(title))
+            or MenuItem(
+                label="Back",
+                value=farmstead_main.MENU_BACK,
+                enabled=True,
+            )
+        )
+    )
+    landmark_back_game.vertical_panel_view = (
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("Back must not open another landmark screen")
+        )
+    )
+    landmark_back_game.show_wilderness_field_site(10, 10)
+    landmark_back_game.show_wilderness_region_project(10, 10)
+    landmark_back_game.show_wilderness_phenomenon(10, 10)
+    landmark_back_game.open_wilderness_ruin_site(10, 10)
+    landmark_back_game.open_wilderness_overlook_site(10, 10)
+    landmark_back_game.open_wilderness_landscape_site()
+    assert len(landmark_back_calls) == 6
+
+    # Peaceful NPCs can share a tile with the player, while hostile actors
+    # remain solid.
+    npc_collision_game = FarmGame()
+    npc_collision_game.state.location = "Town"
+    town_step = next(
+        (x, y, dx, dy)
+        for y, row in enumerate(npc_collision_game.town_map)
+        for x, _tile in enumerate(row)
+        for dx, dy in ((1, 0), (0, 1))
+        if 3 <= x < len(row) - 3
+        and 3 <= y < len(npc_collision_game.town_map) - 3
+        if npc_collision_game.passable(x, y)
+        and npc_collision_game.passable(x + dx, y + dy)
+    )
+    start_x, start_y, step_dx, step_dy = town_step
+    npc_target = (start_x + step_dx, start_y + step_dy)
+    peaceful_npc = {"name": "Path Test Resident", "location": "Town"}
+    npc_collision_game.town_npc_at = (
+        lambda x, y: peaceful_npc if (int(x), int(y)) == npc_target else None
+    )
+    assert npc_collision_game.passable(*npc_target)
+    npc_collision_game.state.player_x = start_x
+    npc_collision_game.state.player_y = start_y
+    npc_collision_game.move(step_dx, step_dy)
+    assert (
+        npc_collision_game.state.player_x,
+        npc_collision_game.state.player_y,
+    ) == npc_target
+    npc_collision_game.state.facing = "LEFT" if step_dx else "UP"
+    spoken_to = []
+    npc_collision_game.town_npc_menu = lambda npc: spoken_to.append(npc)
+    npc_collision_game.general_interact()
+    assert spoken_to == [peaceful_npc]
+    npc_collision_game.state.location = "Mine"
+    mine_enemy_position = next(
+        (x, y)
+        for y, row in enumerate(npc_collision_game.mine_map)
+        for x, tile in enumerate(row)
+        if tile == "."
+    )
+    npc_collision_game.mine_enemy_at = (
+        lambda x, y: {"species": "Collision Test Slime"}
+        if (int(x), int(y)) == mine_enemy_position
+        else None
+    )
+    assert not npc_collision_game.passable(*mine_enemy_position)
+
     field_combat_game = FarmGame()
     field_combat_game.autosave_with_message = lambda message: field_combat_game.set_message(message)
     field_combat_game.state.location = "Wilderness"
@@ -10330,6 +12277,20 @@ def main() -> int:
         assert loaded_house_layout_game.load_from_path(house_layout_save_path)
         assert loaded_house_layout_game.house_map[6][15] == "#"
         assert loaded_house_layout_game.state.custom_house_map_rows
+        game_table_save_path = Path(temp_dir) / "ascii_farmstead_game_table_smoke_save.json"
+        assert game_table_game.save(quiet=True, path=game_table_save_path)
+        loaded_game_table_game = FarmGame()
+        assert loaded_game_table_game.load_from_path(game_table_save_path)
+        assert {"blackjack", "checkers", "chess"} <= set(
+            loaded_game_table_game.state.tavern_game_discoveries
+        )
+        assert loaded_game_table_game.placed_object_at(
+            chess_table_position[0] + 1, chess_table_position[1]
+        )[1] == "Chess Table"
+        assert loaded_game_table_game.store_placed_object_at(
+            *chess_table_position, autosave=False
+        )
+        assert loaded_game_table_game.state.inventory["Chess Table"] == 1
         assert loaded_build_game.state.farm_building_boosts[pond_new] == "baited"
         assert any(animal.get("building_key") == coop_new for animal in loaded_build_game.state.farm_animals)
 
@@ -10557,6 +12518,68 @@ def main() -> int:
         assert loaded_procedural_town_game.location_label() == procedural_town_plan["name"]
         assert loaded_procedural_town_game.town_map == authored_town_before_runtime
 
+        district_growth_save_path = (
+            Path(temp_dir) / "ascii_farmstead_town_district_growth_smoke_save.json"
+        )
+        assert district_growth_game.save(
+            quiet=True,
+            path=district_growth_save_path,
+        )
+        loaded_district_growth_game = FarmGame()
+        assert loaded_district_growth_game.load_from_path(
+            district_growth_save_path
+        )
+        loaded_district_plan = loaded_district_growth_game.procedural_town_plan(
+            procedural_town_x,
+            procedural_town_y,
+        )
+        assert loaded_district_plan is not None
+        loaded_districts = loaded_district_growth_game.ensure_procedural_town_community(
+            loaded_district_plan
+        )["districts"]
+        assert [
+            (
+                int(district["chunk_x"]),
+                int(district["chunk_y"]),
+                str(district["kind"]),
+                tuple(
+                    str(building["id"])
+                    for building in district.get("buildings", [])
+                ),
+            )
+            for district in loaded_districts
+        ] == [
+            (
+                int(district["chunk_x"]),
+                int(district["chunk_y"]),
+                str(district["kind"]),
+                tuple(
+                    str(building["id"])
+                    for building in district.get("buildings", [])
+                ),
+            )
+            for district in districts
+        ]
+        loaded_entry_district = loaded_districts[0]
+        loaded_entry_chunk = (
+            int(loaded_entry_district["chunk_x"]),
+            int(loaded_entry_district["chunk_y"]),
+        )
+        assert (
+            loaded_district_growth_game.procedural_town_plan(
+                *loaded_entry_chunk
+            )
+            is loaded_district_plan
+        )
+        loaded_district_map = loaded_district_growth_game.get_wilderness_chunk_map(
+            *loaded_entry_chunk
+        )
+        assert loaded_district_map[19][43] == ":"
+        assert loaded_district_growth_game.procedural_settlement_population_validation(
+            procedural_town_x,
+            procedural_town_y,
+        ) == {"errors": [], "warnings": []}
+
         work_save_game = FarmGame()
         work_save_game.autosave_with_message = lambda message: work_save_game.set_message(message)
         work_save_game.state.spouse_npc_id = "mira_seed"
@@ -10613,6 +12636,53 @@ def main() -> int:
         loaded_record = loaded_stronghold_game.wilderness_stronghold_record(scx, scy, create=False)
         assert loaded_record.get("cleared") is True
         assert loaded_stronghold_game.get_wilderness_stronghold_enemies(scx, scy, create=False) == []
+        loaded_founded_districts = loaded_stronghold_game.founded_town_districts(
+            loaded_record
+        )
+        assert len(loaded_founded_districts) == 1
+        assert (
+            int(loaded_founded_districts[0]["chunk_x"]),
+            int(loaded_founded_districts[0]["chunk_y"]),
+        ) == expansion_chunk
+        assert loaded_stronghold_game.founded_town_root_context(
+            *expansion_chunk
+        )[0:2] == (scx, scy)
+        loaded_expansion_map = loaded_stronghold_game.get_wilderness_chunk_map(
+            *expansion_chunk
+        )
+        assert loaded_expansion_map[
+            int(loaded_founded_districts[0]["build_board_y"])
+        ][int(loaded_founded_districts[0]["build_board_x"])] == "n"
+        loaded_expanded_plan = loaded_stronghold_game.reclaimed_stronghold_population_plan(
+            *expansion_chunk
+        )
+        assert any(
+            building["type_id"] == "clinic"
+            and (
+                int(building["district_chunk_x"]),
+                int(building["district_chunk_y"]),
+            ) == expansion_chunk
+            for building in loaded_expanded_plan["buildings"].values()
+        )
+        loaded_municipality = loaded_stronghold_game.ensure_founded_town_municipality(
+            loaded_record
+        )
+        assert int(loaded_municipality["treasury"]) == int(municipality["treasury"])
+        assert int(loaded_municipality["lifetime_revenue"]) >= weekly_revenue
+        loaded_market_metrics = loaded_stronghold_game.founded_town_site_metrics(
+            loaded_record,
+            loaded_founded_districts[0],
+        )
+        assert loaded_market_metrics["label"] in {"Established", "Thriving"}
+        assert sum(
+            1
+            for building in loaded_expanded_plan["buildings"].values()
+            if building["type_id"] == "market_stall"
+            and (
+                int(building["district_chunk_x"]),
+                int(building["district_chunk_y"]),
+            ) == expansion_chunk
+        ) == 2
         field_save_path = Path(temp_dir) / "ascii_farmstead_field_combat_smoke_save.json"
         assert field_combat_game.save(quiet=True, path=field_save_path)
         loaded_field_game = FarmGame()

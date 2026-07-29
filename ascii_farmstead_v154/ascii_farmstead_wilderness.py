@@ -5,8 +5,10 @@ from __future__ import annotations
 import random
 from typing import Dict, List, Optional, Tuple
 
+from ascii_farmstead_data import MENU_BACK
 from ascii_farmstead_inventory import add_inventory_items, format_drops
 from ascii_farmstead_visuals import actor_style
+from ascii_farmstead_game_tables import GAME_TABLE_DATA, venue_game_ids
 
 
 FIELD_SITE_SYMBOL = "E"
@@ -544,12 +546,43 @@ class WildernessRevampMixin:
             return False
         if grid[int(y)][int(x)] != WILDERNESS_STRUCTURE_SYMBOL:
             return False
-        wall_neighbors = 0
-        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-            nx, ny = int(x) + dx, int(y) + dy
-            if 0 <= ny < len(grid) and 0 <= nx < len(grid[0]) and grid[ny][nx] == "#":
-                wall_neighbors += 1
-        return wall_neighbors > 0
+        return self.wilderness_exterior_marker_is_door(
+            grid, int(x), int(y), WILDERNESS_STRUCTURE_SYMBOL
+        )
+
+    def wilderness_exterior_marker_is_door(
+        self,
+        grid: List[List[str]],
+        x: int,
+        y: int,
+        marker: str,
+    ) -> bool:
+        """Recognize the single opening in a stamped wilderness façade.
+
+        Several ordinary building surfaces reuse letters that wilderness sites
+        use as doorway markers. A marker is therefore only a door when it sits
+        in a solid wall line with solid building mass on exactly one side and
+        an exterior approach on the other.
+        """
+        px, py = int(x), int(y)
+        if (
+            not grid
+            or not (1 <= py < len(grid) - 1)
+            or not (1 <= px < len(grid[py]) - 1)
+            or grid[py][px] != str(marker)[:1]
+        ):
+            return False
+        horizontal_wall = grid[py][px - 1] == "#" and grid[py][px + 1] == "#"
+        vertical_wall = grid[py - 1][px] == "#" and grid[py + 1][px] == "#"
+        if horizontal_wall:
+            above_solid = grid[py - 1][px] == "#"
+            below_solid = grid[py + 1][px] == "#"
+            return above_solid != below_solid
+        if vertical_wall:
+            left_solid = grid[py][px - 1] == "#"
+            right_solid = grid[py][px + 1] == "#"
+            return left_solid != right_solid
+        return False
 
     def current_wilderness_structure_door_at(self, x: int, y: int) -> bool:
         """Validate a runtime structure door by ownership, not glyph shape alone."""
@@ -670,16 +703,22 @@ class WildernessRevampMixin:
             for y in range(2, height - 4): grid[y][width // 2] = "-"
             grid[height // 2][width // 2] = "|"
             grid[6][7], grid[6][8], grid[7][7], grid[7][8] = "t", "c", "c", "t"
-            if type_id == "roadside_inn": grid[5][width // 2 - 3] = "&"
+            if type_id == "roadside_inn":
+                grid[5][width // 2 - 3] = "&"
             if type_id == "desert_caravanserai":
                 grid[5][width // 2 - 3] = "&"
                 grid[5][5] = grid[5][width - 6] = "P"
             if type_id == "tundra_wayhouse":
-                grid[5][width // 2 - 3] = "f"
+                grid[5][width // 2 - 3] = "&"
                 grid[5][5] = grid[5][width - 6] = "b"
             if type_id == "coastal_ferry_house":
                 grid[5][width // 2 - 3] = "&"
                 grid[5][5], grid[5][width - 6] = "s", "P"
+            if type_id in {"roadside_inn", "desert_caravanserai", "tundra_wayhouse"}:
+                games = venue_game_ids(key, type_id, count=2)
+                for table_x, game_id in zip((6, 11), games):
+                    grid[7][table_x] = str(GAME_TABLE_DATA[game_id]["glyph"])
+                    grid[6][table_x] = "c"
         elif type_id == "wayside_shrine":
             grid[5][width // 2] = "+"
             grid[6][width // 2 - 2] = grid[6][width // 2 + 2] = "c"
@@ -768,7 +807,7 @@ class WildernessRevampMixin:
         if not record.get("repaired"):
             items.append(self._wilderness_menu_item("repair", "Restore structure", "Contribute materials and two hours of labor."))
         choice = self.vertical_panel_select(str(record["name"]), items, 52, 22, return_back=True)
-        if not choice:
+        if not choice or choice.value == MENU_BACK:
             return
         if choice.value == "enter": self.enter_wilderness_structure(x, y)
         elif choice.value == "inspect": self.vertical_panel_view(str(record["name"]), self.wilderness_structure_lines(), 52, 22)
@@ -810,6 +849,22 @@ class WildernessRevampMixin:
         record = self.wilderness_structure_record()
         if tile == "D": self.exit_wilderness_structure()
         elif tile == "b": self.rest_at_wilderness_structure()
+        elif (
+            self.game_table_fixture_id(tile)
+            and str(record.get("type_id", "")) in {
+                "roadside_inn",
+                "desert_caravanserai",
+                "tundra_wayhouse",
+            }
+            and hasattr(self, "open_physical_game_table")
+        ):
+            if not record.get("repaired"):
+                self.set_message("Restore and staff this wayhouse before using its game tables.")
+            else:
+                self.open_physical_game_table(
+                    self.game_table_fixture_id(tile),
+                    str(record.get("name", "Roadside Inn")),
+                )
         elif tile in {"s", "&"}: self.claim_wilderness_structure_service()
         elif tile == "P": self.vertical_panel_view(str(record["name"]), self.wilderness_structure_lines(), 52, 22)
         elif tile == "@":
@@ -1478,7 +1533,7 @@ class WildernessRevampMixin:
             items.append(self._wilderness_menu_item("cargo_status", "Review carried cargo", f"Bound for {active_cargo.get('destination_name')} ({active_cargo.get('destination')})."))
             if str(active_cargo.get("destination")) == self.wilderness_chunk_key(): items.append(self._wilderness_menu_item("cargo_deliver", "Deliver contracted cargo", f"Receive {active_cargo.get('reward')}g."))
         choice = self.vertical_panel_select("Wilderness Dock", items, 50, 20, return_back=True)
-        if not choice: return
+        if not choice or choice.value == MENU_BACK: return
         if choice.value == "embark": self.embark_wilderness_boat(x, y)
         elif choice.value == "disembark": self.disembark_wilderness_boat(x, y)
         elif choice.value == "rent": self.rent_wilderness_boat()
@@ -1673,7 +1728,7 @@ class WildernessRevampMixin:
         elif int(record["level"]) >= 2:
             items.append(self._wilderness_menu_item("cargo_accept", "Accept weekly cargo contract", "Carry harbor goods to a known dock for payment."))
         choice = self.vertical_panel_select(str(record["name"]), items, 52, 23, return_back=True)
-        if not choice: return
+        if not choice or choice.value == MENU_BACK: return
         if choice.value == "status": self.vertical_panel_view(str(record["name"]), self.fishing_settlement_lines(), 52, 23)
         elif choice.value == "land": self.disembark_wilderness_boat(x, y)
         elif choice.value == "embark": self.embark_wilderness_boat(x, y)
@@ -2083,7 +2138,7 @@ class WildernessRevampMixin:
             items.append(self._wilderness_menu_item("service", "Complete weekly site work", str(profile["benefit"])))
         items.append(self._wilderness_menu_item("chart", "Chart surrounding waters", "Reveal nearby wilderness coordinates from this island facility."))
         choice = self.vertical_panel_select(str(profile["name"]), items, 52, 22, return_back=True)
-        if not choice: return
+        if not choice or choice.value == MENU_BACK: return
         if choice.value == "restore": self.restore_wilderness_island_site()
         elif choice.value == "service": self.claim_wilderness_island_site_service()
         elif choice.value == "chart":
@@ -2104,6 +2159,25 @@ class WildernessRevampMixin:
 
     def wilderness_chunk_has_outpost(self, chunk_x: int, chunk_y: int) -> bool:
         return (int(chunk_x), int(chunk_y)) == self.wilderness_region_outpost_chunk(chunk_x, chunk_y)
+
+    def current_wilderness_outpost_door_at(self, x: int, y: int) -> bool:
+        """Return true only for the generated outpost doorway in this chunk."""
+        if str(getattr(self.state, "location", "")) != "Wilderness":
+            return False
+        chunk_x = int(getattr(self.state, "wilderness_chunk_x", 0))
+        chunk_y = int(getattr(self.state, "wilderness_chunk_y", 0))
+        if (
+            hasattr(self, "home_world_chunk_is_authored")
+            and self.home_world_chunk_is_authored(chunk_x, chunk_y)
+        ):
+            return False
+        if self.procedural_town_plan(chunk_x, chunk_y):
+            return False
+        if not self.wilderness_chunk_has_outpost(chunk_x, chunk_y):
+            return False
+        return self.wilderness_exterior_marker_is_door(
+            self.active_map(), int(x), int(y), WILDERNESS_OUTPOST_SYMBOL
+        )
 
     def wilderness_outpost_name(self, chunk_x: int, chunk_y: int) -> str:
         region = self.wilderness_region_profile(chunk_x, chunk_y)
@@ -2179,7 +2253,10 @@ class WildernessRevampMixin:
         self._wilderness_outpost_map_signature = signature
         return grid
 
-    def enter_wilderness_outpost(self, x: int, y: int):
+    def enter_wilderness_outpost(self, x: int, y: int) -> bool:
+        if not self.current_wilderness_outpost_door_at(x, y):
+            self.set_message("That is not a wilderness outpost entrance.")
+            return False
         side = self.wilderness_exterior_door_side(self.active_map(), x, y)
         dx, dy = self.wilderness_door_delta(side)
         self.state.current_wilderness_outpost_key = self.wilderness_chunk_key()
@@ -2192,6 +2269,7 @@ class WildernessRevampMixin:
         self.state.player_x, self.state.player_y = self.wilderness_interior_entry_landing(grid, side)
         self.state.facing = {"north": "DOWN", "south": "UP", "west": "RIGHT", "east": "LEFT"}[side]
         self.set_message(f"Entered {self.wilderness_outpost_name(self.state.wilderness_chunk_x, self.state.wilderness_chunk_y)}.")
+        return True
 
     def exit_wilderness_outpost(self):
         self.state.location = "Wilderness"
@@ -2303,7 +2381,7 @@ class WildernessRevampMixin:
             23,
             return_back=True,
         )
-        if not choice:
+        if not choice or choice.value == MENU_BACK:
             return False
         day = self.errand_day_key()
         gained = keeper.get("last_conversation_day") != day
@@ -2454,7 +2532,7 @@ class WildernessRevampMixin:
             self._wilderness_menu_item("picnic", "Wilderness Picnic", "Prioritize family time, rest, and companion bonds."),
         ]
         choice = self.vertical_panel_select("Guided Group Excursion", items, 52, 24, return_back=True)
-        if not choice:
+        if not choice or choice.value == MENU_BACK:
             return
         if choice.value == "status":
             self.vertical_panel_view("Guided Group Excursion", self.wilderness_group_excursion_lines(), 52, 24)
@@ -2482,7 +2560,7 @@ class WildernessRevampMixin:
             self._wilderness_menu_item("excursion", "Guided group excursion", "Take followers or family on a seasonal regional outing."),
         ]
         choice = self.vertical_panel_select(f"{keeper['name']} — {keeper['role']}", items, 52, 24, return_back=True)
-        if not choice:
+        if not choice or choice.value == MENU_BACK:
             return
         if choice.value == "talk":
             self.talk_to_wilderness_outpost_keeper(keeper)
@@ -3204,17 +3282,40 @@ class WildernessRevampMixin:
 
     def show_wilderness_phenomenon(self, x: int, y: int):
         profile = self.wilderness_phenomenon_profile(self.state.wilderness_chunk_x, self.state.wilderness_chunk_y)
-        if self.wilderness_poi_record(x, y, "phenomenon").get("resolved"):
+        is_fossil_bed = str(profile.get("name", "")) == "Exposed Fossil Bed"
+        resolved = bool(self.wilderness_poi_record(x, y, "phenomenon").get("resolved"))
+        if resolved and not is_fossil_bed:
             self.vertical_panel_view(str(profile["name"]), self.wilderness_phenomenon_lines(x, y), 50, 22)
             return
-        items = [
-            self._wilderness_menu_item("study", "Document carefully", "Spend 3 stamina and 20 minutes for a safe research reward."),
-            self._wilderness_menu_item("intervene", "Actively intervene", "Spend materials and effort for a stronger stewardship outcome."),
-            self._wilderness_menu_item("notes", "Assess the situation", "Review the discovery and intervention requirements."),
-        ]
+        if is_fossil_bed:
+            items = [
+                self._wilderness_menu_item(
+                    "excavate",
+                    "Open the fossil excavation",
+                    "Survey, expose, stabilize, and recover fossils from a persistent field grid.",
+                ),
+            ]
+            if not resolved:
+                items.append(self._wilderness_menu_item(
+                    "intervene",
+                    "Shore up the exposed ledge",
+                    "Spend materials to preserve the fossil bed as a permanent study site.",
+                ))
+            items.append(self._wilderness_menu_item(
+                "notes", "Assess the fossil bed", "Review the exposure and preservation requirements."
+            ))
+        else:
+            items = [
+                self._wilderness_menu_item("study", "Document carefully", "Spend 3 stamina and 20 minutes for a safe research reward."),
+                self._wilderness_menu_item("intervene", "Actively intervene", "Spend materials and effort for a stronger stewardship outcome."),
+                self._wilderness_menu_item("notes", "Assess the situation", "Review the discovery and intervention requirements."),
+            ]
         while True:
             choice = self.vertical_panel_select(str(profile["name"]), items, 50, 23, return_back=True)
-            if not choice:
+            if not choice or choice.value == MENU_BACK:
+                return
+            if choice.value == "excavate":
+                self.launch_excavation_minigame("paleontology", x, y, "fossil_bed")
                 return
             if choice.value in {"study", "intervene"}:
                 self.resolve_wilderness_phenomenon(x, y, choice.value)
@@ -3300,7 +3401,7 @@ class WildernessRevampMixin:
                 self._wilderness_menu_item("respond", "Organize active response", "Spend regional materials for greater ecological progress."),
             ])
         choice = self.vertical_panel_select(str(event["name"]), items, 52, 23, return_back=True)
-        if not choice:
+        if not choice or choice.value == MENU_BACK:
             return
         if choice.value == "status":
             self.vertical_panel_view(str(event["name"]), self.wilderness_weekly_event_lines(cx, cy), 52, 23)
@@ -3671,7 +3772,7 @@ class WildernessRevampMixin:
             self._wilderness_menu_item("supplies", "Check expedition supplies", "Collect the one-time field ration cache."),
         ]
         choice = self.vertical_panel_select("Temporary Ranger Camp", items, 50, 22, return_back=True)
-        if not choice:
+        if not choice or choice.value == MENU_BACK:
             return
         if choice.value == "briefing":
             self.vertical_panel_view("Expedition Briefing", self.wilderness_expedition_lines(self.state.wilderness_chunk_x, self.state.wilderness_chunk_y), 52, 24)
@@ -4111,7 +4212,19 @@ class WildernessRevampMixin:
             return
         cx = int(self.state.wilderness_chunk_x)
         cy = int(self.state.wilderness_chunk_y)
-        for traveler in list(self.get_wilderness_travelers()):
+        travelers = list(self.get_wilderness_travelers())
+        active_hostiles = (
+            list(self.map_combat_enemies())
+            if (
+                hasattr(self, "map_combat_enemies")
+                and any(
+                    traveler.get("resident_adventure_trip")
+                    for traveler in travelers
+                )
+            )
+            else []
+        )
+        for traveler in travelers:
             if traveler.get("static_actor"):
                 continue
             if random.random() > 0.34:
@@ -4149,6 +4262,27 @@ class WildernessRevampMixin:
                 options = self.wilderness_traveler_route_options(traveler, cx, cy, options)
             else:
                 options.sort(key=lambda step: abs(x + step[0] - anchor_x) + abs(y + step[1] - anchor_y) if abs(x - anchor_x) + abs(y - anchor_y) > 8 else 0)
+            if traveler.get("resident_adventure_trip") and active_hostiles:
+                nearest_hostile = min(
+                    active_hostiles,
+                    key=lambda enemy: abs(int(enemy.get("x", -99)) - x)
+                    + abs(int(enemy.get("y", -99)) - y),
+                )
+                hostile_x = int(nearest_hostile.get("x", -99))
+                hostile_y = int(nearest_hostile.get("y", -99))
+                hostile_distance = abs(hostile_x - x) + abs(hostile_y - y)
+                if hostile_distance <= 7:
+                    options.sort(
+                        key=lambda step: abs(x + step[0] - hostile_x)
+                        + abs(y + step[1] - hostile_y),
+                        reverse=True,
+                    )
+                    traveler["reacting_to_danger"] = True
+                    traveler["activity"] = (
+                        "covering the road while keeping a safe distance from hostiles"
+                        if int(traveler.get("adventure_level", 1) or 1) >= 5
+                        else "leaving the road to avoid nearby hostiles"
+                    )
             for dx, dy in options:
                 moved, destination_x, destination_y = self.try_move_wilderness_stream_actor(
                     "traveler", traveler, cx, cy, [(dx, dy)]
@@ -4159,7 +4293,8 @@ class WildernessRevampMixin:
                     nx, ny = int(traveler.get("x", x)), int(traveler.get("y", y))
                     if traveler.get("road_route"):
                         traveler["route_steps"] = int(traveler.get("route_steps", 0)) + 1
-                        traveler["activity"] = f"following the road toward {traveler.get('route_destination_name', 'a settlement')}"
+                        if not traveler.pop("reacting_to_danger", False):
+                            traveler["activity"] = f"following the road toward {traveler.get('route_destination_name', 'a settlement')}"
                     else:
                         traveler["activity"] = "surveying the weekly event" if self.wilderness_event_visual_at(nx, ny) else "walking the regional trails"
                 break
@@ -4251,6 +4386,12 @@ class WildernessRevampMixin:
                     f"This is the same traveler recorded by the Elsewhere inn and regional calendar.",
                     f"Route condition: {traveler.get('route_condition', 'Open')}",
                 ])
+        if traveler.get("resident_adventure_trip"):
+            rows.extend([
+                f"Field level: {traveler.get('adventure_level', 1)}",
+                f"Visible equipment: {traveler.get('adventure_weapon', 'Walking Staff')}",
+                f"Danger response: {traveler.get('danger_response', 'avoids unnecessary danger')}",
+            ])
         if traveler.get("recurring"):
             record = self.recurring_wilderness_traveler_record(cx, cy)
             rows.extend(["", f"Relationship: {self.recurring_wilderness_traveler_bond_label(record['bond'])} ({record['bond']})", f"Regional story: {record['story_stage']}/3", f"Shared memories: {len(record['memories'])}"])
@@ -4461,7 +4602,7 @@ class WildernessRevampMixin:
         if role in {"Trail Merchant", "Herbalist", "Naturalist", "Mycologist", "Wetland Warden", "Desert Guide", "Tundra Warden"}:
             items.append(self._wilderness_menu_item("herbs", "Buy Wild Herbs — 20g", "Purchase one useful regional herb bundle."))
         choice = self.vertical_panel_select(f"{traveler.get('name', 'Traveler')} — {traveler.get('role', 'Traveler')}", items, 52, 23, return_back=True)
-        if not choice:
+        if not choice or choice.value == MENU_BACK:
             return
         if choice.value == "talk":
             topic_items = [
@@ -4822,7 +4963,7 @@ class WildernessRevampMixin:
             offer = self.wilderness_expedition_offer(cx, cy)
             items.append(self._wilderness_menu_item("accept", f"Accept {offer['name']}", f"Travel to chunk ({offer['target_x']},{offer['target_y']})."))
         choice = self.vertical_panel_select("Regional Expeditions", items, 52, 24, return_back=True)
-        if not choice:
+        if not choice or choice.value == MENU_BACK:
             return
         if choice.value == "status":
             self.vertical_panel_view("Regional Expeditions", self.wilderness_expedition_lines(cx, cy), 52, 24)
@@ -4844,7 +4985,7 @@ class WildernessRevampMixin:
         ]
         while True:
             choice = self.vertical_panel_select(str(site["name"]), items, 48, 24, return_back=True)
-            if not choice:
+            if not choice or choice.value == MENU_BACK:
                 return
             if choice.value in {"survey", "restoration", "forage"}:
                 self.perform_wilderness_fieldwork(x, y, choice.value)
@@ -4882,7 +5023,7 @@ class WildernessRevampMixin:
                 initiative = self.wilderness_seasonal_initiative_profile(cx, cy)
                 items.append(self._wilderness_menu_item("seasonal", str(initiative["name"]), "Undertake this season's major regional initiative."))
             choice = self.vertical_panel_select(f"Regional Project: {profile['name']}", items, 52, 25, return_back=True)
-            if not choice:
+            if not choice or choice.value == MENU_BACK:
                 return
             if choice.value == "status":
                 self.vertical_panel_view(str(profile["name"]), self.wilderness_region_project_lines(cx, cy), 52, 25)

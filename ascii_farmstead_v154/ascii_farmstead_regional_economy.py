@@ -272,6 +272,7 @@ class RegionalEconomyMixin:
             community["route_deliveries"] = int(community.get("route_deliveries", 0)) + 1
             if int(community["route_deliveries"]) % 3 == 0:
                 community["development_points"] = int(community.get("development_points", 0)) + 1
+                self.refresh_procedural_town_growth(destination)
             events = community.setdefault("event_log", [])
             events.append(
                 f"{getattr(self.state, 'date_label', '')}: {route.get('caravan_name')} delivered {quantity} {good}."
@@ -558,6 +559,7 @@ class RegionalEconomyMixin:
             if destination and int(counters[role]) % 4 == 0:
                 community = self.ensure_procedural_town_community(destination)
                 community["development_points"] = int(community.get("development_points", 0)) + 1
+                self.refresh_procedural_town_growth(destination)
             activity = "negotiated orders and kept both terminal markets informed"
         self.travel_follower_record(follower_id)["activity"] = activity
         return True

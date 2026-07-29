@@ -9,6 +9,7 @@ until they can be moved in a dedicated migration pass.
 """
 
 from ascii_farmstead_support import C
+from ascii_farmstead_game_tables import GAME_TABLE_DATA
 
 
 WIDTH = 54
@@ -6876,6 +6877,18 @@ INFRASTRUCTURE_DATA = {
         "footprint": [2, 1],
     },
 }
+
+for _game_id, _table in GAME_TABLE_DATA.items():
+    INFRASTRUCTURE_DATA[str(_table["name"])] = {
+        "symbol": str(_table["glyph"]),
+        "price": int(_table["price"]),
+        "description": str(_table["description"]),
+        "radius": None,
+        "category": "furniture",
+        "place_locations": ["HouseInterior"],
+        "footprint": [3, 1],
+        "game_id": str(_game_id),
+    }
 
 AUTOMATION_OBJECT_DATA = {
     name: data

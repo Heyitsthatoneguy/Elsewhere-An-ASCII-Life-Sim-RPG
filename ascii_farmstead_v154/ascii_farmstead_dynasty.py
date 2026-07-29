@@ -1135,6 +1135,7 @@ class DynastyMixin:
             community["development_points"] = int(
                 community.get("development_points", 0)
             ) + years * 2
+            self.refresh_procedural_town_growth(plan)
             self.advance_procedural_town_life(plan)
             politics = self.ensure_procedural_town_politics(plan)
             politics["treasury"] = int(
@@ -1299,6 +1300,7 @@ class DynastyMixin:
             list(getattr(self.state, "dynasty_history", []) or []) + [dict(record)]
         )[-40:]
         self.state.player_run_ended = True
+        self.state.player_run_outcome = "death"
         self.state.combat_current_hp = 0
         if hasattr(self, "save"):
             self.save(quiet=True)
@@ -1343,6 +1345,7 @@ class DynastyMixin:
         )
         if succeeded:
             self.state.player_run_ended = False
+            self.state.player_run_outcome = ""
             return True
         return self.finalize_permadeath_run(record, interactive=interactive)
 

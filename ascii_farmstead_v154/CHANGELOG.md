@@ -1,5 +1,74 @@
 # Changelog
 
+## 0.9.0-beta.5
+
+- Added persistent randomized equipment with Common through Legendary rarity,
+  item levels, slot-specific traits, combat ranges, bounded values, and
+  source-stable generation. Generated gear can appear in combat rewards,
+  dungeon chests, wilderness caches, and ruins without rerolling when a
+  persistent source is revisited.
+- Added the Blacksmith Gear Workshop. Authored and generated equipment can be
+  enhanced, generated traits can be reforged, and unwanted unequipped finds can
+  be salvaged for workshop materials. Loadouts, combat stats, inspection,
+  shipping, storage, and saves all preserve enhancement state.
+- Added optional Finite Challenge runs with one randomized, quantifiable goal
+  in each of five domains: Economy, Exploration, Mastery, Community, and
+  Legacy. Completing all five permanently ends the run with a statistical
+  victory screen, score, playthrough summary, and a viewable `VICTORY` save.
+- Added archaeology and paleontology excavation activities with physical finds,
+  progression, rewards, and world integration.
+- Added eight complete card and board games: Blackjack, Checkers, Chess,
+  Mancala, Texas Hold'em, Hearts, Solitaire, and the Royal Game of Ur. Games
+  include readable card/board presentation, keyboard-focused controls,
+  opponents, rules, outcomes, and wagers where appropriate.
+- Blackjack now uses a persistent standard 52-card deck rather than rebuilding
+  the draw pool for every hand, making the remaining deck meaningful across a
+  session.
+- Distributed games through distinct physical tables and boards instead of one
+  universal inn menu. Mae's Inn, generated inns, roadside venues, rotating
+  furniture stock, and rare recovered loot now expose varied selections.
+  Discovered tables can be owned, placed, moved, stored, and used in residences.
+- Added autonomous resident adventures for suitable authored and generated
+  adults. Residents can gain vocation XP and levels, improve role-appropriate
+  equipment, travel between real settlements, react to danger, suffer bounded
+  injuries, recover, remember outcomes, and discuss their field work.
+- Added unbounded connected district growth for mature generated towns.
+  Residential, Market, Artisan, Civic, and Garden districts expand into valid
+  neighboring chunks while retaining one shared settlement identity,
+  population, services, schedules, businesses, and road network.
+- Added player-directed district expansion to towns founded at reclaimed
+  strongholds. New districts support cursor-placed roads, buildings, and
+  decorations, spatially correct interiors, shared residents and jobs, and
+  persistent construction across the complete settlement footprint.
+- Added municipal maturation to founded towns. District purpose now affects
+  demand, favored construction costs, housing and service capacity, physical
+  development, weekly treasury income, and Surveyed through Thriving maturity
+  without taking building placement away from the player.
+- Reworked authored and procedural public interiors around building-specific
+  architecture, clear center lanes, reachable service points, useful rooms,
+  sensible counters, and structurally varied annexes. Public connections are
+  open floor or archways; visible closed doors are reserved for private and
+  secured rooms.
+- Expanded semantic containers throughout town buildings, procedural
+  businesses, residences, wilderness sites, and dungeons. New shelves, crates,
+  archives, urns, cabinets, supplies, valuables, consumables, and utility finds
+  use persistent location-aware contents without turning ordinary decorations
+  into false containers.
+- Peaceful NPCs no longer block the player in doorways, counters, roads, or
+  other narrow spaces. They remain interactable when sharing a tile, while
+  enemies retain collision.
+- Fixed Back/Cancel handling across wilderness landmark, structure, dock,
+  settlement, traveler, expedition, event, field-site, and regional-project
+  menus so nested menus reliably return to play instead of immediately
+  reopening.
+- Fixed late wilderness road/exit migration occasionally erasing the stone
+  signature around a real dungeon marker and leaving a visible but unusable
+  entrance. Rare ocean-province dungeons now generate a usable stone landing
+  instead of an isolated `X` in open water.
+- Improved generated-town and player-founded-settlement performance with
+  bounded resident navigation, cached occupancy work, district-local actor
+  updates, and runtime migration of older generated layouts.
+
 ## 0.9.0-beta.4
 
 - Added persistent world abilities: learned built-in and custom skills can use

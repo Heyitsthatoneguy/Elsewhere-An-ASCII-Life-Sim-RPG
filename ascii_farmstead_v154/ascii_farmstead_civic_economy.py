@@ -1624,6 +1624,7 @@ class CivicEconomyMixin:
             community["development_points"] = int(
                 community.get("development_points", 0)
             ) + 3
+            self.refresh_procedural_town_growth(plan)
         self.autosave_with_message(
             f"Completed {BUSINESS_UPGRADE_NAMES[level]} at {business.get('name')}."
         )
@@ -1999,6 +2000,7 @@ class CivicEconomyMixin:
                 if str(contract.get("type", "")) == "public_works"
                 else 2
             )
+            self.refresh_procedural_town_growth(plan)
         self.autosave_with_message(
             f"Completed {contract.get('title')}. Earned {reward}g."
         )
@@ -2549,6 +2551,7 @@ class CivicEconomyMixin:
             community["development_points"] = int(
                 community.get("development_points", 0)
             ) + 3
+            self.refresh_procedural_town_growth(plan)
         self.autosave_with_message(
             f"The regional council approved {project['name']} with {support}% support."
         )
@@ -3953,6 +3956,8 @@ class CivicEconomyMixin:
                 politics["treasury"] = int(
                     politics.get("treasury", 0)
                 ) + 8 * elapsed
+            if plan:
+                self.refresh_procedural_town_growth(plan)
         for route in self.state.player_trade_routes.values():
             if not route.get("active"):
                 continue
@@ -4388,6 +4393,7 @@ class CivicEconomyMixin:
         community["development_points"] = int(
             community.get("development_points", 0)
         ) + development
+        self.refresh_procedural_town_growth(plan)
         self.adjust_procedural_town_reputation(
             reputation,
             f"Responded to residents: {petition.get('title')}",
@@ -4493,6 +4499,7 @@ class CivicEconomyMixin:
         community["development_points"] = int(
             community.get("development_points", 0)
         ) + int(initiative["development"])
+        self.refresh_procedural_town_growth(plan)
         self.adjust_procedural_town_reputation(
             6,
             f"Completed civic initiative: {initiative['name']}",
@@ -4677,6 +4684,7 @@ class CivicEconomyMixin:
             community["development_points"] = int(
                 community.get("development_points", 0)
             ) + 6
+            self.refresh_procedural_town_growth(plan)
         if winner == "player":
             self.state.civic_profile["elections_won"] += 1
             office_key = f"{self.civic_town_key(plan)}:{self.state.year}:Mayor"

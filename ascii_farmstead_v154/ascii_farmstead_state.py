@@ -47,6 +47,7 @@ from ascii_farmstead_data import (
     AUTHORED_TOWN_RESIDENCE_DATA,
     VALID_PLAYER_SEXES,
 )
+from ascii_farmstead_game_tables import normalized_game_ids
 from ascii_farmstead_helpers import (
     days_in_month,
     format_date,
@@ -54,6 +55,7 @@ from ascii_farmstead_helpers import (
     season_for_month,
     weekday_for_date,
 )
+from ascii_farmstead_npc_adventures import sanitize_npc_progression_records
 from ascii_farmstead_combat import (
     COMBAT_ACCESSORY_DATA,
     COMBAT_ARMOR_DATA,
@@ -70,6 +72,16 @@ from ascii_farmstead_combat import (
     DEFAULT_COMBAT_SKILL_POINTS,
     DEFAULT_COMBAT_WEAPON,
     translated_battle_loot,
+)
+from ascii_farmstead_random_loot import (
+    combat_equipment_data_for,
+    sanitize_equipment_workshop,
+    sanitize_generated_equipment_store,
+)
+from ascii_farmstead_victory import (
+    VICTORY_MODE_OPEN,
+    VICTORY_MODES,
+    sanitize_victory_contract,
 )
 from ascii_farmstead_town_builder import sanitize_wilderness_settlements
 from ascii_farmstead_npc_builder import sanitize_procedural_settlement_populations
@@ -523,6 +535,10 @@ class GameState:
     aging_and_death_enabled: bool = True
     mortality_mode: str = ""
     player_run_ended: bool = False
+    player_run_outcome: str = ""
+    victory_mode: str = VICTORY_MODE_OPEN
+    victory_contract: Dict[str, object] = None
+    victory_record: Dict[str, object] = None
     player_death_record: Dict[str, object] = None
     mortality_history: List[Dict[str, object]] = None
     player_frozen_age: int = 0
@@ -669,6 +685,26 @@ class GameState:
     museum_donation_counts: Dict[str, int] = None
     museum_reward_claims: List[str] = None
     museum_exhibit_unlocks: List[str] = None
+    excavation_sites: Dict[str, Dict[str, object]] = None
+    excavation_discoveries: List[Dict[str, object]] = None
+    excavation_exp: int = 0
+    archaeology_finds: int = 0
+    paleontology_finds: int = 0
+    tavern_blackjack_stats: Dict[str, int] = None
+    tavern_checkers_stats: Dict[str, int] = None
+    tavern_checkers_match: Dict[str, object] = None
+    tavern_chess_stats: Dict[str, int] = None
+    tavern_chess_match: Dict[str, object] = None
+    tavern_mancala_stats: Dict[str, int] = None
+    tavern_mancala_match: Dict[str, object] = None
+    tavern_holdem_stats: Dict[str, int] = None
+    tavern_hearts_stats: Dict[str, int] = None
+    tavern_hearts_match: Dict[str, object] = None
+    tavern_solitaire_stats: Dict[str, int] = None
+    tavern_solitaire_match: Dict[str, object] = None
+    tavern_ur_stats: Dict[str, int] = None
+    tavern_ur_match: Dict[str, object] = None
+    tavern_game_discoveries: List[str] = None
     town_development_stage: int = 0
     unlocked_town_buildings: List[str] = None
     completed_town_project_ids: List[str] = None
@@ -735,6 +771,8 @@ class GameState:
     combat_focus: int = DEFAULT_COMBAT_MAX_FOCUS
     combat_max_focus: int = DEFAULT_COMBAT_MAX_FOCUS
     combat_skill_points: int = DEFAULT_COMBAT_SKILL_POINTS
+    generated_equipment: Dict[str, Dict[str, object]] = None
+    equipment_workshop: Dict[str, Dict[str, int]] = None
     equipped_weapon: str = DEFAULT_COMBAT_WEAPON
     equipped_armor: str = DEFAULT_COMBAT_ARMOR
     equipped_accessory: str = DEFAULT_COMBAT_ACCESSORY
@@ -1026,6 +1064,10 @@ class GameState:
                 return_day = max(0, int(record.get("return_day_number", 0)))
                 chunk_x, chunk_y = int(record.get("chunk_x", 0)), int(record.get("chunk_y", 0))
                 depart_day = max(0, int(record.get("depart_day_number", 0) or 0))
+                origin_chunk_x = int(record.get("origin_chunk_x", 0) or 0)
+                origin_chunk_y = int(record.get("origin_chunk_y", 0) or 0)
+                danger = max(0, min(100, int(record.get("danger", 0) or 0)))
+                xp_awarded = max(0, min(9999, int(record.get("xp_awarded", 0) or 0)))
             except Exception:
                 continue
             resident_trips[str(npc_id)[:80]] = {
@@ -1039,6 +1081,17 @@ class GameState:
                 "expected_return": str(record.get("expected_return", ""))[:80],
                 "purpose": str(record.get("purpose", "regional errand"))[:160],
                 "route_condition": str(record.get("route_condition", "Open"))[:40],
+                "origin_chunk_x": origin_chunk_x,
+                "origin_chunk_y": origin_chunk_y,
+                "origin_name": str(record.get("origin_name", "Elsewhere"))[:80],
+                "resident_name": str(record.get("resident_name", ""))[:80],
+                "resident_role": str(record.get("resident_role", ""))[:50],
+                "trip_kind": str(record.get("trip_kind", "regional_errand"))[:40],
+                "danger": danger,
+                "generated_resident": bool(record.get("generated_resident", False)),
+                "resolved": bool(record.get("resolved", False)),
+                "outcome": str(record.get("outcome", ""))[:240],
+                "xp_awarded": xp_awarded,
             }
         self.regional_town_life = {
             "day_key": str(raw_life.get("day_key", ""))[:32],
@@ -1058,6 +1111,18 @@ class GameState:
             "npc_social_links": social_links,
             "journeys": journeys,
             "resident_trips": resident_trips,
+            "npc_progression": sanitize_npc_progression_records(
+                raw_life.get("npc_progression", {})
+            ),
+            "npc_adventure_checks": {
+                str(key)[:80]: max(-1, min(9999999, int(value)))
+                for key, value in (
+                    raw_life.get("npc_adventure_checks", {})
+                    if isinstance(raw_life.get("npc_adventure_checks", {}), dict)
+                    else {}
+                ).items()
+                if str(value).lstrip("-").isdigit()
+            },
             "event_log": [str(row)[:180] for row in (raw_life.get("event_log", []) if isinstance(raw_life.get("event_log", []), list) else [])][-24:],
         }
         self.dating_npc_ids = clean_string_list(self.dating_npc_ids)
@@ -1438,6 +1503,24 @@ class GameState:
             )
         self.aging_and_death_enabled = self.mortality_mode != "Immortal"
         self.player_run_ended = bool(self.player_run_ended)
+        self.player_run_outcome = str(self.player_run_outcome or "").lower()
+        if self.player_run_outcome not in {"", "death", "victory"}:
+            self.player_run_outcome = ""
+        self.victory_mode = str(self.victory_mode or VICTORY_MODE_OPEN)
+        if self.victory_mode not in VICTORY_MODES:
+            self.victory_mode = VICTORY_MODE_OPEN
+        self.victory_contract = sanitize_victory_contract(self.victory_contract)
+        if self.victory_mode == VICTORY_MODE_OPEN:
+            self.victory_contract = {}
+        elif not self.victory_contract:
+            # Never strand a damaged save in a finite mode that has no valid
+            # contract to complete. Valid contracts always contain one unique
+            # objective from each of the five challenge domains.
+            self.victory_mode = VICTORY_MODE_OPEN
+        if not isinstance(self.victory_record, dict):
+            self.victory_record = {}
+        if self.player_run_outcome == "victory" and not self.victory_record:
+            self.player_run_outcome = ""
         if not isinstance(self.player_death_record, dict):
             self.player_death_record = {}
         if not isinstance(self.mortality_history, list):
@@ -1611,6 +1694,40 @@ class GameState:
             self.museum_reward_claims = []
         if self.museum_exhibit_unlocks is None:
             self.museum_exhibit_unlocks = []
+        if self.excavation_sites is None:
+            self.excavation_sites = {}
+        if self.excavation_discoveries is None:
+            self.excavation_discoveries = []
+        if self.tavern_blackjack_stats is None:
+            self.tavern_blackjack_stats = {}
+        if self.tavern_checkers_stats is None:
+            self.tavern_checkers_stats = {}
+        if self.tavern_checkers_match is None:
+            self.tavern_checkers_match = {}
+        if self.tavern_chess_stats is None:
+            self.tavern_chess_stats = {}
+        if self.tavern_chess_match is None:
+            self.tavern_chess_match = {}
+        if self.tavern_mancala_stats is None:
+            self.tavern_mancala_stats = {}
+        if self.tavern_mancala_match is None:
+            self.tavern_mancala_match = {}
+        if self.tavern_holdem_stats is None:
+            self.tavern_holdem_stats = {}
+        if self.tavern_hearts_stats is None:
+            self.tavern_hearts_stats = {}
+        if self.tavern_hearts_match is None:
+            self.tavern_hearts_match = {}
+        if self.tavern_solitaire_stats is None:
+            self.tavern_solitaire_stats = {}
+        if self.tavern_solitaire_match is None:
+            self.tavern_solitaire_match = {}
+        if self.tavern_ur_stats is None:
+            self.tavern_ur_stats = {}
+        if self.tavern_ur_match is None:
+            self.tavern_ur_match = {}
+        if self.tavern_game_discoveries is None:
+            self.tavern_game_discoveries = []
         self.town_development_stage = normalize_town_development_stage(self.town_development_stage)
         self.unlocked_town_buildings = normalize_unlocked_town_buildings(self.unlocked_town_buildings, self.town_development_stage)
         if self.completed_town_project_ids is None:
@@ -1776,6 +1893,131 @@ class GameState:
         self.museum_donation_counts = cleaned_museum_counts
         self.museum_reward_claims = sorted({value for value in clean_string_list(self.museum_reward_claims) if value.strip()})
         self.museum_exhibit_unlocks = sorted({value for value in clean_string_list(self.museum_exhibit_unlocks) if value.strip()})
+        if not isinstance(self.excavation_sites, dict):
+            self.excavation_sites = {}
+        else:
+            self.excavation_sites = {
+                str(site_id): record
+                for site_id, record in self.excavation_sites.items()
+                if str(site_id).strip() and isinstance(record, dict)
+            }
+        if not isinstance(self.excavation_discoveries, list):
+            self.excavation_discoveries = []
+        else:
+            cleaned_discoveries: List[Dict[str, object]] = []
+            for record in self.excavation_discoveries[-200:]:
+                if not isinstance(record, dict):
+                    continue
+                item_name = str(record.get("item", "") or "").strip()
+                discipline = str(record.get("discipline", "") or "").strip()
+                if not item_name or discipline not in {"archaeology", "paleontology"}:
+                    continue
+                try:
+                    condition = max(0, min(100, int(record.get("condition", 0) or 0)))
+                except (TypeError, ValueError):
+                    condition = 0
+                clean_record = dict(record)
+                clean_record["item"] = item_name
+                clean_record["discipline"] = discipline
+                clean_record["condition"] = condition
+                cleaned_discoveries.append(clean_record)
+            self.excavation_discoveries = cleaned_discoveries
+        for excavation_counter in ("excavation_exp", "archaeology_finds", "paleontology_finds"):
+            try:
+                setattr(self, excavation_counter, max(0, int(getattr(self, excavation_counter, 0) or 0)))
+            except (TypeError, ValueError):
+                setattr(self, excavation_counter, 0)
+        if not isinstance(self.tavern_blackjack_stats, dict):
+            self.tavern_blackjack_stats = {}
+        else:
+            cleaned_blackjack_stats: Dict[str, int] = {}
+            for key, value in self.tavern_blackjack_stats.items():
+                clean_key = str(key or "").strip()
+                if not clean_key:
+                    continue
+                try:
+                    clean_value = int(value or 0)
+                except (TypeError, ValueError):
+                    continue
+                cleaned_blackjack_stats[clean_key] = (
+                    clean_value if clean_key == "net_winnings" else max(0, clean_value)
+                )
+            self.tavern_blackjack_stats = cleaned_blackjack_stats
+        if not isinstance(self.tavern_checkers_stats, dict):
+            self.tavern_checkers_stats = {}
+        else:
+            cleaned_checkers_stats: Dict[str, int] = {}
+            for key, value in self.tavern_checkers_stats.items():
+                clean_key = str(key or "").strip()
+                if not clean_key:
+                    continue
+                try:
+                    cleaned_checkers_stats[clean_key] = max(0, int(value or 0))
+                except (TypeError, ValueError):
+                    continue
+            self.tavern_checkers_stats = cleaned_checkers_stats
+        if not isinstance(self.tavern_checkers_match, dict):
+            self.tavern_checkers_match = {}
+        if not isinstance(self.tavern_chess_stats, dict):
+            self.tavern_chess_stats = {}
+        else:
+            cleaned_chess_stats: Dict[str, int] = {}
+            for key, value in self.tavern_chess_stats.items():
+                clean_key = str(key or "").strip()
+                if not clean_key:
+                    continue
+                try:
+                    cleaned_chess_stats[clean_key] = max(0, int(value or 0))
+                except (TypeError, ValueError):
+                    continue
+            self.tavern_chess_stats = cleaned_chess_stats
+        if not isinstance(self.tavern_chess_match, dict):
+            self.tavern_chess_match = {}
+        if not isinstance(self.tavern_mancala_stats, dict):
+            self.tavern_mancala_stats = {}
+        else:
+            cleaned_mancala_stats: Dict[str, int] = {}
+            for key, value in self.tavern_mancala_stats.items():
+                clean_key = str(key or "").strip()
+                if not clean_key:
+                    continue
+                try:
+                    clean_value = int(value or 0)
+                except (TypeError, ValueError):
+                    continue
+                cleaned_mancala_stats[clean_key] = (
+                    clean_value if clean_key == "net_winnings" else max(0, clean_value)
+                )
+            self.tavern_mancala_stats = cleaned_mancala_stats
+        if not isinstance(self.tavern_mancala_match, dict):
+            self.tavern_mancala_match = {}
+        for stat_field, signed_keys in (
+            ("tavern_holdem_stats", {"net_winnings"}),
+            ("tavern_hearts_stats", set()),
+            ("tavern_solitaire_stats", set()),
+            ("tavern_ur_stats", {"net_winnings"}),
+        ):
+            raw_stats = getattr(self, stat_field, None)
+            if not isinstance(raw_stats, dict):
+                setattr(self, stat_field, {})
+                continue
+            cleaned_stats: Dict[str, int] = {}
+            for key, value in raw_stats.items():
+                clean_key = str(key or "").strip()
+                if not clean_key:
+                    continue
+                try:
+                    clean_value = int(value or 0)
+                except (TypeError, ValueError):
+                    continue
+                cleaned_stats[clean_key] = clean_value if clean_key in signed_keys else max(0, clean_value)
+            setattr(self, stat_field, cleaned_stats)
+        for match_field in ("tavern_hearts_match", "tavern_solitaire_match", "tavern_ur_match"):
+            if not isinstance(getattr(self, match_field, None), dict):
+                setattr(self, match_field, {})
+        self.tavern_game_discoveries = list(
+            normalized_game_ids(clean_string_list(self.tavern_game_discoveries))
+        )
         self.completed_town_project_ids = clean_string_list(self.completed_town_project_ids)
         self.completed_town_restoration_project_ids = [
             value
@@ -2183,18 +2425,20 @@ class GameState:
             setattr(self, attr, value)
         self.combat_current_hp = max(0, int(self.combat_current_hp))
         self.combat_focus = max(0, int(self.combat_focus))
+        self.generated_equipment = sanitize_generated_equipment_store(self.generated_equipment)
+        self.equipment_workshop = sanitize_equipment_workshop(self.equipment_workshop)
         self.equipped_weapon = str(self.equipped_weapon or DEFAULT_COMBAT_WEAPON)
-        if self.equipped_weapon not in COMBAT_WEAPON_DATA:
+        if not combat_equipment_data_for(self, "weapon", self.equipped_weapon, COMBAT_WEAPON_DATA):
             self.equipped_weapon = DEFAULT_COMBAT_WEAPON
         self.equipped_armor = str(self.equipped_armor or DEFAULT_COMBAT_ARMOR)
-        if self.equipped_armor not in COMBAT_ARMOR_DATA:
+        if not combat_equipment_data_for(self, "armor", self.equipped_armor, COMBAT_ARMOR_DATA):
             self.equipped_armor = DEFAULT_COMBAT_ARMOR
         self.equipped_accessory = str(self.equipped_accessory or DEFAULT_COMBAT_ACCESSORY)
-        if self.equipped_accessory not in COMBAT_ACCESSORY_DATA:
+        if not combat_equipment_data_for(self, "accessory", self.equipped_accessory, COMBAT_ACCESSORY_DATA):
             self.equipped_accessory = DEFAULT_COMBAT_ACCESSORY
-        weapon = COMBAT_WEAPON_DATA.get(self.equipped_weapon, {})
-        armor = COMBAT_ARMOR_DATA.get(self.equipped_armor, {})
-        accessory = COMBAT_ACCESSORY_DATA.get(self.equipped_accessory, {})
+        weapon = combat_equipment_data_for(self, "weapon", self.equipped_weapon, COMBAT_WEAPON_DATA) or {}
+        armor = combat_equipment_data_for(self, "armor", self.equipped_armor, COMBAT_ARMOR_DATA) or {}
+        accessory = combat_equipment_data_for(self, "accessory", self.equipped_accessory, COMBAT_ACCESSORY_DATA) or {}
         player_progress = self.combat_party_progress.get("player", {}) if isinstance(self.combat_party_progress, dict) else {}
         if not isinstance(player_progress, dict):
             player_progress = {}

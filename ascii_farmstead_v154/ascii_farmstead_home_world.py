@@ -196,6 +196,36 @@ class SeamlessHomeWorldMixin:
         world_x, world_y = self.home_world_current_world_position(x, y)
         return (world_x, world_y) == HOME_MINE_DOOR_WORLD
 
+    def home_world_open_perimeter_at(
+        self, kind: str, source_x: int, source_y: int
+    ) -> bool:
+        """Identify obsolete authored-map edge walls removed by the seamless world."""
+        sx, sy = int(source_x), int(source_y)
+        if kind == "town":
+            height = len(self.town_map)
+            width = len(self.town_map[sy]) if 0 <= sy < height else 0
+            return bool(
+                width
+                and (sx in {0, width - 1} or sy in {0, height - 1})
+                and self.town_map[sy][sx] == "#"
+            )
+        if kind == "farm":
+            height = len(self.base_map)
+            width = len(self.base_map[sy]) if 0 <= sy < height else 0
+            return bool(
+                width
+                and (sx in {0, width - 1} or sy in {0, height - 1})
+                and self.base_map[sy][sx] == "#"
+            )
+        return False
+
+    def home_world_natural_underlay_tile(self, world_x: int, world_y: int) -> str:
+        """Return deterministic wilderness terrain beneath an obsolete edge wall."""
+        wx, wy = int(world_x), int(world_y)
+        if self.wilderness_world_water_tile(wx, wy):
+            return "~"
+        return self.wilderness_world_biome_tile(wx, wy)
+
     def home_world_chunk_is_authored(self, chunk_x: int, chunk_y: int) -> bool:
         chunk_left = int(chunk_x) * HOME_CHUNK_WIDTH
         chunk_top = int(chunk_y) * HOME_CHUNK_HEIGHT
@@ -264,18 +294,15 @@ class SeamlessHomeWorldMixin:
         if not grid or not self.home_world_chunk_is_authored(chunk_x, chunk_y):
             return
 
-        # Town perimeter cells are transparent unless an actual street exits
-        # there. This removes the old rectangular hard border while preserving
-        # every building, road, canal, park, and civic feature at full scale.
+        # Replace obsolete rectangular map-edge walls with the natural terrain
+        # beneath them. This is explicit rather than transparent so old saved
+        # chunks lose the wall too.
         for source_y, row in enumerate(self.town_map):
             for source_x, raw_tile in enumerate(row):
                 tile = str(raw_tile)[:1]
-                if tile == "#" and (
-                    source_x in {0, len(row) - 1}
-                    or source_y in {0, len(self.town_map) - 1}
-                ):
-                    continue
                 world_x, world_y = self.home_world_world_for_town_position(source_x, source_y)
+                if self.home_world_open_perimeter_at("town", source_x, source_y):
+                    tile = self.home_world_natural_underlay_tile(world_x, world_y)
                 self._stamp_home_world_tile(grid, chunk_x, chunk_y, world_x, world_y, tile)
 
         if include_farm:
@@ -287,6 +314,8 @@ class SeamlessHomeWorldMixin:
                     if source_y == 0 and 25 <= source_x <= 29:
                         tile = ":"
                     world_x, world_y = self.home_world_world_for_farm_position(source_x, source_y)
+                    if self.home_world_open_perimeter_at("farm", source_x, source_y):
+                        tile = self.home_world_natural_underlay_tile(world_x, world_y)
                     self._stamp_home_world_tile(grid, chunk_x, chunk_y, world_x, world_y, tile)
 
         # A broad, uncluttered ravine road crosses only the physical gap between

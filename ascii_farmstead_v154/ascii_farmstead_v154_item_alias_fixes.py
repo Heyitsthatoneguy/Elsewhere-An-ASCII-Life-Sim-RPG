@@ -169,6 +169,26 @@ from ascii_farmstead_combat import (
     translated_battle_loot,
     weighted_mine_enemy_name,
 )
+from ascii_farmstead_random_loot import (
+    AFFIX_BONUS_BY_LABEL,
+    WORKSHOP_SALVAGE_ITEM,
+    add_random_reward_items,
+    apply_equipment_enhancement,
+    can_afford_workshop_cost,
+    combat_equipment_data_for,
+    enhance_equipment,
+    equipment_enhancement_cap,
+    equipment_enhancement_cost,
+    equipment_enhancement_level,
+    equipped_inventory_reserve,
+    equipment_reforge_cost,
+    generated_equipment_record,
+    generated_equipment_salvage_yield,
+    preview_reforge_affix,
+    reforge_generated_equipment,
+    salvage_generated_equipment,
+    workshop_cost_text,
+)
 from ascii_farmstead_ui import (
     MenuItem,
     compact_menu_select,
@@ -196,16 +216,32 @@ from ascii_farmstead_containers import ContainerSystemMixin
 from ascii_farmstead_home_world import SeamlessHomeWorldMixin
 from ascii_farmstead_saves import SaveLoadMixin
 from ascii_farmstead_npcs import NpcMixin
+from ascii_farmstead_npc_adventures import NpcAdventureMixin
 from ascii_farmstead_npc_families import NpcFamilyLifeMixin
 from ascii_farmstead_family_world import FamilyWorldMixin
 from ascii_farmstead_building import BuildingMixin
 from ascii_farmstead_actors import ActorNavigationMixin
+from ascii_farmstead_excavation import EXCAVATION_FIND_DATA, ExcavationMixin
+from ascii_farmstead_holdem import HoldemMixin
+from ascii_farmstead_hearts import HeartsMixin
+from ascii_farmstead_solitaire import SolitaireMixin
+from ascii_farmstead_ur import UrMixin
+from ascii_farmstead_game_tables import (
+    GAME_TABLE_BY_FURNITURE,
+    GAME_TABLE_DATA,
+    rotating_game_furniture,
+)
+from ascii_farmstead_mancala import MancalaMixin
+from ascii_farmstead_chess import ChessMixin
+from ascii_farmstead_checkers import CheckersMixin
+from ascii_farmstead_tavern_games import TavernGamesMixin
 from ascii_farmstead_landmarks import WildernessLandmarkMixin
 from ascii_farmstead_wilderness import FIELD_SITE_SYMBOL, WILDERNESS_DOCK_SYMBOL, WILDERNESS_EXCURSION_SYMBOL, WILDERNESS_FISHING_SETTLEMENT_SYMBOL, WILDERNESS_LANDSCAPE_SYMBOL, WILDERNESS_OUTPOST_SYMBOL, WILDERNESS_REFUGE_SYMBOL, WILDERNESS_STAFFED_SITE_SYMBOL, WILDERNESS_STRUCTURE_SYMBOL, WildernessRevampMixin
 from ascii_farmstead_town_builder import (
     SETTLEMENT_BUILDING_CATALOG,
     SETTLEMENT_PHASES,
     TownBuilderMixin,
+    parse_settlement_coord,
     settlement_phase_requirements,
 )
 from ascii_farmstead_npc_builder import (
@@ -225,6 +261,13 @@ from ascii_farmstead_procedural_towns import (
 from ascii_farmstead_civic_economy import CivicEconomyMixin
 from ascii_farmstead_regional_economy import RegionalEconomyMixin
 from ascii_farmstead_dynasty import DynastyMixin
+from ascii_farmstead_victory import (
+    VICTORY_MODE_DESCRIPTIONS,
+    VICTORY_MODE_FINITE,
+    VICTORY_MODE_OPEN,
+    VICTORY_MODES,
+    VictoryRunMixin,
+)
 from ascii_farmstead_custom_menus import CustomContentMenuMixin
 from ascii_farmstead_dungeon_combat import DungeonRoguelikeCombatMixin
 from ascii_farmstead_world_magic import WorldMagicMixin
@@ -265,6 +308,43 @@ RECLAIMED_STRONGHOLD_BUILDING_COSTS: Dict[str, int] = {
     "market_stall": 450,
     "well": 350,
     "park": 500,
+}
+
+FOUNDED_TOWN_DISTRICT_KINDS = (
+    "Residential",
+    "Market",
+    "Artisan",
+    "Civic",
+    "Garden",
+)
+FOUNDED_TOWN_DISTRICT_BASE_COST = 3000
+FOUNDED_TOWN_DISTRICT_COST_STEP = 900
+FOUNDED_TOWN_DISTRICT_PROFILES: Dict[str, Dict[str, object]] = {
+    "Residential": {
+        "preferred": ("home", "well", "park", "clinic", "library"),
+        "targets": (("home", 2), ("well", 1), ("park", 1)),
+        "benefit": "More household capacity and stronger neighborhood stability.",
+    },
+    "Market": {
+        "preferred": ("general_store", "market_stall", "inn", "sheriff_office"),
+        "targets": (("general_store", 1), ("market_stall", 2), ("inn", 1)),
+        "benefit": "Stronger commerce, visitor traffic, and municipal revenue.",
+    },
+    "Artisan": {
+        "preferred": ("workshop", "carpenter", "market_stall", "home"),
+        "targets": (("workshop", 1), ("carpenter", 1), ("home", 1)),
+        "benefit": "More skilled employment and better production services.",
+    },
+    "Civic": {
+        "preferred": ("town_hall", "clinic", "sheriff_office", "library", "park"),
+        "targets": (("town_hall", 1), ("clinic", 1), ("sheriff_office", 1)),
+        "benefit": "Better public services and more efficient tax collection.",
+    },
+    "Garden": {
+        "preferred": ("park", "well", "home", "inn"),
+        "targets": (("park", 2), ("well", 1), ("home", 1)),
+        "benefit": "Higher resident morale, food security, and public beauty.",
+    },
 }
 
 RECLAIMED_STRONGHOLD_FEATURE_CATALOG: Dict[str, Dict[str, object]] = {
@@ -557,8 +637,18 @@ class FarmGame(
     DungeonRoguelikeCombatMixin,
     ContainerSystemMixin,
     RegionalEconomyMixin,
+    HoldemMixin,
+    HeartsMixin,
+    SolitaireMixin,
+    UrMixin,
+    MancalaMixin,
+    ChessMixin,
+    CheckersMixin,
+    TavernGamesMixin,
+    ExcavationMixin,
     WildernessLandmarkMixin,
     WildernessRevampMixin,
+    VictoryRunMixin,
     DynastyMixin,
     CivicEconomyMixin,
     ProceduralTownRuntimeMixin,
@@ -569,6 +659,7 @@ class FarmGame(
     ActorNavigationMixin,
     FamilyWorldMixin,
     NpcFamilyLifeMixin,
+    NpcAdventureMixin,
     NpcMixin,
     SaveLoadMixin,
 ):
@@ -603,6 +694,15 @@ class FarmGame(
         self.ensure_container_state()
         self.ensure_civic_economy_state()
         self.ensure_world_magic_state()
+        self.ensure_excavation_state()
+        self.ensure_tavern_game_state()
+        self.ensure_checkers_state()
+        self.ensure_chess_state()
+        self.ensure_mancala_state()
+        self.ensure_holdem_state()
+        self.ensure_hearts_state()
+        self.ensure_solitaire_state()
+        self.ensure_ur_state()
         # New games should not always start with the exact same wilderness.
         # Loading a save overwrites this seed with the saved value, so existing saves remain stable.
         # Use time/os entropy rather than the global random module because make_map()
@@ -877,7 +977,7 @@ class FarmGame(
             "blacksmith": "Enter and talk to Brom for forge service.",
             "library": "Enter and talk to Tess for research.",
             "mayor_house": "Private residence; visitors may enter.",
-            "inn": "Enter and talk to Mae for meals, rooms, and gossip.",
+            "inn": "Enter and talk to Mae for meals, rooms, gossip, and organized card and board game tables.",
             "furniture_store": "Enter and use the staffed catalog counter.",
             "carpenter": "Enter and talk to Eli about buildings and upgrades.",
             "animal_store": "Enter and talk to Poppy about livestock.",
@@ -1903,7 +2003,10 @@ class FarmGame(
 
         if outcome == "victory":
             loot = self.combat_loot_for_result(result)
-            money, items = self.grant_farm_combat_loot(loot)
+            money, items = self.grant_farm_combat_loot(
+                loot, result=result, source_key=f"bounty:{bounty.get('id', species)}",
+                boss=bool(bounty.get("boss")),
+            )
             exp_gain = mine_combat_exp_for_defeated(defeated or [species], depth)
             if bounty.get("boss"):
                 exp_gain += 8
@@ -3425,7 +3528,10 @@ class FarmGame(
 
         if outcome == "victory":
             loot = self.combat_loot_for_result(result)
-            money, items = self.grant_farm_combat_loot(loot)
+            money, items = self.grant_farm_combat_loot(
+                loot, result=result, source_key=f"mine:{enemy.get('id', species)}",
+                boss=bool(enemy.get("boss")),
+            )
             floor = max(1, min(MINE_MAX_FLOOR, int(enemy.get("floor", self.state.mine_floor))))
             exp_gain = mine_combat_exp_for_defeated(defeated or [species], floor)
             _amount, level_lines = grant_combat_exp(self.state, exp_gain)
@@ -4171,6 +4277,7 @@ class FarmGame(
         *,
         door_x: int = 27,
         door_y: int = 19,
+        closed_doors: Optional[set] = None,
     ) -> List[List[str]]:
         """Create a small authored interior from real rooms and hall paths.
 
@@ -4180,6 +4287,8 @@ class FarmGame(
         """
         grid = [[" " for _ in range(WIDTH)] for _ in range(HEIGHT)]
         floor_cells: set = set()
+        interior_door_cells: set = set()
+        closed_doors = set(closed_doors or set())
 
         def mark_floor(x: int, y: int):
             if 1 <= x < WIDTH - 1 and 1 <= y < HEIGHT - 1:
@@ -4195,6 +4304,8 @@ class FarmGame(
                         grid[y][x] = "#"
                     else:
                         mark_floor(x, y)
+                        if edge and (x, y) in openings_set:
+                            interior_door_cells.add((x, y))
 
         def hall(points: List[Tuple[int, int]]):
             if len(points) < 2:
@@ -4222,22 +4333,39 @@ class FarmGame(
                     if 0 <= nx < WIDTH and 0 <= ny < HEIGHT and (nx, ny) not in floor_cells and grid[ny][nx] == " ":
                         grid[ny][nx] = "#"
         for x, y, ch in fixtures:
-            if 0 <= y < HEIGHT and 0 <= x < WIDTH and grid[y][x] in {".", ",", ":"}:
+            if (
+                0 <= y < HEIGHT
+                and 0 <= x < WIDTH
+                and (x, y) not in interior_door_cells
+                and grid[y][x] in {".", ",", ":"}
+            ):
                 grid[y][x] = ch
+        for x, y in interior_door_cells:
+            if 0 <= y < HEIGHT and 0 <= x < WIDTH and grid[y][x] not in {" ", "#", "D"}:
+                # Ordinary room openings are archways/plain floor. A visible
+                # door is reserved for deliberately private or secured rooms.
+                grid[y][x] = "_" if (x, y) in closed_doors else "."
         grid[door_y][door_x] = "D"
         grid[door_y - 1][door_x] = "."
         return grid
 
-    def make_town_counter_fixtures(self, cx: int, y: int) -> List[Tuple[int, int, str]]:
+    def make_town_counter_fixtures(
+        self,
+        cx: int,
+        y: int,
+        *,
+        half_width: int = 2,
+        stock: bool = True,
+    ) -> List[Tuple[int, int, str]]:
         """Return a complete readable counter: stock/forms, counter, clerk."""
-        return [
-            (cx - 3, y, "$"),
-            (cx - 2, y, "-"),
-            (cx - 1, y, "-"),
-            (cx, y, "&"),
-            (cx + 1, y, "-"),
-            (cx + 2, y, "-"),
+        half_width = max(1, min(4, int(half_width)))
+        fixtures = [
+            (x, y, "&" if x == cx else "-")
+            for x in range(cx - half_width, cx + half_width + 1)
         ]
+        if stock:
+            fixtures.insert(0, (cx - half_width - 1, y, "$"))
+        return fixtures
 
     def make_authored_town_residence_map(self, residence_id: str) -> List[List[str]]:
         """Build one of six deliberately different starting-town homes."""
@@ -4364,6 +4492,8 @@ class FarmGame(
             "#": {"desc": f"{room} wall", "hint": "Z/Enter: nothing"},
             " ": {"desc": f"Outside the {room.lower()} room", "hint": "Z/Enter: nothing"},
             "D": {"desc": f"{room} exit", "hint": f"Walk into door: leave {room.lower()}"},
+            "|": {"desc": f"Open room door in {room}.", "hint": "Z/Enter: close door"},
+            "_": {"desc": f"Closed room door in {room}.", "hint": "Z/Enter: open door"},
             "-": {"desc": f"{room} counter edge", "hint": "Z/Enter: nothing"},
             "B": {"desc": f"Private bed in the {room.lower()} living quarters.", "hint": "Z/Enter: inspect bedroom"},
             "u": {"desc": f"Dresser and personal storage for someone who lives above or behind the {room.lower()}.", "hint": "Z/Enter: inspect dresser"},
@@ -4426,6 +4556,9 @@ class FarmGame(
                 "p": {"desc": "Pantry shelves for meal prep and travel food.", "hint": "Z/Enter: inspect pantry"},
                 "P": {"desc": "Inn guest register listing regional arrivals, origins, rooms, and departures.", "hint": "Z/Enter: read guest register"},
                 "r": {"desc": "Worn rug in the common room.", "hint": "Z/Enter: inspect common room"},
+                "1": {"desc": "A felt blackjack table with a single-deck shoe.", "hint": "Z/Enter: play blackjack"},
+                "3": {"desc": "A four-seat card table reserved for Hearts.", "hint": "Z/Enter: play Hearts"},
+                "5": {"desc": "A checkered table with sturdy red and black pieces.", "hint": "Z/Enter: play checkers"},
             },
             "FurnitureStoreInterior": {
                 "$": {"desc": "Furniture checkout counter.", "hint": "Z/Enter: inspect furniture counter"},
@@ -4535,7 +4668,7 @@ class FarmGame(
 
     def town_interior_interactable_tiles(self) -> set:
         location = str(self.state.location)
-        base = {"D", "&", "P"}
+        base = {"D", "&", "P", "_", "|"}
         special = {
             "LibraryInterior": {"A"},
             "MayorHouseInterior": {"F"},
@@ -4544,7 +4677,28 @@ class FarmGame(
         return base | special.get(location, set())
 
     def town_interior_blocking_tiles(self) -> set:
-        return set(self.town_interior_tile_catalog()) - {".", ":", ",", "D"}
+        return set(self.town_interior_tile_catalog()) - {".", ":", ",", "D", "|"}
+
+    def use_town_room_door_action(self, x: int, y: int) -> bool:
+        if not self.on_town_interior() or not self.in_active_bounds(x, y):
+            return False
+        grid = self.active_map()
+        tile = grid[y][x]
+        if tile == "_":
+            grid[y][x] = "|"
+            self.set_message("Opened the room door.")
+            return True
+        if tile == "|":
+            if (int(self.state.player_x), int(self.state.player_y)) == (x, y):
+                self.set_message("You are standing in the doorway.")
+                return True
+            if self.town_npc_at(x, y):
+                self.set_message("Someone is standing in the doorway.")
+                return True
+            grid[y][x] = "_"
+            self.set_message("Closed the room door.")
+            return True
+        return False
 
     def make_general_store_map(self) -> List[List[str]]:
         """Create the General Store interior."""
@@ -4556,7 +4710,7 @@ class FarmGame(
                 (38, 9, 49, 18, [(38, 14)]),
             ],
             halls=[[(27, 18), (27, 12)], [(18, 15), (16, 15)], [(36, 14), (38, 14)]],
-            fixtures=self.make_town_counter_fixtures(31, 11)
+            fixtures=self.make_town_counter_fixtures(32, 11, half_width=3)
             + [(8, 11, "s"), (8, 14, "s"), (10, 14, "b"), (42, 11, "s"), (42, 13, "f"), (26, 16, "t"), (42, 17, "P")],
         )
         grid, x0, y0, w, h, door_x, door_y = self.make_town_room_shell(x0=6, w=42)
@@ -4591,7 +4745,7 @@ class FarmGame(
                 (38, 5, 50, 17, [(38, 12)]),
             ],
             halls=[[(27, 18), (27, 13)], [(18, 16), (17, 16), (17, 12)], [(36, 16), (38, 16), (38, 12)]],
-            fixtures=self.make_town_counter_fixtures(31, 12)
+            fixtures=self.make_town_counter_fixtures(31, 12, half_width=2)
             + [(9, 9, "a"), (12, 10, "t"), (12, 13, "x"), (44, 8, "f"), (44, 13, "w"), (43, 14, "q"), (47, 15, "o"), (32, 8, "P")],
         )
         grid, x0, y0, w, h, door_x, door_y = self.make_town_room_shell(x0=5, w=44)
@@ -4628,7 +4782,7 @@ class FarmGame(
                 (40, 15, 48, 18, [(42, 15)]),
             ],
             halls=[[(27, 18), (27, 12)], [(17, 15), (15, 15)], [(37, 15), (43, 15), (43, 10), (39, 10)]],
-            fixtures=self.make_town_counter_fixtures(31, 11)
+            fixtures=self.make_town_counter_fixtures(31, 11, half_width=1, stock=False)
             + [(8, 7, "l"), (8, 11, "l"), (12, 14, "l"), (43, 7, "A"), (42, 17, "P"), (25, 16, "t"), (24, 16, "c")],
         )
         grid, x0, y0, w, h, door_x, door_y = self.make_town_room_shell(x0=5, w=44)
@@ -4665,7 +4819,7 @@ class FarmGame(
                 (39, 5, 50, 16, [(39, 12)]),
             ],
             halls=[[(27, 18), (27, 13)], [(17, 16), (16, 16), (16, 12)], [(37, 16), (39, 16), (39, 12)]],
-            fixtures=self.make_town_counter_fixtures(31, 12)
+            fixtures=self.make_town_counter_fixtures(32, 12, half_width=3)
             + [
                 (8, 8, "C"),
                 (12, 12, "G"),
@@ -4714,6 +4868,7 @@ class FarmGame(
             ],
             halls=[[(27, 18), (27, 11)], [(18, 15), (17, 15), (17, 12)], [(36, 15), (38, 15), (38, 11)]],
             fixtures=[(10, 8, "B"), (13, 8, "u"), (42, 9, "d"), (43, 11, "&"), (24, 8, "F"), (31, 8, "P"), (26, 16, "t"), (25, 16, "c")],
+            closed_doors={(17, 12)},
         )
         grid, x0, y0, w, h, door_x, door_y = self.make_town_room_shell(x0=10, w=34)
         self.draw_town_room_outline(grid, 12, 3, 22, 9, [(17, 9)])
@@ -4749,8 +4904,9 @@ class FarmGame(
                 (41, 14, 50, 18, [(41, 16)]),
             ],
             halls=[[(27, 18), (27, 12)], [(16, 15), (13, 15)], [(16, 15), (13, 8)], [(38, 15), (41, 16)], [(35, 9), (39, 9)]],
-            fixtures=self.make_town_counter_fixtures(31, 11)
-            + [(44, 8, "k"), (47, 8, "p"), (8, 7, "B"), (8, 14, "B"), (44, 16, "B"), (25, 16, "t"), (24, 16, "c"), (31, 16, "t"), (32, 16, "c"), (33, 8, "P")],
+            fixtures=self.make_town_counter_fixtures(32, 11, half_width=3)
+            + [(44, 8, "k"), (47, 8, "p"), (8, 7, "B"), (8, 14, "B"), (44, 16, "B"), (25, 16, "t"), (24, 16, "c"), (31, 16, "t"), (32, 16, "c"), (33, 8, "P"), (20, 14, "1"), (34, 14, "3"), (34, 16, "5")],
+            closed_doors={(13, 8), (13, 15), (41, 16)},
         )
         grid, x0, y0, w, h, door_x, door_y = self.make_town_room_shell(x0=5, w=44)
         self.draw_town_room_outline(grid, 8, 3, 20, 10, [(20, 7), (14, 10)])
@@ -4787,7 +4943,7 @@ class FarmGame(
                 (39, 7, 49, 17, [(39, 14)]),
             ],
             halls=[[(27, 18), (27, 12)], [(18, 15), (16, 15), (16, 14)], [(36, 15), (39, 15), (39, 14)]],
-            fixtures=self.make_town_counter_fixtures(31, 11)
+            fixtures=self.make_town_counter_fixtures(31, 11, half_width=2)
             + [(9, 10, "C"), (10, 14, "m"), (12, 14, "T"), (43, 10, "L"), (43, 12, "A"), (45, 14, "!"), (32, 8, "P")],
         )
         grid, x0, y0, w, h, door_x, door_y = self.make_town_room_shell(x0=6, w=42)
@@ -4825,7 +4981,7 @@ class FarmGame(
                 (39, 6, 50, 16, [(39, 12)]),
             ],
             halls=[[(27, 18), (27, 13)], [(19, 16), (17, 16), (17, 14)], [(37, 16), (39, 16), (39, 12)]],
-            fixtures=self.make_town_counter_fixtures(31, 12)
+            fixtures=self.make_town_counter_fixtures(31, 12, half_width=2)
             + [(8, 11, "w"), (12, 14, "l"), (24, 10, "b"), (43, 9, "t"), (46, 12, "s"), (32, 9, "P")],
         )
         grid, x0, y0, w, h, door_x, door_y = self.make_town_room_shell(x0=5, w=44)
@@ -5562,7 +5718,7 @@ class FarmGame(
                 (39, 8, 50, 17, [(39, 14)]),
             ],
             halls=[[(27, 18), (27, 12)], [(18, 15), (16, 15), (16, 14)], [(36, 15), (39, 15), (39, 14)]],
-            fixtures=self.make_town_counter_fixtures(31, 11)
+            fixtures=self.make_town_counter_fixtures(31, 11, half_width=2)
             + [(9, 11, "c"), (12, 14, "h"), (43, 11, "p"), (47, 11, "m"), (46, 14, "f"), (32, 8, "P")],
         )
         grid, x0, y0, w, h, door_x, door_y = self.make_town_room_shell(x0=6, w=42)
@@ -5598,8 +5754,9 @@ class FarmGame(
                 (39, 8, 50, 17, [(39, 14)]),
             ],
             halls=[[(27, 18), (27, 12)], [(18, 15), (17, 15), (17, 14)], [(36, 15), (39, 15), (39, 14)]],
-            fixtures=self.make_town_counter_fixtures(31, 11)
+            fixtures=self.make_town_counter_fixtures(31, 11, half_width=1)
             + [(9, 10, "b"), (12, 13, "e"), (43, 11, "m"), (46, 14, "s"), (32, 8, "P")],
+            closed_doors={(17, 14)},
         )
         grid, x0, y0, w, h, door_x, door_y = self.make_town_room_shell(x0=7, w=40)
         self.draw_hline(grid, 23, 31, 6, "$")
@@ -5633,8 +5790,9 @@ class FarmGame(
                 (40, 6, 50, 18, [(40, 12), (40, 15)]),
             ],
             halls=[[(27, 18), (27, 12)], [(16, 15), (16, 12)], [(38, 15), (40, 15), (40, 12)]],
-            fixtures=self.make_town_counter_fixtures(31, 11)
+            fixtures=self.make_town_counter_fixtures(32, 11, half_width=3)
             + [(9, 9, "r"), (12, 12, "n"), (44, 9, "p"), (45, 12, "m"), (26, 16, "c"), (42, 17, "P")],
+            closed_doors={(16, 12), (40, 12)},
         )
         grid, x0, y0, w, h, door_x, door_y = self.make_town_room_shell(x0=5, w=44)
         self.draw_hline(grid, 22, 32, 6, "$")
@@ -5669,7 +5827,7 @@ class FarmGame(
                 (41, 7, 50, 16, [(41, 12)]),
             ],
             halls=[[(27, 18), (27, 12)], [(14, 15), (13, 15), (13, 12)], [(40, 15), (41, 15), (41, 12)]],
-            fixtures=self.make_town_counter_fixtures(31, 11)
+            fixtures=self.make_town_counter_fixtures(32, 11, half_width=3)
             + [(8, 10, "v"), (10, 13, "f"), (24, 9, "m"), (44, 10, "r"), (47, 13, "t"), (32, 8, "P")],
         )
         grid, x0, y0, w, h, door_x, door_y = self.make_town_room_shell(x0=4, w=46)
@@ -8483,6 +8641,10 @@ class FarmGame(
         self.place_wilderness_claim_marker(grid, chunk_x, chunk_y)
 
         self.place_wilderness_stronghold_in_chunk(grid, chunk_x, chunk_y)
+        if self.founded_town_root_context(chunk_x, chunk_y):
+            self.apply_reclaimed_stronghold_features_to_grid(
+                chunk_x, chunk_y, grid
+            )
 
         # Place cave entrances last so trail carving and exit repair cannot erase them.
         self.place_wilderness_caves_in_chunk(grid, chunk_x, chunk_y)
@@ -8799,6 +8961,10 @@ class FarmGame(
             self.place_wilderness_dungeons_in_chunk(grid, cx, cy)
             self.wilderness_maps[key] = grid
 
+        if self.founded_town_root_context(cx, cy):
+            self.apply_reclaimed_stronghold_features_to_grid(cx, cy, grid)
+            self.wilderness_maps[key] = grid
+
         if cx == self.state.wilderness_chunk_x and cy == self.state.wilderness_chunk_y:
             self.wilderness_map = self.wilderness_maps[key]
         self.state.wilderness_chunks_visited = max(int(getattr(self.state, "wilderness_chunks_visited", 1)), self.wilderness_visited_map_count())
@@ -8826,6 +8992,17 @@ class FarmGame(
         if key not in self.repaired_wilderness_chunks and not self.home_world_chunk_is_authored(cx, cy):
             self.repair_wilderness_chunk_exits(self.wilderness_map, cx, cy)
             self.repaired_wilderness_chunks.add(key)
+
+        # Exit/road migration can legitimately rewrite the stone tiles around
+        # an existing X marker. Restore the complete doorway signature after
+        # that late repair so a real dungeon never becomes a decorative,
+        # non-interactable X in an older or newly normalized chunk.
+        if (
+            not self.owned_wilderness_claim(cx, cy)
+            and not self.procedural_town_plan(cx, cy)
+            and self.wilderness_chunk_has_dungeon_site(cx, cy)
+        ):
+            self.place_wilderness_dungeons_in_chunk(self.wilderness_map, cx, cy)
 
         h = len(self.wilderness_map)
         w = len(self.wilderness_map[0]) if h else 86
@@ -8873,12 +9050,22 @@ class FarmGame(
                 for xx in range(max(1, self.state.player_x - 1), min(w - 1, self.state.player_x + 2)):
                     if self.wilderness_map[yy][xx] not in ["~", "=", "S", "F", "V", "X", WILDERNESS_CLAIM_SYMBOL]:
                         self.wilderness_map[yy][xx] = "."
-        if self.wilderness_chunk_has_stronghold(cx, cy):
-            record = self.wilderness_stronghold_record(cx, cy, create=False)
+        founded_context = self.founded_town_root_context(cx, cy)
+        if self.wilderness_chunk_has_stronghold(cx, cy) or founded_context:
+            record = (
+                founded_context[2]
+                if founded_context
+                else self.wilderness_stronghold_record(cx, cy, create=False)
+            )
             if record and record.get("cleared"):
                 self.ensure_reclaimed_stronghold_build_board(cx, cy)
                 self.apply_reclaimed_stronghold_features_to_grid(cx, cy, self.wilderness_map)
-                self.reconcile_reclaimed_stronghold_population(cx, cy)
+                root_x, root_y = (
+                    (founded_context[0], founded_context[1])
+                    if founded_context
+                    else (cx, cy)
+                )
+                self.reconcile_reclaimed_stronghold_population(root_x, root_y)
         self.wilderness_maps[key] = self.wilderness_map
         self.ensure_wilderness_animals()
         self.get_wilderness_animals(cx, cy)
@@ -9159,6 +9346,30 @@ class FarmGame(
             self.wilderness_cave_maps[key] = self.make_wilderness_cave_map(key)
         return self.wilderness_cave_maps[key]
 
+    def is_wilderness_cave_entrance_at(
+        self,
+        x: int,
+        y: int,
+        grid: Optional[List[List[str]]] = None,
+    ) -> bool:
+        """Distinguish generated cave mouths from unrelated V glyphs."""
+        if not self.on_wilderness():
+            return False
+        grid = self.active_map() if grid is None else grid
+        px, py = int(x), int(y)
+        if (
+            not grid
+            or not (1 <= py < len(grid) - 1)
+            or not (0 <= px < len(grid[py]))
+            or grid[py][px] != "V"
+        ):
+            return False
+        if self.home_world_is_mine_door(px, py):
+            return False
+        if self.procedural_town_building_at(px, py):
+            return False
+        return grid[py - 1][px] == "#" and grid[py + 1][px] != "#"
+
     def place_wilderness_caves_in_chunk(self, grid: List[List[str]], chunk_x: int, chunk_y: int):
         """Place one or two stable, reachable cave entrances in wilderness chunks."""
         h = len(grid)
@@ -9236,7 +9447,10 @@ class FarmGame(
             grid[y + 1][x] = "."
 
 
-    def enter_wilderness_cave(self, x: int, y: int):
+    def enter_wilderness_cave(self, x: int, y: int) -> bool:
+        if not self.is_wilderness_cave_entrance_at(x, y):
+            self.set_message("There is no cave entrance here.")
+            return False
         key = self.cave_key_for_entrance(self.state.wilderness_chunk_x, self.state.wilderness_chunk_y, x, y)
         self.ensure_wilderness_caves()
         self.state.cave_return_location = "Wilderness"
@@ -9254,6 +9468,7 @@ class FarmGame(
         self.state.player_y = len(cave) - 3
         self.state.facing = "UP"
         self.autosave_with_message("You enter a cool wilderness cave. Find < to exit.")
+        return True
 
     def exit_wilderness_cave(self):
         self.ensure_wilderness_chunks()
@@ -9548,6 +9763,7 @@ class FarmGame(
 
         rng.shuffle(candidates)
         candidates.sort(key=lambda row: (-row[2], self.wilderness_hash01(chunk_x * 1000 + row[0], chunk_y * 1000 + row[1], 151)))
+        forced_landing = not candidates
         if candidates:
             x, y, _score = candidates[0]
         else:
@@ -9555,16 +9771,25 @@ class FarmGame(
 
         for yy in range(max(1, y - 2), min(h - 1, y + 3)):
             for xx in range(max(1, x - 3), min(w - 1, x + 4)):
-                if grid[yy][xx] not in ["~", "=", WILDERNESS_CLAIM_SYMBOL]:
+                if (
+                    grid[yy][xx] != WILDERNESS_CLAIM_SYMBOL
+                    and (forced_landing or grid[yy][xx] not in ["~", "="])
+                ):
                     grid[yy][xx] = "."
         for xx in range(max(1, x - 2), min(w - 1, x + 3)):
-            if grid[y - 1][xx] not in ["~", "="]:
+            if forced_landing or grid[y - 1][xx] not in ["~", "="]:
                 grid[y - 1][xx] = "#"
         for xx in [x - 2, x + 2]:
-            if 1 <= xx < w - 1 and grid[y][xx] not in ["~", "="]:
+            if (
+                1 <= xx < w - 1
+                and (forced_landing or grid[y][xx] not in ["~", "="])
+            ):
                 grid[y][xx] = "#"
         grid[y][x] = "X"
-        if y + 1 < h - 1 and grid[y + 1][x] not in ["~", "="]:
+        if (
+            y + 1 < h - 1
+            and (forced_landing or grid[y + 1][x] not in ["~", "="])
+        ):
             grid[y + 1][x] = "."
 
     def make_wilderness_dungeon_map(self, dungeon_key: str, floor: int) -> List[List[str]]:
@@ -10593,7 +10818,12 @@ class FarmGame(
 
         if outcome == "victory":
             loot = self.combat_loot_for_result(result)
-            money, items = self.grant_farm_combat_loot(loot)
+            money, items = self.grant_farm_combat_loot(
+                loot,
+                result=result,
+                source_key=f"dungeon:{dungeon_key}:{floor}:{enemy.get('id', species)}",
+                boss=bool(enemy.get("boss")),
+            )
             exp_gain = mine_combat_exp_for_defeated(defeated or [species], depth)
             if enemy.get("boss"):
                 exp_gain += 18 + self.dungeon_tier_for_key(dungeon_key) * 4
@@ -10763,6 +10993,17 @@ class FarmGame(
             items["Cave Herbs"] = items.get("Cave Herbs", 0) + 1
         if rng.random() < 0.08:
             items["Ancient Seed"] = 1
+        items = add_random_reward_items(
+            self.state,
+            items,
+            f"dungeon_chest:{dungeon_key}:{floor}:{x},{y}",
+            depth,
+            gear_chance=min(0.42, 0.16 + depth * 0.008),
+            consumable_chance=0.58,
+            valuable_chance=0.72,
+            quality_bonus=min(4, 1 + depth // 10),
+            rng=rng,
+        )
         return money, items
 
     def open_wilderness_dungeon_chest(self, x: int, y: int):
@@ -11147,6 +11388,8 @@ class FarmGame(
             return "!"
         if self.active_wilderness_expedition_for_chunk(cx, cy):
             return "?"
+        if self.founded_town_root_context(cx, cy):
+            return PROCEDURAL_TOWN_OVERWORLD_SYMBOL
         settlement = self.procedural_town_plan(cx, cy)
         if settlement and bool(settlement.get("discovered", False)):
             return PROCEDURAL_TOWN_OVERWORLD_SYMBOL
@@ -11285,6 +11528,18 @@ class FarmGame(
         expedition = self.active_wilderness_expedition_for_chunk(cx, cy)
         if expedition:
             details.append(f"Expedition target: {expedition.get('name', 'Regional Expedition')}")
+        founded_context = self.founded_town_root_context(cx, cy)
+        if founded_context:
+            _root_x, _root_y, founded_record, district = founded_context
+            if district is None:
+                details.append(
+                    f"Founded town center: {founded_record.get('founded_settlement_name', 'Founded Town')}"
+                )
+            else:
+                details.append(
+                    f"{district.get('kind', 'Expansion')} District of "
+                    f"{founded_record.get('founded_settlement_name', 'Founded Town')}"
+                )
         settlement = self.procedural_town_plan(cx, cy)
         if settlement and bool(settlement.get("discovered", False)):
             details.append(f"Wilderness town: {settlement.get('name', key)}")
@@ -11613,6 +11868,16 @@ class FarmGame(
             return "Wilderness Town Building"
         settlement = self.current_procedural_town_plan()
         if settlement and self.on_wilderness():
+            district = self.procedural_town_district_for_chunk(
+                settlement,
+                int(self.state.wilderness_chunk_x),
+                int(self.state.wilderness_chunk_y),
+            )
+            if district:
+                return (
+                    f"{settlement.get('name', 'Wilderness Town')} — "
+                    f"{district.get('kind', 'Expansion')} District"
+                )
             return str(settlement.get("name", "Wilderness Town"))
         if self.on_owned_wilderness_claim():
             claim = self.owned_wilderness_claim()
@@ -13389,6 +13654,14 @@ class FarmGame(
             "Study Desk": ["[_"],
             "Family Table": ["[+]"],
             "Keepsake Chest": ["[]"],
+            "Blackjack Table": ["[1]"],
+            "Hold'em Table": ["[2]"],
+            "Hearts Table": ["[3]"],
+            "Solitaire Table": ["[4]"],
+            "Checkers Table": ["[5]"],
+            "Chess Table": ["[6]"],
+            "Mancala Board": ["[7]"],
+            "Royal Game of Ur Board": ["[8]"],
         }
         if x is not None and y is not None and ax is not None and ay is not None:
             pattern = patterns.get(obj_name)
@@ -13431,6 +13704,14 @@ class FarmGame(
             "Study Desk": C.WOOD,
             "Family Table": C.HOUSE,
             "Keepsake Chest": C.WOOD,
+            "Blackjack Table": C.CROP_READY,
+            "Hold'em Table": C.CROP_READY,
+            "Hearts Table": C.CROP_READY,
+            "Solitaire Table": C.CROP_READY,
+            "Checkers Table": C.SNOW,
+            "Chess Table": C.SNOW,
+            "Mancala Board": C.WOOD,
+            "Royal Game of Ur Board": C.LAMP,
         }.get(obj_name, C.INFRA)
         return colorize(symbol, color)
 
@@ -14422,19 +14703,11 @@ class FarmGame(
             occupying_follower = self.travel_follower_at(x, y)
             if occupying_follower and occupying_follower != str(ignore_travel_follower_id or ""):
                 return False
-        if (self.on_farm() or self.on_mine()) and self.town_npc_at(x, y):
-            return False
         if (
             self.on_farm() or self.in_seamless_farm_district(x, y)
         ) and self.farm_animal_at(x, y):
             return False
-        if self.on_wilderness() and self.in_seamless_town_district(x, y) and self.town_npc_at(x, y):
-            return False
-        if self.on_wilderness() and self.in_seamless_farm_district(x, y) and self.town_npc_at(x, y):
-            return False
         if self.on_wilderness() and self.in_seamless_farm_district(x, y) and self.farm_animal_at(x, y):
-            return False
-        if (self.on_wilderness() or self.on_procedural_town_interior()) and self.procedural_town_resident_at(x, y):
             return False
         owned_town_home = (
             hasattr(self, "on_player_owned_procedural_residence")
@@ -14463,6 +14736,12 @@ class FarmGame(
         if self.on_wilderness():
             home_kind, home_x, home_y = self.home_world_source_at(x, y)
             if home_kind == "town":
+                if self.home_world_open_perimeter_at("town", home_x, home_y):
+                    if tile == "~":
+                        if self.state.wilderness_boating:
+                            return not self.wilderness_water_is_frozen_at(x, y)
+                        return self.wilderness_water_is_frozen_at(x, y)
+                    return tile != "#"
                 return self.town_map[home_y][home_x] not in {
                     "#", "~", "G", "C", "X", "L", "M", "I", "Y", "A",
                     "H", "R", "P", "U", "Q", "F", "T", "b", "B", "N",
@@ -14470,6 +14749,12 @@ class FarmGame(
                 }
             if home_kind == "farm":
                 farm_tile = self.base_map[home_y][home_x]
+                if self.home_world_open_perimeter_at("farm", home_x, home_y):
+                    if tile == "~":
+                        if self.state.wilderness_boating:
+                            return not self.wilderness_water_is_frozen_at(x, y)
+                        return self.wilderness_water_is_frozen_at(x, y)
+                    return tile != "#"
                 if farm_tile == "~" and self.state.season == "Winter":
                     return True
                 return farm_tile not in {"#", "~", "H", "D"}
@@ -14488,8 +14773,6 @@ class FarmGame(
             if self.wilderness_event_blocking_at(x, y):
                 return False
             if self.wilderness_seasonal_surface_blocking_at(x, y):
-                return False
-            if self.wilderness_traveler_at(x, y):
                 return False
             encounter_visual = self.wilderness_random_combat_visual_at(x, y)
             if encounter_visual and bool(encounter_visual.get("blocking", False)):
@@ -14514,9 +14797,9 @@ class FarmGame(
                 return self.wilderness_water_is_frozen_at(x, y)
             return tile not in ["#", "T", "o", "*", "?", FIELD_SITE_SYMBOL, WILDERNESS_OUTPOST_SYMBOL, WILDERNESS_STRUCTURE_SYMBOL, WILDERNESS_LANDSCAPE_SYMBOL, WILDERNESS_DOCK_SYMBOL, WILDERNESS_FISHING_SETTLEMENT_SYMBOL, WILDERNESS_REFUGE_SYMBOL, WILDERNESS_STAFFED_SITE_SYMBOL, WILDERNESS_EXCURSION_SYMBOL, WILDERNESS_CLAIM_SYMBOL, "R", "J", "P", "K", "Q", "Y", "u", "W", "N", "F", "V", "X", "O", "L", "e", "p", "M", "G", "Z"]
         if self.on_wilderness_outpost():
-            return tile not in ["#", " ", "-", "&", "@", "n", "b", "t", "c", "f", "s", "P", "l", "w", "a", "p"]
+            return tile not in ["#", " ", "-", "&", "b", "t", "c", "f", "s", "P", "l", "w", "a", "p"]
         if self.on_wilderness_structure():
-            return tile not in ["#", " ", "-", "&", "@", "b", "t", "c", "f", "s", "P", "d", "+"]
+            return tile not in ["#", " ", "-", "&", "b", "t", "c", "f", "s", "P", "d", "+"]
         if self.on_wilderness_cave():
             return tile not in ["#", " ", "o", "q", "m", "c", "i", "g", "A", "C", "h", "b", "d"]
         if self.on_wilderness_dungeon():
@@ -14881,6 +15164,13 @@ class FarmGame(
             tile = self.active_map()[y][x]
             record = self.wilderness_structure_record()
             repaired = bool(record.get("repaired"))
+            game_id = self.game_table_fixture_id(tile)
+            if game_id and str(record.get("type_id", "")) in {"roadside_inn", "desert_caravanserai", "tundra_wayhouse"}:
+                return (
+                    f"{GAME_TABLE_DATA[game_id]['name']}: use Z/Enter to play"
+                    if repaired
+                    else "Dust-covered game table; restore this structure to staff it"
+                )
             return {".": f"Floor of {record.get('name', 'the wilderness structure')}", "#": "Exterior wall", "D": "Door back to the wilderness", "-": "Interior partition", "|": "Open doorway", "&": "Service counter: weekly support is available after restoration", "@": "Resident caretaker: use Z/Enter to speak", "b": "Bunk: rest here once per day", "t": "Plain table", "c": "Chair", "f": "Hearth", "s": "Regional supply storage", "P": "Structure records and restoration plaque", "d": "Field observation desk", "+": "Wayside shrine", " ": "Solid wall"}.get(tile, f"{'Restored' if repaired else 'Abandoned'} wilderness structure interior")
         if self.on_town_interior():
             interior_desc = self.town_interior_tile_description(x, y)
@@ -15075,7 +15365,17 @@ class FarmGame(
                 return self.describe_crop(crop)
             tile = self.active_map()[y][x]
             if self.reclaimed_stronghold_build_board_at(x, y):
-                plan = self.wilderness_settlement_plan(self.state.wilderness_chunk_x, self.state.wilderness_chunk_y)
+                founded_context = self.founded_town_root_context()
+                plan = (
+                    self.wilderness_settlement_plan(
+                        founded_context[0], founded_context[1]
+                    )
+                    if founded_context
+                    else self.wilderness_settlement_plan(
+                        self.state.wilderness_chunk_x,
+                        self.state.wilderness_chunk_y,
+                    )
+                )
                 if plan:
                     return f"{plan.get('name', 'Founded town')} build board: use Z/Enter to place buildings, roads, and town features"
                 return "Reclaimed stronghold build board: use Z/Enter to found a town here"
@@ -15149,7 +15449,8 @@ class FarmGame(
             if tile == "G": return "Wild root patch: use Z/Enter to gather roots"
             if tile == "Z": return "Mushroom log: use Z/Enter to gather mushrooms"
             if tile == "M": return "Mineral outcrop: use F with Pickaxe"
-            if tile == WILDERNESS_OUTPOST_SYMBOL: return f"Door to {self.wilderness_outpost_name(self.state.wilderness_chunk_x, self.state.wilderness_chunk_y)}: use Z/Enter to enter"
+            if self.current_wilderness_outpost_door_at(x, y):
+                return f"Door to {self.wilderness_outpost_name(self.state.wilderness_chunk_x, self.state.wilderness_chunk_y)}: use Z/Enter to enter"
             if tile == WILDERNESS_STRUCTURE_SYMBOL and self.current_wilderness_structure_door_at(x, y):
                 record = self.wilderness_structure_record()
                 return f"Door to {record.get('name', 'wilderness structure')} ({'restored and staffed' if record.get('repaired') else 'abandoned'}): use Z/Enter to enter or restore"
@@ -15379,7 +15680,7 @@ class FarmGame(
             return {".": "Mayor's House floor", "#": "Mayor's House wall", "D": "Front door", "d": "Mayor's desk", "c": "Chair", "s": "Cabinet", "P": "Town charter", "r": "Rug", "&": "Mayor", " ": "Empty space"}.get(tile, f"Mayor house tile '{tile}'")
         if self.on_inn_interior():
             tile = self.active_map()[y][x]
-            return {".": "Inn floor", "#": "Inn wall", "D": "Inn door", "$": "Inn counter: use Z/Enter for meals and rooms", "n": "Innkeeper counter: use Z/Enter for meals and rooms", "&": "Innkeeper: use Z/Enter for services", "B": "Guest bed: use Z/Enter to rent a room", "t": "Dining table", "c": "Chair", "r": "Rug", " ": "Empty space"}.get(tile, f"Inn tile '{tile}'")
+            return {".": "Inn floor", "#": "Inn wall", "D": "Inn door", "$": "Inn counter: use Z/Enter for meals, rooms, and tavern games", "n": "Innkeeper counter: use Z/Enter for meals, rooms, and tavern games", "&": "Innkeeper: use Z/Enter for services and the complete card and board game collection", "B": "Guest bed: use Z/Enter to rent a room", "t": "Dining table", "c": "Chair", "r": "Rug", " ": "Empty space"}.get(tile, f"Inn tile '{tile}'")
         if self.on_furniture_store():
             tile = self.active_map()[y][x]
             display_tiles = {
@@ -16795,7 +17096,12 @@ class FarmGame(
 
         if outcome == "victory":
             loot = self.combat_loot_for_result(result)
-            money, items = self.grant_farm_combat_loot(loot)
+            money, items = self.grant_farm_combat_loot(
+                loot,
+                result=result,
+                source_key=f"stronghold:{chunk_x},{chunk_y}:{enemy.get('id', species)}",
+                boss=bool(enemy.get("boss")),
+            )
             exp_gain = mine_combat_exp_for_defeated(defeated or [species], depth)
             if enemy.get("boss"):
                 exp_gain += 10 + min(20, abs(chunk_x) + abs(chunk_y))
@@ -16947,6 +17253,514 @@ class FarmGame(
             return base_name
         return f"{base_name} {suffix}"
 
+    def founded_town_root_context(
+        self,
+        chunk_x: Optional[int] = None,
+        chunk_y: Optional[int] = None,
+    ) -> Optional[Tuple[int, int, Dict[str, object], Optional[Dict[str, object]]]]:
+        """Resolve a founded-town center or expansion district to its root record."""
+        cx = int(self.state.wilderness_chunk_x if chunk_x is None else chunk_x)
+        cy = int(self.state.wilderness_chunk_y if chunk_y is None else chunk_y)
+        exact = self.wilderness_stronghold_record(cx, cy, create=False)
+        if exact and str(exact.get("founded_settlement_name", "")).strip():
+            return cx, cy, exact, None
+        for record in (getattr(self.state, "wilderness_stronghold_state", {}) or {}).values():
+            if not isinstance(record, dict) or not str(record.get("founded_settlement_name", "")).strip():
+                continue
+            for district in record.get("founded_town_districts", []) or []:
+                if (
+                    isinstance(district, dict)
+                    and int(district.get("chunk_x", 0)) == cx
+                    and int(district.get("chunk_y", 0)) == cy
+                ):
+                    return (
+                        int(record.get("chunk_x", 0)),
+                        int(record.get("chunk_y", 0)),
+                        record,
+                        district,
+                    )
+        return None
+
+    def founded_town_site_record(
+        self,
+        chunk_x: Optional[int] = None,
+        chunk_y: Optional[int] = None,
+    ) -> Optional[Dict[str, object]]:
+        context = self.founded_town_root_context(chunk_x, chunk_y)
+        if not context:
+            return None
+        return context[3] if context[3] is not None else context[2]
+
+    def founded_town_districts(
+        self,
+        record: Dict[str, object],
+    ) -> List[Dict[str, object]]:
+        districts = record.get("founded_town_districts")
+        if not isinstance(districts, list):
+            districts = []
+            record["founded_town_districts"] = districts
+        clean = [
+            district
+            for district in districts
+            if isinstance(district, dict)
+            and "chunk_x" in district
+            and "chunk_y" in district
+        ]
+        record["founded_town_districts"] = clean
+        return record["founded_town_districts"]
+
+    def founded_town_site_kind(
+        self,
+        record: Dict[str, object],
+        site: Dict[str, object],
+    ) -> str:
+        kind = "Civic" if site is record else str(site.get("kind", "Residential")).title()
+        return kind if kind in FOUNDED_TOWN_DISTRICT_PROFILES else "Residential"
+
+    def founded_town_site_metrics(
+        self,
+        record: Dict[str, object],
+        site: Dict[str, object],
+    ) -> Dict[str, object]:
+        kind = self.founded_town_site_kind(record, site)
+        preferred = set(FOUNDED_TOWN_DISTRICT_PROFILES[kind]["preferred"])
+        feature_key = "founded_town_features" if site is record else "features"
+        features = site.get(feature_key, {})
+        features = features if isinstance(features, dict) else {}
+        building_counts: Dict[str, int] = {}
+        aligned = 0
+        other = 0
+        road_tiles = len(
+            site.get(
+                "founded_town_connection_roads" if site is record else "connection_roads",
+                [],
+            )
+            or []
+        )
+        decorations = 0
+        for feature in features.values():
+            if not isinstance(feature, dict):
+                continue
+            feature_kind = str(feature.get("kind", ""))
+            if feature_kind == "building":
+                type_id = str(feature.get("type_id", ""))
+                building_counts[type_id] = building_counts.get(type_id, 0) + 1
+                if type_id in preferred:
+                    aligned += 1
+                else:
+                    other += 1
+            elif feature_kind == "road":
+                road_tiles += max(1, int(feature.get("width", 1))) * max(
+                    1, int(feature.get("height", 1))
+                )
+            elif feature_kind == "decoration":
+                decorations += 1
+        score = (
+            aligned * 3
+            + other
+            + min(3, road_tiles // 8)
+            + min(3, decorations)
+        )
+        if score >= 13:
+            rank, label = 3, "Thriving"
+        elif score >= 8:
+            rank, label = 2, "Established"
+        elif score >= 3:
+            rank, label = 1, "Settling"
+        else:
+            rank, label = 0, "Surveyed"
+        return {
+            "kind": kind,
+            "score": score,
+            "rank": rank,
+            "label": label,
+            "aligned_buildings": aligned,
+            "other_buildings": other,
+            "roads": road_tiles,
+            "decorations": decorations,
+            "building_counts": building_counts,
+        }
+
+    def founded_town_site_demands(
+        self,
+        record: Dict[str, object],
+        site: Dict[str, object],
+    ) -> List[str]:
+        metrics = self.founded_town_site_metrics(record, site)
+        counts = metrics["building_counts"]
+        demands: List[str] = []
+        for type_id, target in FOUNDED_TOWN_DISTRICT_PROFILES[metrics["kind"]]["targets"]:
+            missing = max(0, int(target) - int(counts.get(type_id, 0)))
+            if missing:
+                catalog = SETTLEMENT_BUILDING_CATALOG.get(type_id, {})
+                name = str(catalog.get("name", type_id.replace("_", " ").title()))
+                demands.append(f"{name} x{missing}")
+        if int(metrics["roads"]) < 12:
+            demands.append("connected local streets")
+        if int(metrics["decorations"]) < 1 and int(metrics["rank"]) >= 1:
+            demands.append("one public amenity")
+        return demands
+
+    def ensure_founded_town_municipality(
+        self,
+        record: Dict[str, object],
+    ) -> Dict[str, object]:
+        municipality = record.get("founded_town_municipality")
+        if not isinstance(municipality, dict):
+            municipality = {}
+            record["founded_town_municipality"] = municipality
+        municipality.setdefault("treasury", 0)
+        municipality.setdefault("lifetime_revenue", 0)
+        municipality.setdefault("last_revenue_week", None)
+        municipality.setdefault("development_points", 0)
+        municipality.setdefault("reputation", 0)
+        municipality.setdefault("revenue_log", [])
+        return municipality
+
+    def refresh_founded_town_maturity(
+        self,
+        record: Dict[str, object],
+    ) -> Dict[str, object]:
+        municipality = self.ensure_founded_town_municipality(record)
+        sites = [record, *self.founded_town_districts(record)]
+        structural_points = sum(
+            int(self.founded_town_site_metrics(record, site)["score"])
+            for site in sites
+        ) * 2 + max(0, len(sites) - 1) * 3
+        municipality["development_points"] = max(
+            int(municipality.get("development_points", 0)),
+            structural_points,
+        )
+        municipality["districts"] = [
+            {
+                "id": str(site.get("id", "founded-center" if site is record else "")),
+                "chunk_x": int(site.get("chunk_x", record.get("chunk_x", 0))),
+                "chunk_y": int(site.get("chunk_y", record.get("chunk_y", 0))),
+                "kind": self.founded_town_site_kind(record, site),
+                "name": str(
+                    site.get(
+                        "name",
+                        record.get("founded_settlement_name", "Founded Town"),
+                    )
+                ),
+                "maturity": self.founded_town_site_metrics(record, site)["label"],
+            }
+            for site in sites
+            if site is not record
+        ]
+        return municipality
+
+    def founded_town_maturity_benefits(
+        self,
+        record: Dict[str, object],
+    ) -> List[str]:
+        established: Dict[str, int] = {}
+        for site in [record, *self.founded_town_districts(record)]:
+            metrics = self.founded_town_site_metrics(record, site)
+            if int(metrics["rank"]) >= 2:
+                kind = str(metrics["kind"])
+                established[kind] = established.get(kind, 0) + 1
+        benefits: List[str] = []
+        if established.get("Residential"):
+            benefits.append(
+                f"Residential capacity: +{established['Residential']} per completed home."
+            )
+        if established.get("Market"):
+            benefits.append("Market districts increase weekly municipal revenue.")
+        if established.get("Artisan"):
+            benefits.append("Artisan workplaces support additional skilled service capacity.")
+        if established.get("Civic"):
+            benefits.append("Civic districts improve weekly tax collection.")
+        if established.get("Garden"):
+            benefits.append("Garden districts improve household morale and town stability.")
+        return benefits
+
+    def process_founded_town_revenue(
+        self,
+        record: Dict[str, object],
+        population: Optional[Dict[str, object]] = None,
+    ) -> int:
+        municipality = self.refresh_founded_town_maturity(record)
+        current_week = max(0, int(self.civic_date_ordinal()) // 7)
+        last_week = municipality.get("last_revenue_week")
+        if last_week is None:
+            municipality["last_revenue_week"] = current_week
+            return 0
+        elapsed = max(0, min(52, current_week - int(last_week)))
+        if elapsed <= 0:
+            return 0
+        root_x = int(record.get("chunk_x", 0))
+        root_y = int(record.get("chunk_y", 0))
+        if not isinstance(population, dict):
+            population = self.procedural_settlement_population(root_x, root_y) or {}
+        summary = (
+            self.procedural_npc_builder().summary(population)
+            if population
+            else {"population": 0}
+        )
+        population_count = int(summary.get("population", 0))
+        market_buildings = 0
+        established_sites = 0
+        civic_rank = 0
+        for site in [record, *self.founded_town_districts(record)]:
+            metrics = self.founded_town_site_metrics(record, site)
+            counts = metrics["building_counts"]
+            market_buildings += sum(
+                int(counts.get(type_id, 0))
+                for type_id in ("general_store", "market_stall", "inn")
+            )
+            if int(metrics["rank"]) >= 2:
+                established_sites += 1
+            if metrics["kind"] == "Civic":
+                civic_rank += int(metrics["rank"])
+        weekly = min(
+            450,
+            population_count * 3
+            + market_buildings * 12
+            + established_sites * 8
+            + civic_rank * 5,
+        )
+        revenue = weekly * elapsed
+        municipality["last_revenue_week"] = current_week
+        municipality["treasury"] = int(municipality.get("treasury", 0)) + revenue
+        municipality["lifetime_revenue"] = int(
+            municipality.get("lifetime_revenue", 0)
+        ) + revenue
+        if revenue:
+            log = list(municipality.get("revenue_log", []) or [])
+            log.append(
+                f"{self.errand_day_key()}: +${revenue} municipal revenue "
+                f"({elapsed} week{'s' if elapsed != 1 else ''})."
+            )
+            municipality["revenue_log"] = log[-20:]
+        return revenue
+
+    def founded_town_footprint(
+        self,
+        record: Dict[str, object],
+    ) -> Set[Tuple[int, int]]:
+        return {
+            (int(record.get("chunk_x", 0)), int(record.get("chunk_y", 0))),
+            *{
+                (int(district["chunk_x"]), int(district["chunk_y"]))
+                for district in self.founded_town_districts(record)
+            },
+        }
+
+    def founded_town_expansion_cost(self, record: Dict[str, object]) -> int:
+        return (
+            FOUNDED_TOWN_DISTRICT_BASE_COST
+            + len(self.founded_town_districts(record))
+            * FOUNDED_TOWN_DISTRICT_COST_STEP
+        )
+
+    def founded_town_placed_building_types(
+        self,
+        record: Dict[str, object],
+    ) -> List[str]:
+        types: List[str] = []
+        sites = [record, *self.founded_town_districts(record)]
+        for site in sites:
+            features = (
+                site.get("features", {})
+                if site is not record
+                else site.get("founded_town_features", {})
+            )
+            for feature in features.values() if isinstance(features, dict) else []:
+                if isinstance(feature, dict) and str(feature.get("kind", "")) == "building":
+                    types.append(str(feature.get("type_id", "")))
+        return types
+
+    def founded_town_expansion_site_valid(
+        self,
+        record: Dict[str, object],
+        chunk_x: int,
+        chunk_y: int,
+    ) -> Tuple[bool, str]:
+        cx, cy = int(chunk_x), int(chunk_y)
+        footprint = self.founded_town_footprint(record)
+        if (cx, cy) in footprint:
+            return False, "already part of this town"
+        if not any(
+            neighbor in footprint
+            for neighbor in ((cx + 1, cy), (cx - 1, cy), (cx, cy + 1), (cx, cy - 1))
+        ):
+            return False, "district must touch the existing town"
+        if self.founded_town_root_context(cx, cy):
+            return False, "another founded town already occupies this chunk"
+        if self.home_world_chunk_is_authored(cx, cy):
+            return False, "the authored home region is protected"
+        if self.wilderness_settlement_plan(cx, cy):
+            return False, "another settlement already occupies this chunk"
+        if self.wilderness_chunk_has_procedural_settlement(cx, cy):
+            return False, "a generated town already occupies this chunk"
+        if self.wilderness_chunk_has_stronghold(cx, cy):
+            return False, "a stronghold occupies this chunk"
+        if self.owned_wilderness_claim(cx, cy) or self.is_claimable_wilderness_chunk(cx, cy):
+            return False, "claimed or purchasable land occupies this chunk"
+        if self.wilderness_chunk_has_outpost(cx, cy):
+            return False, "an outpost occupies this chunk"
+        if self.wilderness_chunk_has_structure(cx, cy):
+            return False, "a wilderness structure occupies this chunk"
+        if self.wilderness_chunk_has_dungeon_site(cx, cy):
+            return False, "a dungeon occupies this chunk"
+        water_samples = sum(
+            1
+            for local_y in (4, 11, 19, 27, 34)
+            for local_x in (6, 23, 43, 63, 79)
+            if self.wilderness_world_water_tile(
+                cx * 86 + local_x,
+                cy * 38 + local_y,
+            )
+        )
+        if water_samples > 15:
+            return False, "open water dominates this chunk"
+        return True, "OK"
+
+    def founded_town_frontier_candidates(
+        self,
+        record: Dict[str, object],
+    ) -> List[Tuple[int, int]]:
+        footprint = self.founded_town_footprint(record)
+        candidates = {
+            neighbor
+            for cx, cy in footprint
+            for neighbor in ((cx + 1, cy), (cx - 1, cy), (cx, cy + 1), (cx, cy - 1))
+            if neighbor not in footprint
+        }
+        return sorted(
+            (
+                point
+                for point in candidates
+                if self.founded_town_expansion_site_valid(record, *point)[0]
+            ),
+            key=lambda point: (
+                abs(point[0] - int(record.get("chunk_x", 0)))
+                + abs(point[1] - int(record.get("chunk_y", 0))),
+                point[1],
+                point[0],
+            ),
+        )
+
+    def founded_town_connection_tiles(
+        self,
+        from_chunk: Tuple[int, int],
+        to_chunk: Tuple[int, int],
+    ) -> Tuple[List[str], List[str]]:
+        dx = int(to_chunk[0]) - int(from_chunk[0])
+        dy = int(to_chunk[1]) - int(from_chunk[1])
+        if (dx, dy) == (1, 0):
+            return ([f"{x},19" for x in range(43, 86)], [f"{x},19" for x in range(0, 44)])
+        if (dx, dy) == (-1, 0):
+            return ([f"{x},19" for x in range(0, 44)], [f"{x},19" for x in range(43, 86)])
+        if (dx, dy) == (0, 1):
+            return ([f"43,{y}" for y in range(19, 38)], [f"43,{y}" for y in range(0, 20)])
+        return ([f"43,{y}" for y in range(0, 20)], [f"43,{y}" for y in range(19, 38)])
+
+    def founded_town_site_for_chunk(
+        self,
+        record: Dict[str, object],
+        chunk: Tuple[int, int],
+    ) -> Dict[str, object]:
+        if chunk == (int(record.get("chunk_x", 0)), int(record.get("chunk_y", 0))):
+            return record
+        return next(
+            district
+            for district in self.founded_town_districts(record)
+            if (int(district["chunk_x"]), int(district["chunk_y"])) == chunk
+        )
+
+    def expand_founded_town(
+        self,
+        chunk_x: int,
+        chunk_y: int,
+        kind: str = "Residential",
+        root_chunk_x: Optional[int] = None,
+        root_chunk_y: Optional[int] = None,
+        autosave: bool = True,
+        check_requirements: bool = True,
+    ) -> Optional[Dict[str, object]]:
+        context = self.founded_town_root_context(root_chunk_x, root_chunk_y)
+        if not context:
+            self.set_message("No founded stronghold town is available to expand.")
+            return None
+        root_x, root_y, record, _district = context
+        allowed, reason = self.founded_town_expansion_site_valid(record, chunk_x, chunk_y)
+        if not allowed:
+            self.set_message(f"Cannot establish that district: {reason}.")
+            return None
+        building_types = self.founded_town_placed_building_types(record)
+        if check_requirements and (
+            "home" not in building_types or len(building_types) < 2
+        ):
+            self.set_message("Place a home and at least one other town building before expanding.")
+            return None
+        cost = self.founded_town_expansion_cost(record)
+        if check_requirements and int(self.state.money) < cost:
+            self.set_message(f"District expansion requires ${cost}.")
+            return None
+        kind = str(kind).title()
+        if kind not in FOUNDED_TOWN_DISTRICT_KINDS:
+            kind = "Residential"
+        footprint = self.founded_town_footprint(record)
+        target = (int(chunk_x), int(chunk_y))
+        parent = min(
+            (point for point in footprint if abs(point[0] - target[0]) + abs(point[1] - target[1]) == 1),
+            key=lambda point: (abs(point[0] - root_x) + abs(point[1] - root_y), point),
+        )
+        if check_requirements:
+            self.state.money -= cost
+        district = {
+            "id": f"founded-district:{target[0]},{target[1]}",
+            "chunk_x": target[0],
+            "chunk_y": target[1],
+            "kind": kind,
+            "name": f"{record.get('founded_settlement_name', 'Founded Town')} {kind} District",
+            "founded_day": self.errand_day_key(),
+            "cost": cost,
+            "parent_chunk_x": parent[0],
+            "parent_chunk_y": parent[1],
+            "marker_x": 43,
+            "marker_y": 19,
+            "build_board_x": 45,
+            "build_board_y": 17,
+            "features": {},
+            "connection_roads": [],
+        }
+        parent_site = self.founded_town_site_for_chunk(record, parent)
+        parent_roads, district_roads = self.founded_town_connection_tiles(parent, target)
+        parent_key = "founded_town_connection_roads" if parent_site is record else "connection_roads"
+        parent_site[parent_key] = list(dict.fromkeys([
+            *(parent_site.get(parent_key, []) or []),
+            *parent_roads,
+        ]))
+        district["connection_roads"] = district_roads
+        self.founded_town_districts(record).append(district)
+        self.refresh_founded_town_maturity(record)
+        self.discover_wilderness_chunk(target[0], target[1])
+        plan = self.wilderness_settlement_plan(root_x, root_y)
+        if plan:
+            plan.setdefault("notes", []).append(
+                f"Established a {kind} District at {target[0]},{target[1]}."
+            )
+        for cx, cy in (parent, target):
+            key = self.wilderness_chunk_key(cx, cy)
+            getattr(self, "wilderness_static_checked_chunks", set()).discard(key)
+            getattr(self, "repaired_wilderness_chunks", set()).discard(key)
+            grid = self.get_wilderness_chunk_map(cx, cy)
+            self.apply_reclaimed_stronghold_features_to_grid(cx, cy, grid)
+        self.reconcile_reclaimed_stronghold_population(root_x, root_y)
+        self.invalidate_wilderness_road_network()
+        message = (
+            f"Established the {kind} District at {target[0]},{target[1]} "
+            f"and connected it to {record.get('founded_settlement_name', 'the town')}."
+        )
+        if autosave:
+            self.autosave_with_message(message)
+        else:
+            self.set_message(message)
+        return district
+
     def can_found_town_at_reclaimed_stronghold(
         self,
         chunk_x: Optional[int] = None,
@@ -17009,6 +17823,10 @@ class FarmGame(
         record["founded_settlement_name"] = town_name
         record["founded_settlement_style"] = style
         record["founded_settlement_day"] = self.errand_day_key()
+        record.setdefault("founded_town_districts", [])
+        record.setdefault("founded_town_connection_roads", [])
+        municipality = self.ensure_founded_town_municipality(record)
+        municipality["last_revenue_week"] = max(0, int(self.civic_date_ordinal()) // 7)
         self.invalidate_wilderness_road_network()
 
         buildings = plan.get("buildings", {}) if isinstance(plan.get("buildings", {}), dict) else {}
@@ -17059,30 +17877,32 @@ class FarmGame(
     ) -> Optional[Tuple[int, int]]:
         cx = self.state.wilderness_chunk_x if chunk_x is None else int(chunk_x)
         cy = self.state.wilderness_chunk_y if chunk_y is None else int(chunk_y)
-        if not self.wilderness_chunk_has_stronghold(cx, cy):
+        context = self.founded_town_root_context(cx, cy)
+        if not context and not self.wilderness_chunk_has_stronghold(cx, cy):
             return None
-        record = self.wilderness_stronghold_record(cx, cy, create=False)
+        record = context[2] if context else self.wilderness_stronghold_record(cx, cy, create=False)
         if not record or not record.get("cleared"):
             return None
+        site = context[3] if context and context[3] is not None else record
         grid = self.get_wilderness_chunk_map(cx, cy)
         h = len(grid)
         w = len(grid[0]) if h else 0
         if not h or not w:
             return None
-        marker_x = int(record.get("marker_x", 0) or 0)
-        marker_y = int(record.get("marker_y", 0) or 0)
+        marker_x = int(site.get("marker_x", 43) or 43)
+        marker_y = int(site.get("marker_y", 19) or 19)
         if not (0 <= marker_y < h and 0 <= marker_x < w):
             markers = [(xx, yy) for yy, row in enumerate(grid) for xx, ch in enumerate(row) if ch == "!"]
             if markers:
                 marker_x, marker_y = markers[0]
-                record["marker_x"] = marker_x
-                record["marker_y"] = marker_y
-        bx = int(record.get("build_board_x", -1) or -1)
-        by = int(record.get("build_board_y", -1) or -1)
+                site["marker_x"] = marker_x
+                site["marker_y"] = marker_y
+        bx = int(site.get("build_board_x", -1) or -1)
+        by = int(site.get("build_board_y", -1) or -1)
         if not (1 <= bx < w - 1 and 1 <= by < h - 1) or grid[by][bx] in {"~", "=", "S", "V", "X", WILDERNESS_CLAIM_SYMBOL, "!"}:
             bx, by = self.reclaimed_stronghold_build_board_position(grid, marker_x, marker_y)
-            record["build_board_x"] = bx
-            record["build_board_y"] = by
+            site["build_board_x"] = bx
+            site["build_board_y"] = by
         if 1 <= bx < w - 1 and 1 <= by < h - 1 and (bx, by) != (marker_x, marker_y):
             if grid[by][bx] not in {"~", "=", "S", "V", "X", WILDERNESS_CLAIM_SYMBOL, "!"}:
                 grid[by][bx] = RECLAIMED_STRONGHOLD_BUILD_BOARD_SYMBOL
@@ -17101,12 +17921,44 @@ class FarmGame(
     ) -> bool:
         cx = self.state.wilderness_chunk_x if chunk_x is None else int(chunk_x)
         cy = self.state.wilderness_chunk_y if chunk_y is None else int(chunk_y)
-        record = self.wilderness_stronghold_record(cx, cy, create=False)
+        context = self.founded_town_root_context(cx, cy)
+        record = context[2] if context else self.wilderness_stronghold_record(cx, cy, create=False)
         if not record or not record.get("cleared"):
             return False
-        return int(record.get("build_board_x", -999)) == int(x) and int(record.get("build_board_y", -999)) == int(y)
+        site = context[3] if context and context[3] is not None else record
+        return int(site.get("build_board_x", -999)) == int(x) and int(site.get("build_board_y", -999)) == int(y)
 
-    def reclaimed_stronghold_build_catalog(self) -> Dict[str, Dict[str, object]]:
+    def founded_town_build_item_fit(
+        self,
+        item: Dict[str, object],
+        record: Dict[str, object],
+        site: Dict[str, object],
+    ) -> str:
+        kind = self.founded_town_site_kind(record, site)
+        item_kind = str(item.get("kind", "building"))
+        if item_kind == "road":
+            return "infrastructure"
+        if item_kind == "decoration":
+            return "favored" if kind in {"Garden", "Residential", "Civic"} else "supporting"
+        if str(item.get("type_id", "")) in set(
+            FOUNDED_TOWN_DISTRICT_PROFILES[kind]["preferred"]
+        ):
+            return "favored"
+        return "supporting" if site is record else "outside specialization"
+
+    def reclaimed_stronghold_build_catalog(
+        self,
+        chunk_x: Optional[int] = None,
+        chunk_y: Optional[int] = None,
+    ) -> Dict[str, Dict[str, object]]:
+        cx = self.state.wilderness_chunk_x if chunk_x is None else int(chunk_x)
+        cy = self.state.wilderness_chunk_y if chunk_y is None else int(chunk_y)
+        context = self.founded_town_root_context(cx, cy)
+        record = context[2] if context else None
+        site = (
+            context[3] if context and context[3] is not None
+            else record
+        )
         catalog: Dict[str, Dict[str, object]] = {}
         for type_id in RECLAIMED_STRONGHOLD_BUILDING_ORDER:
             building = SETTLEMENT_BUILDING_CATALOG.get(type_id, {})
@@ -17129,7 +17981,35 @@ class FarmGame(
             merged = dict(feature)
             merged["id"] = item_id
             catalog[item_id] = merged
+        if isinstance(record, dict) and isinstance(site, dict):
+            district_kind = self.founded_town_site_kind(record, site)
+            for item in catalog.values():
+                base_cost = int(item.get("cost", 0))
+                fit = self.founded_town_build_item_fit(item, record, site)
+                if fit == "favored":
+                    cost = max(1, base_cost * 85 // 100)
+                elif fit == "outside specialization":
+                    cost = max(1, base_cost * 110 // 100)
+                else:
+                    cost = base_cost
+                item["base_cost"] = base_cost
+                item["cost"] = cost
+                item["district_kind"] = district_kind
+                item["district_fit"] = fit
         return catalog
+
+    def founded_town_build_subsidy(
+        self,
+        record: Dict[str, object],
+        site: Dict[str, object],
+        item: Dict[str, object],
+    ) -> int:
+        municipality = self.ensure_founded_town_municipality(record)
+        treasury = max(0, int(municipality.get("treasury", 0)))
+        fit = self.founded_town_build_item_fit(item, record, site)
+        if fit not in {"favored", "infrastructure"}:
+            return 0
+        return min(treasury, max(0, int(item.get("cost", 0)) // 4))
 
     def reclaimed_stronghold_build_item_footprint(
         self,
@@ -17147,15 +18027,21 @@ class FarmGame(
         chunk_x: Optional[int] = None,
         chunk_y: Optional[int] = None,
     ) -> Dict[str, Dict[str, object]]:
-        if record is None:
-            cx = self.state.wilderness_chunk_x if chunk_x is None else int(chunk_x)
-            cy = self.state.wilderness_chunk_y if chunk_y is None else int(chunk_y)
-            record = self.wilderness_stronghold_record(cx, cy)
-        features = record.get("founded_town_features") if isinstance(record, dict) else {}
+        cx = self.state.wilderness_chunk_x if chunk_x is None else int(chunk_x)
+        cy = self.state.wilderness_chunk_y if chunk_y is None else int(chunk_y)
+        context = self.founded_town_root_context(cx, cy)
+        if context and (record is None or record is context[2]):
+            record = context[2]
+            site = context[3] if context[3] is not None else record
+        else:
+            record = record if isinstance(record, dict) else self.wilderness_stronghold_record(cx, cy)
+            site = record
+        feature_key = "features" if site is not record else "founded_town_features"
+        features = site.get(feature_key) if isinstance(site, dict) else {}
         if not isinstance(features, dict):
             features = {}
-            if isinstance(record, dict):
-                record["founded_town_features"] = features
+            if isinstance(site, dict):
+                site[feature_key] = features
         return features
 
     def reclaimed_stronghold_feature_at(
@@ -17167,10 +18053,11 @@ class FarmGame(
     ) -> Tuple[str, Optional[Dict[str, object]]]:
         cx = self.state.wilderness_chunk_x if chunk_x is None else int(chunk_x)
         cy = self.state.wilderness_chunk_y if chunk_y is None else int(chunk_y)
-        record = self.wilderness_stronghold_record(cx, cy, create=False)
+        context = self.founded_town_root_context(cx, cy)
+        record = context[2] if context else self.wilderness_stronghold_record(cx, cy, create=False)
         if not record or not record.get("cleared"):
             return "", None
-        for feature_id, feature in self.reclaimed_stronghold_feature_records(record).items():
+        for feature_id, feature in self.reclaimed_stronghold_feature_records(record, cx, cy).items():
             if not isinstance(feature, dict):
                 continue
             fx = int(feature.get("x", -999))
@@ -17194,14 +18081,61 @@ class FarmGame(
         grid: Optional[List[List[str]]] = None,
     ) -> List[List[str]]:
         grid = grid if grid is not None else self.get_wilderness_chunk_map(chunk_x, chunk_y)
-        record = self.wilderness_stronghold_record(chunk_x, chunk_y, create=False)
+        context = self.founded_town_root_context(chunk_x, chunk_y)
+        record = context[2] if context else self.wilderness_stronghold_record(chunk_x, chunk_y, create=False)
         if not record or not record.get("cleared"):
             return grid
-        for feature in self.reclaimed_stronghold_feature_records(record).values():
+        site = context[3] if context and context[3] is not None else record
+        road_key = "connection_roads" if site is not record else "founded_town_connection_roads"
+        for raw_coord in site.get(road_key, []) or []:
+            position = parse_settlement_coord(raw_coord)
+            if position:
+                tx, ty = position
+                if 0 <= ty < len(grid) and grid and 0 <= tx < len(grid[0]):
+                    grid[ty][tx] = ":"
+        metrics = self.founded_town_site_metrics(record, site)
+        maturity_rank = int(metrics["rank"])
+        if maturity_rank >= 2:
+            for raw_coord in site.get(road_key, []) or []:
+                position = parse_settlement_coord(raw_coord)
+                if position:
+                    tx, ty = position
+                    if 0 <= ty < len(grid) and grid and 0 <= tx < len(grid[0]):
+                        grid[ty][tx] = ","
+        if site is not record:
+            marker_x = int(site.get("marker_x", 43))
+            marker_y = int(site.get("marker_y", 19))
+            for ty in range(max(1, marker_y - 2), min(len(grid) - 1, marker_y + 3)):
+                for tx in range(max(1, marker_x - 3), min(len(grid[0]) - 1, marker_x + 4)):
+                    if grid[ty][tx] not in {"~", "="}:
+                        grid[ty][tx] = "," if (tx, ty) != (marker_x, marker_y) else ":"
+        if maturity_rank >= 1:
+            marker_x = int(site.get("marker_x", 43))
+            marker_y = int(site.get("marker_y", 19))
+            ground = {
+                "Residential": ".",
+                "Market": ",",
+                "Artisan": ",",
+                "Civic": ",",
+                "Garden": ";",
+            }.get(str(metrics["kind"]), ",")
+            radius_x = 4 + maturity_rank
+            radius_y = 2 + maturity_rank
+            for ty in range(
+                max(1, marker_y - radius_y),
+                min(len(grid) - 1, marker_y + radius_y + 1),
+            ):
+                for tx in range(
+                    max(1, marker_x - radius_x),
+                    min(len(grid[0]) - 1, marker_x + radius_x + 1),
+                ):
+                    if grid[ty][tx] in {".", ";", "%", "r", "x", ","}:
+                        grid[ty][tx] = ground
+        for feature in self.reclaimed_stronghold_feature_records(record, chunk_x, chunk_y).values():
             if isinstance(feature, dict):
                 self.stamp_reclaimed_stronghold_feature(grid, feature)
-        bx = int(record.get("build_board_x", -1) or -1)
-        by = int(record.get("build_board_y", -1) or -1)
+        bx = int(site.get("build_board_x", -1) or -1)
+        by = int(site.get("build_board_y", -1) or -1)
         if 0 <= by < len(grid) and grid and 0 <= bx < len(grid[0]):
             grid[by][bx] = RECLAIMED_STRONGHOLD_BUILD_BOARD_SYMBOL
         key = self.wilderness_stronghold_key(chunk_x, chunk_y)
@@ -17210,11 +18144,26 @@ class FarmGame(
             self.wilderness_map = grid
         return grid
 
-    def reclaimed_stronghold_population_building_id(self, feature_id: object) -> str:
+    def reclaimed_stronghold_population_building_id(
+        self,
+        feature_id: object,
+        chunk_x: Optional[int] = None,
+        chunk_y: Optional[int] = None,
+        root_x: Optional[int] = None,
+        root_y: Optional[int] = None,
+    ) -> str:
         cleaned = "".join(
             ch if ch.isalnum() else "_"
             for ch in str(feature_id or "building")
         ).strip("_")
+        if (
+            chunk_x is not None
+            and chunk_y is not None
+            and root_x is not None
+            and root_y is not None
+            and (int(chunk_x), int(chunk_y)) != (int(root_x), int(root_y))
+        ):
+            return f"reclaimed_{int(chunk_x)}_{int(chunk_y)}_{cleaned or 'building'}"
         return f"reclaimed_{cleaned or 'building'}"
 
     def reclaimed_stronghold_feature_access_tile(
@@ -17233,14 +18182,16 @@ class FarmGame(
         height = max(1, int(feature.get("height", 1) or 1))
         center_x = fx + width // 2
         center_y = fy + height // 2
-        record = self.wilderness_stronghold_record(chunk_x, chunk_y, create=False)
+        context = self.founded_town_root_context(chunk_x, chunk_y)
+        record = context[2] if context else self.wilderness_stronghold_record(chunk_x, chunk_y, create=False)
+        site = context[3] if context and context[3] is not None else record
         board = (
-            int(record.get("build_board_x", -999) or -999),
-            int(record.get("build_board_y", -999) or -999),
+            int(site.get("build_board_x", -999) or -999),
+            int(site.get("build_board_y", -999) or -999),
         ) if record else (-999, -999)
         marker = (
-            int(record.get("marker_x", -999) or -999),
-            int(record.get("marker_y", -999) or -999),
+            int(site.get("marker_x", -999) or -999),
+            int(site.get("marker_y", -999) or -999),
         ) if record else (-999, -999)
         blocked_tiles = {
             "#", "~", "=", "S", "V", "X", WILDERNESS_CLAIM_SYMBOL, "!",
@@ -17304,73 +18255,111 @@ class FarmGame(
         chunk_x: Optional[int] = None,
         chunk_y: Optional[int] = None,
     ) -> Optional[Dict[str, object]]:
-        cx = self.state.wilderness_chunk_x if chunk_x is None else int(chunk_x)
-        cy = self.state.wilderness_chunk_y if chunk_y is None else int(chunk_y)
-        if not self.wilderness_chunk_has_stronghold(cx, cy):
+        requested_x = self.state.wilderness_chunk_x if chunk_x is None else int(chunk_x)
+        requested_y = self.state.wilderness_chunk_y if chunk_y is None else int(chunk_y)
+        context = self.founded_town_root_context(requested_x, requested_y)
+        if not context:
             return None
-        record = self.wilderness_stronghold_record(cx, cy, create=False)
+        cx, cy, record, _current_district = context
         if not record or not record.get("cleared"):
             return None
         source_plan = self.wilderness_settlement_plan(cx, cy)
         if not isinstance(source_plan, dict) or str(source_plan.get("source", "")) != "reclaimed_stronghold":
             return None
-        features = self.reclaimed_stronghold_feature_records(record)
         grid = self.get_wilderness_chunk_map(cx, cy)
         map_h = len(grid)
         map_w = len(grid[0]) if map_h else 86
         buildings: Dict[str, Dict[str, object]] = {}
         revision_parts: List[str] = []
-        for feature_id, feature in sorted(features.items(), key=lambda row: str(row[0])):
-            if not isinstance(feature, dict) or str(feature.get("kind", "")) != "building":
-                continue
-            type_id = str(feature.get("type_id", "") or "")
-            catalog = SETTLEMENT_BUILDING_CATALOG.get(type_id)
-            if not isinstance(catalog, dict):
-                continue
-            access_x, access_y = self.reclaimed_stronghold_feature_access_tile(feature, cx, cy, grid)
-            building_id = self.reclaimed_stronghold_population_building_id(feature_id)
-            building = {
-                "id": building_id,
-                "type_id": type_id,
-                "name": str(feature.get("name", catalog.get("name", type_id.replace("_", " ").title()))),
-                "zone": str(catalog.get("zone", "Residential")),
-                "x": int(feature.get("x", 0) or 0),
-                "y": int(feature.get("y", 0) or 0),
-                "width": max(1, int(feature.get("width", catalog.get("width", 5)) or 1)),
-                "height": max(1, int(feature.get("height", catalog.get("height", 4)) or 1)),
-                "symbol": str(feature.get("symbol", catalog.get("symbol", "?")) or "?")[:1],
-                "phase_index": len(SETTLEMENT_PHASES) - 1,
-                "status": "complete",
-                "priority": len(buildings) + 1,
-                "capacity": int(catalog.get("capacity", 0) or 0),
-                "service": int(catalog.get("service", 0) or 0),
-                "door_x": int(access_x),
-                "door_y": int(access_y),
-                "access_x": int(access_x),
-                "access_y": int(access_y),
-                "placed_feature_id": str(feature_id),
-                "source": "reclaimed_stronghold_build_board",
-            }
-            buildings[building_id] = building
-            revision_parts.append(
-                f"{feature_id}:{type_id}:{building['x']}:{building['y']}:{building['width']}:{building['height']}"
+        municipality = self.refresh_founded_town_maturity(record)
+        sites = [
+            (cx, cy, record),
+            *[
+                (int(district["chunk_x"]), int(district["chunk_y"]), district)
+                for district in self.founded_town_districts(record)
+            ],
+        ]
+        for site_x, site_y, site in sites:
+            site_grid = self.get_wilderness_chunk_map(site_x, site_y)
+            site_metrics = self.founded_town_site_metrics(record, site)
+            site_kind = str(site_metrics["kind"])
+            site_rank = int(site_metrics["rank"])
+            preferred = set(FOUNDED_TOWN_DISTRICT_PROFILES[site_kind]["preferred"])
+            features = self.reclaimed_stronghold_feature_records(
+                record, site_x, site_y
             )
+            for feature_id, feature in sorted(features.items(), key=lambda row: str(row[0])):
+                if not isinstance(feature, dict) or str(feature.get("kind", "")) != "building":
+                    continue
+                type_id = str(feature.get("type_id", "") or "")
+                catalog = SETTLEMENT_BUILDING_CATALOG.get(type_id)
+                if not isinstance(catalog, dict):
+                    continue
+                access_x, access_y = self.reclaimed_stronghold_feature_access_tile(
+                    feature, site_x, site_y, site_grid
+                )
+                building_id = self.reclaimed_stronghold_population_building_id(
+                    feature_id, site_x, site_y, cx, cy
+                )
+                capacity = int(catalog.get("capacity", 0) or 0)
+                service = int(catalog.get("service", 0) or 0)
+                if (
+                    site_kind == "Residential"
+                    and type_id == "home"
+                    and site_rank >= 2
+                ):
+                    capacity += site_rank - 1
+                if type_id in preferred and site_rank >= 2 and service > 0:
+                    service += 1
+                building = {
+                    "id": building_id,
+                    "type_id": type_id,
+                    "name": str(feature.get("name", catalog.get("name", type_id.replace("_", " ").title()))),
+                    "zone": str(catalog.get("zone", "Residential")),
+                    "x": int(feature.get("x", 0) or 0),
+                    "y": int(feature.get("y", 0) or 0),
+                    "width": max(1, int(feature.get("width", catalog.get("width", 5)) or 1)),
+                    "height": max(1, int(feature.get("height", catalog.get("height", 4)) or 1)),
+                    "symbol": str(feature.get("symbol", catalog.get("symbol", "?")) or "?")[:1],
+                    "phase_index": len(SETTLEMENT_PHASES) - 1,
+                    "status": "complete",
+                    "priority": len(buildings) + 1,
+                    "capacity": capacity,
+                    "service": service,
+                    "door_x": int(access_x),
+                    "door_y": int(access_y),
+                    "access_x": int(access_x),
+                    "access_y": int(access_y),
+                    "district_chunk_x": int(site_x),
+                    "district_chunk_y": int(site_y),
+                    "district_id": (
+                        str(site.get("id", ""))
+                        if site is not record
+                        else ""
+                    ),
+                    "district_kind": site_kind,
+                    "district_maturity": str(site_metrics["label"]),
+                    "placed_feature_id": f"{site_x},{site_y}:{feature_id}",
+                    "source": "reclaimed_stronghold_build_board",
+                }
+                buildings[building_id] = building
+                revision_parts.append(
+                    f"{site_x},{site_y}:{feature_id}:{type_id}:{building['x']}:{building['y']}:{building['width']}:{building['height']}:{site_metrics['score']}"
+                )
         if not buildings:
             return None
 
         roads = set()
-        for feature in features.values():
-            if not isinstance(feature, dict):
-                continue
-            if str(feature.get("kind", "")) != "road":
-                continue
-            for tx, ty in self.reclaimed_stronghold_build_item_footprint(
-                feature,
-                int(feature.get("x", 0) or 0),
-                int(feature.get("y", 0) or 0),
-            ):
-                if 0 <= ty < map_h and 0 <= tx < map_w:
-                    roads.add(f"{tx},{ty}")
+        root_features = self.reclaimed_stronghold_feature_records(record, cx, cy)
+        for feature in root_features.values():
+            if isinstance(feature, dict) and str(feature.get("kind", "")) == "road":
+                for tx, ty in self.reclaimed_stronghold_build_item_footprint(
+                    feature,
+                    int(feature.get("x", 0) or 0),
+                    int(feature.get("y", 0) or 0),
+                ):
+                    if 0 <= ty < map_h and 0 <= tx < map_w:
+                        roads.add(f"{tx},{ty}")
         for building in buildings.values():
             roads.add(f"{int(building['access_x'])},{int(building['access_y'])}")
         board_x = int(record.get("build_board_x", -1) or -1)
@@ -17406,6 +18395,7 @@ class FarmGame(
             "entrance": {"x": int(entrance_x), "y": int(entrance_y)},
             "roads": sorted(roads, key=lambda value: tuple(int(part) for part in str(value).split(",", 1))),
             "buildings": buildings,
+            "service_state": {"community": municipality},
             "construction_queue": [],
             "notes": [
                 "Population plan derived from visible buildings placed at a reclaimed stronghold.",
@@ -17424,8 +18414,10 @@ class FarmGame(
         plan = self.reclaimed_stronghold_population_plan(cx, cy)
         if not plan:
             return None
+        root_x = int(plan["chunk_x"])
+        root_y = int(plan["chunk_y"])
         populations = self.ensure_procedural_settlement_populations()
-        key = procedural_population_key(cx, cy)
+        key = procedural_population_key(root_x, root_y)
         existing = None if force else populations.get(key)
         population = self.procedural_npc_builder().create_population(plan, existing=existing)
         population["source"] = "reclaimed_stronghold"
@@ -17435,12 +18427,13 @@ class FarmGame(
         notes.append("Residents were generated from placed reclaimed-stronghold town buildings.")
         population["notes"] = [str(note) for note in notes if str(note or "").strip()][-20:]
         populations[key] = population
-        record = self.wilderness_stronghold_record(cx, cy)
+        record = self.wilderness_stronghold_record(root_x, root_y)
         summary = self.procedural_npc_builder().summary(population)
         record["founded_population_count"] = int(summary.get("population", 0))
         record["founded_household_count"] = int(summary.get("households", 0))
         record["founded_job_vacancies"] = int(summary.get("vacancies", 0))
         record["founded_population_revision"] = int(plan.get("revision", 0) or 0)
+        self.process_founded_town_revenue(record, population)
         return population
 
     def reclaimed_stronghold_population_report_lines(
@@ -17550,20 +18543,24 @@ class FarmGame(
     ) -> Tuple[bool, str]:
         cx = self.state.wilderness_chunk_x if chunk_x is None else int(chunk_x)
         cy = self.state.wilderness_chunk_y if chunk_y is None else int(chunk_y)
-        if not self.wilderness_chunk_has_stronghold(cx, cy):
-            return False, "not a stronghold site"
-        record = self.wilderness_stronghold_record(cx, cy, create=False)
+        context = self.founded_town_root_context(cx, cy)
+        if not context:
+            return False, "not a founded town site"
+        root_x, root_y, record, _district = context
         if not record or not record.get("cleared"):
             return False, "clear the stronghold first"
-        if not self.wilderness_settlement_plan(cx, cy):
+        if not self.wilderness_settlement_plan(root_x, root_y):
             return False, "found a town here first"
-        catalog = self.reclaimed_stronghold_build_catalog()
+        catalog = self.reclaimed_stronghold_build_catalog(cx, cy)
         item = catalog.get(str(item_id))
         if not item:
             return False, "unknown town build item"
         cost = int(item.get("cost", 0) or 0)
-        if check_money and int(self.state.money) < cost:
-            return False, f"needs ${cost}"
+        site = context[3] if context[3] is not None else record
+        subsidy = self.founded_town_build_subsidy(record, site, item)
+        player_cost = max(0, cost - subsidy)
+        if check_money and int(self.state.money) < player_cost:
+            return False, f"needs ${player_cost}"
         grid = self.get_wilderness_chunk_map(cx, cy)
         h = len(grid)
         w = len(grid[0]) if h else 0
@@ -17612,16 +18609,27 @@ class FarmGame(
         cx = self.state.wilderness_chunk_x if chunk_x is None else int(chunk_x)
         cy = self.state.wilderness_chunk_y if chunk_y is None else int(chunk_y)
         allowed, reason = self.can_place_reclaimed_stronghold_build_item(item_id, x, y, cx, cy)
-        catalog = self.reclaimed_stronghold_build_catalog()
+        catalog = self.reclaimed_stronghold_build_catalog(cx, cy)
         item = catalog.get(str(item_id), {})
         name = str(item.get("name", item_id))
         if not allowed:
             self.set_message(f"Cannot place {name}: {reason}.")
             return False
+        context = self.founded_town_root_context(cx, cy)
+        if not context:
+            return False
+        root_x, root_y, record, district = context
+        site = district if district is not None else record
         cost = int(item.get("cost", 0) or 0)
-        self.state.money = max(0, int(self.state.money) - cost)
-        record = self.wilderness_stronghold_record(cx, cy)
-        features = self.reclaimed_stronghold_feature_records(record)
+        subsidy = self.founded_town_build_subsidy(record, site, item)
+        player_cost = max(0, cost - subsidy)
+        self.state.money = max(0, int(self.state.money) - player_cost)
+        if subsidy:
+            municipality = self.ensure_founded_town_municipality(record)
+            municipality["treasury"] = max(
+                0, int(municipality.get("treasury", 0)) - subsidy
+            )
+        features = self.reclaimed_stronghold_feature_records(record, cx, cy)
         kind = str(item.get("kind", "building"))
         if kind == "road":
             feature_id = f"{str(item_id)}:{int(x)},{int(y)}"
@@ -17640,24 +18648,30 @@ class FarmGame(
             "y": int(y),
             "width": max(1, int(item.get("width", 1) or 1)),
             "height": max(1, int(item.get("height", 1) or 1)),
-            "cost": cost,
+            "cost": player_cost,
+            "project_cost": cost,
+            "municipal_subsidy": subsidy,
+            "district_fit": str(item.get("district_fit", "supporting")),
             "walkable": bool(item.get("walkable", False)),
             "built_day": self.errand_day_key(),
         }
         features[feature_id] = feature
+        self.refresh_founded_town_maturity(record)
         grid = self.get_wilderness_chunk_map(cx, cy)
         self.stamp_reclaimed_stronghold_feature(grid, feature)
         self.ensure_reclaimed_stronghold_build_board(cx, cy)
         self.apply_reclaimed_stronghold_features_to_grid(cx, cy, grid)
-        plan = self.wilderness_settlement_plan(cx, cy)
+        plan = self.wilderness_settlement_plan(root_x, root_y)
         if plan:
             notes = plan.get("notes", [])
             if not isinstance(notes, list):
                 notes = []
             notes.append(f"Placed {name} at {int(x)},{int(y)} from the reclaimed stronghold build board.")
             plan["notes"] = [str(note) for note in notes if str(note or "").strip()][-20:]
-        population = self.reconcile_reclaimed_stronghold_population(cx, cy)
-        message = f"Placed {name} at {int(x)},{int(y)} for ${cost}."
+        population = self.reconcile_reclaimed_stronghold_population(root_x, root_y)
+        message = f"Placed {name} at {int(x)},{int(y)} for ${player_cost}."
+        if subsidy:
+            message += f" The town treasury covered ${subsidy}."
         if kind == "building" and population:
             summary = self.procedural_npc_builder().summary(population)
             count = int(summary.get("population", 0) or 0)
@@ -17677,6 +18691,12 @@ class FarmGame(
             f"Position: {feature.get('x')},{feature.get('y')}",
             f"Size: {feature.get('width', 1)}x{feature.get('height', 1)}",
             f"Cost paid: ${feature.get('cost', 0)}",
+            f"District fit: {str(feature.get('district_fit', 'supporting')).title()}",
+            (
+                f"Municipal subsidy: ${feature.get('municipal_subsidy', 0)}"
+                if int(feature.get("municipal_subsidy", 0) or 0)
+                else "Municipal subsidy: none"
+            ),
             "",
             "This was placed from the reclaimed stronghold build board.",
             "It is part of the founded town's visible stronghold site.",
@@ -17795,16 +18815,167 @@ class FarmGame(
                 continue
             self.set_message("Stronghold build mode: move cursor, Z place, I inspect, X cancel.")
 
+    def show_founded_town_expansion_menu(self):
+        context = self.founded_town_root_context()
+        if not context:
+            self.set_message("No founded town is available to expand.")
+            return
+        root_x, root_y, record, _district = context
+        candidates = self.founded_town_frontier_candidates(record)
+        cost = self.founded_town_expansion_cost(record)
+        building_types = self.founded_town_placed_building_types(record)
+        ready = "home" in building_types and len(building_types) >= 2
+        if not candidates:
+            self.set_message("No adjacent chunk is currently suitable for town expansion.")
+            return
+        items = []
+        for cx, cy in candidates:
+            dx, dy = cx - root_x, cy - root_y
+            direction = (
+                "east" if abs(dx) >= abs(dy) and dx > 0
+                else "west" if abs(dx) >= abs(dy) and dx < 0
+                else "south" if dy > 0
+                else "north"
+            )
+            items.append(MenuItem(
+                label=f"{direction.title()} frontier ({cx},{cy})",
+                value=f"{cx},{cy}",
+                enabled=ready and int(self.state.money) >= cost,
+                hint=(
+                    f"${cost}"
+                    if ready
+                    else "place a home and another building first"
+                ),
+            ))
+        items.append(MenuItem(label="Back", value=MENU_BACK, enabled=True))
+        choice = self.vertical_panel_select(
+            "Expand Founded Town",
+            items,
+            LEFT_PANEL_WIDTH,
+            LEFT_PANEL_HEIGHT,
+            return_back=True,
+        )
+        if choice is None or choice.value == MENU_BACK:
+            self.set_message("Town expansion cancelled.")
+            return
+        cx_text, cy_text = str(choice.value).split(",", 1)
+        kind_items = [
+            MenuItem(
+                label=f"{kind} District",
+                value=kind,
+                enabled=True,
+                hint={
+                    "Residential": "homes and neighborhood services",
+                    "Market": "shops, inns, and trade",
+                    "Artisan": "workshops and production",
+                    "Civic": "public services and institutions",
+                    "Garden": "parks, food, and open space",
+                }[kind],
+            )
+            for kind in FOUNDED_TOWN_DISTRICT_KINDS
+        ]
+        kind_items.append(MenuItem(label="Back", value=MENU_BACK, enabled=True))
+        kind_choice = self.vertical_panel_select(
+            "District Purpose",
+            kind_items,
+            LEFT_PANEL_WIDTH,
+            LEFT_PANEL_HEIGHT,
+            return_back=True,
+        )
+        if kind_choice is None or kind_choice.value == MENU_BACK:
+            self.set_message("Town expansion cancelled.")
+            return
+        self.expand_founded_town(
+            int(cx_text),
+            int(cy_text),
+            str(kind_choice.value),
+            root_x,
+            root_y,
+        )
+
+    def founded_town_site_status_lines(
+        self,
+        chunk_x: Optional[int] = None,
+        chunk_y: Optional[int] = None,
+    ) -> List[str]:
+        context = self.founded_town_root_context(chunk_x, chunk_y)
+        if not context:
+            return ["No founded-town district is present here."]
+        _root_x, _root_y, record, district = context
+        site = district if district is not None else record
+        metrics = self.founded_town_site_metrics(record, site)
+        demands = self.founded_town_site_demands(record, site)
+        profile = FOUNDED_TOWN_DISTRICT_PROFILES[str(metrics["kind"])]
+        return [
+            str(
+                site.get(
+                    "name",
+                    record.get("founded_settlement_name", "Founded Town Center"),
+                )
+            ).upper(),
+            "",
+            f"Purpose: {metrics['kind']}",
+            f"Maturity: {metrics['label']} ({metrics['score']} structural points)",
+            f"Specialized buildings: {metrics['aligned_buildings']}",
+            f"Other buildings: {metrics['other_buildings']}",
+            f"Connected road tiles: {metrics['roads']}",
+            f"Public amenities: {metrics['decorations']}",
+            "",
+            f"District effect: {profile['benefit']}",
+            "Favored construction costs 15% less here.",
+            "Off-specialty buildings cost 10% more.",
+            "The municipal treasury can cover 25% of favored buildings and roads.",
+            "",
+            "Current demand:",
+            *(
+                [f"- {demand}" for demand in demands]
+                if demands
+                else ["- Local development goals are currently satisfied."]
+            ),
+        ]
+
+    def founded_town_treasury_lines(
+        self,
+        record: Dict[str, object],
+    ) -> List[str]:
+        municipality = self.refresh_founded_town_maturity(record)
+        self.process_founded_town_revenue(record)
+        lines = [
+            "FOUNDED TOWN TREASURY",
+            "",
+            f"Available public funds: ${municipality.get('treasury', 0)}",
+            f"Lifetime municipal revenue: ${municipality.get('lifetime_revenue', 0)}",
+            f"Development points: {municipality.get('development_points', 0)}",
+            "",
+            "Revenue comes from residents, operating markets, mature districts,",
+            "and civic administration. It is collected once per in-game week.",
+            "",
+            "The treasury automatically subsidizes up to 25% of favored",
+            "district construction and connected roads. It never becomes",
+            "personal player money.",
+            "",
+            "Active maturity benefits:",
+        ]
+        benefits = self.founded_town_maturity_benefits(record)
+        lines.extend([f"- {benefit}" for benefit in benefits] or ["- No district is established yet."])
+        log = list(municipality.get("revenue_log", []) or [])
+        if log:
+            lines.extend(["", "Recent revenue:", *[f"- {entry}" for entry in log[-6:]]])
+        return lines
+
     def show_reclaimed_stronghold_build_board(self):
-        if not self.wilderness_chunk_has_stronghold():
+        context = self.founded_town_root_context()
+        if not context and not self.wilderness_chunk_has_stronghold():
             self.set_message("There is no reclaimed stronghold build board here.")
             return
-        record = self.wilderness_stronghold_record()
+        record = context[2] if context else self.wilderness_stronghold_record()
         if not record.get("cleared"):
             self.set_message("Clear the stronghold before using its build board.")
             return
         self.ensure_reclaimed_stronghold_build_board()
-        plan = self.wilderness_settlement_plan(self.state.wilderness_chunk_x, self.state.wilderness_chunk_y)
+        root_x = context[0] if context else self.state.wilderness_chunk_x
+        root_y = context[1] if context else self.state.wilderness_chunk_y
+        plan = self.wilderness_settlement_plan(root_x, root_y)
         if not plan:
             items = [
                 MenuItem(label="Found town here", value="found", enabled=True, hint="create town blueprint"),
@@ -17822,20 +18993,56 @@ class FarmGame(
                 self.found_town_at_reclaimed_stronghold()
                 return
         while True:
-            features = self.reclaimed_stronghold_feature_records(record)
+            features = self.reclaimed_stronghold_feature_records(
+                record,
+                self.state.wilderness_chunk_x,
+                self.state.wilderness_chunk_y,
+            )
+            site = (
+                context[3]
+                if context and context[3] is not None
+                else record
+            )
+            site_metrics = self.founded_town_site_metrics(record, site)
+            municipality = self.refresh_founded_town_maturity(record)
+            self.process_founded_town_revenue(record)
             items = [
                 MenuItem(label="Town overview", value="overview", enabled=True, hint=f"{len(features)} placed"),
+                MenuItem(
+                    label="District status",
+                    value="district_status",
+                    enabled=True,
+                    hint=f"{site_metrics['kind']} | {site_metrics['label']}",
+                ),
+                MenuItem(
+                    label="Town treasury",
+                    value="treasury",
+                    enabled=True,
+                    hint=f"${municipality.get('treasury', 0)} public funds",
+                ),
                 MenuItem(label="View blueprint", value="blueprint", enabled=True),
                 MenuItem(label="Residents", value="residents", enabled=True, hint="households and jobs"),
+                MenuItem(
+                    label="Expand town",
+                    value="expand",
+                    enabled=True,
+                    hint=(
+                        f"${self.founded_town_expansion_cost(record)} | "
+                        f"{len(self.founded_town_districts(record))} district(s)"
+                    ),
+                ),
             ]
             for item_id, item in self.reclaimed_stronghold_build_catalog().items():
                 cost = int(item.get("cost", 0) or 0)
+                subsidy = self.founded_town_build_subsidy(record, site, item)
+                player_cost = max(0, cost - subsidy)
                 size = f"{item.get('width', 1)}x{item.get('height', 1)}"
+                fit = str(item.get("district_fit", "supporting"))
                 items.append(MenuItem(
                     label=str(item.get("name", item_id)),
                     value=item_id,
-                    enabled=int(self.state.money) >= cost,
-                    hint=f"${cost} {size}",
+                    enabled=int(self.state.money) >= player_cost,
+                    hint=f"${player_cost} {size} | {fit}",
                 ))
             items.append(MenuItem(label="Back", value=MENU_BACK, enabled=True))
             choice = self.vertical_panel_select(str(plan.get("name", "Founded Town")), items, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT, return_back=True)
@@ -17845,20 +19052,39 @@ class FarmGame(
             if choice.value == "overview":
                 self.vertical_panel_view(str(plan.get("name", "Founded Town")), self.reclaimed_stronghold_town_overview_lines(), LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
                 continue
+            if choice.value == "district_status":
+                self.vertical_panel_view(
+                    str(site.get("name", plan.get("name", "Founded Town"))),
+                    self.founded_town_site_status_lines(),
+                    LEFT_PANEL_WIDTH,
+                    LEFT_PANEL_HEIGHT,
+                )
+                continue
+            if choice.value == "treasury":
+                self.vertical_panel_view(
+                    str(plan.get("name", "Founded Town")),
+                    self.founded_town_treasury_lines(record),
+                    LEFT_PANEL_WIDTH,
+                    LEFT_PANEL_HEIGHT,
+                )
+                continue
             if choice.value == "blueprint":
-                self.show_wilderness_settlement_blueprint(self.state.wilderness_chunk_x, self.state.wilderness_chunk_y)
+                self.show_wilderness_settlement_blueprint(root_x, root_y)
                 continue
             if choice.value == "residents":
                 self.vertical_panel_view(
                     str(plan.get("name", "Founded Town")),
                     self.reclaimed_stronghold_population_report_lines(
-                        self.state.wilderness_chunk_x,
-                        self.state.wilderness_chunk_y,
+                        root_x,
+                        root_y,
                     ),
                     LEFT_PANEL_WIDTH,
                     LEFT_PANEL_HEIGHT,
                 )
                 continue
+            if choice.value == "expand":
+                self.show_founded_town_expansion_menu()
+                return
             self.reclaimed_stronghold_cursor_place_build_item(str(choice.value))
             return
 
@@ -17898,7 +19124,9 @@ class FarmGame(
     ) -> List[Dict[str, object]]:
         cx = self.state.wilderness_chunk_x if chunk_x is None else int(chunk_x)
         cy = self.state.wilderness_chunk_y if chunk_y is None else int(chunk_y)
-        plan = self.wilderness_settlement_plan(cx, cy)
+        context = self.founded_town_root_context(cx, cy)
+        root_x, root_y = (context[0], context[1]) if context else (cx, cy)
+        plan = self.wilderness_settlement_plan(root_x, root_y)
         if not plan:
             return []
         buildings = plan.get("buildings", {})
@@ -17934,25 +19162,44 @@ class FarmGame(
     ) -> List[str]:
         cx = self.state.wilderness_chunk_x if chunk_x is None else int(chunk_x)
         cy = self.state.wilderness_chunk_y if chunk_y is None else int(chunk_y)
-        plan = self.wilderness_settlement_plan(cx, cy)
+        context = self.founded_town_root_context(cx, cy)
+        root_x, root_y = (context[0], context[1]) if context else (cx, cy)
+        plan = self.wilderness_settlement_plan(root_x, root_y)
         if not plan:
             return ["No founded town exists at this reclaimed stronghold."]
         summary = self.wilderness_town_builder().summary(plan)
-        features = self.reclaimed_stronghold_feature_records(chunk_x=cx, chunk_y=cy)
-        placed_buildings = sum(1 for feature in features.values() if isinstance(feature, dict) and feature.get("kind") == "building")
-        placed_roads = sum(1 for feature in features.values() if isinstance(feature, dict) and feature.get("kind") == "road")
-        placed_decor = sum(1 for feature in features.values() if isinstance(feature, dict) and feature.get("kind") == "decoration")
-        population = self.reconcile_reclaimed_stronghold_population(cx, cy) if placed_buildings else None
+        record = context[2] if context else self.wilderness_stronghold_record(root_x, root_y, create=False)
+        sites = [(root_x, root_y), *[
+            (int(district["chunk_x"]), int(district["chunk_y"]))
+            for district in self.founded_town_districts(record)
+        ]]
+        feature_sets = [
+            self.reclaimed_stronghold_feature_records(record, site_x, site_y)
+            for site_x, site_y in sites
+        ]
+        placed_buildings = sum(1 for features in feature_sets for feature in features.values() if isinstance(feature, dict) and feature.get("kind") == "building")
+        placed_roads = sum(1 for features in feature_sets for feature in features.values() if isinstance(feature, dict) and feature.get("kind") == "road")
+        placed_decor = sum(1 for features in feature_sets for feature in features.values() if isinstance(feature, dict) and feature.get("kind") == "decoration")
+        population = self.reconcile_reclaimed_stronghold_population(root_x, root_y) if placed_buildings else None
         population_summary = (
             self.procedural_npc_builder().summary(population)
             if isinstance(population, dict)
             else {"population": 0, "households": 0, "vacancies": 0}
         )
+        municipality = self.refresh_founded_town_maturity(record)
+        runtime_plan = self.reclaimed_stronghold_population_plan(root_x, root_y)
+        municipal_tier = (
+            self.procedural_town_development_tier(runtime_plan)
+            if runtime_plan
+            else "Frontier Town"
+        )
         lines = [
             "FOUNDED STRONGHOLD TOWN",
             "",
             f"Name: {plan.get('name', 'Founded Town')}",
-            f"Chunk: {cx},{cy}",
+            f"Town center: {root_x},{root_y}",
+            f"Developed footprint: {len(sites)} chunk(s)",
+            f"Expansion districts: {len(sites) - 1}",
             f"Style: {plan.get('style', 'Crossroads')}",
             f"Status: {plan.get('status', 'planning')}",
             f"Development: {summary['tier']}",
@@ -17962,6 +19209,24 @@ class FarmGame(
             f"Placed at stronghold: {placed_buildings} building(s), {placed_roads} road/path tile(s), {placed_decor} decoration(s)",
             f"Residents: {population_summary['population']} across {population_summary['households']} household(s)",
             f"Job vacancies: {population_summary['vacancies']}",
+            f"Municipal maturity: {municipal_tier} ({municipality.get('development_points', 0)} points)",
+            f"Town treasury: ${municipality.get('treasury', 0)}",
+            "",
+            "District development:",
+        ]
+        for site in [record, *self.founded_town_districts(record)]:
+            metrics = self.founded_town_site_metrics(record, site)
+            demands = self.founded_town_site_demands(record, site)
+            lines.append(
+                f"- {site.get('name', plan.get('name', 'Town Center'))}: "
+                f"{metrics['kind']} / {metrics['label']}; "
+                f"demand: {', '.join(demands[:3]) if demands else 'satisfied'}"
+            )
+        benefits = self.founded_town_maturity_benefits(record)
+        lines.extend([
+            "",
+            "Active specialization benefits:",
+            *([f"- {benefit}" for benefit in benefits] if benefits else ["- No district is established yet."]),
             "",
             "Build flow:",
             "- Queue a planned building.",
@@ -17971,8 +19236,8 @@ class FarmGame(
             "- Use the build board for cursor placement of visible roads, buildings, and decorations.",
             "",
             "Queued projects:",
-        ]
-        queued = self.reclaimed_stronghold_town_buildings(cx, cy, queued_only=True)
+        ])
+        queued = self.reclaimed_stronghold_town_buildings(root_x, root_y, queued_only=True)
         if queued:
             for building in queued[:10]:
                 lines.append(
@@ -17991,11 +19256,13 @@ class FarmGame(
     ) -> bool:
         cx = self.state.wilderness_chunk_x if chunk_x is None else int(chunk_x)
         cy = self.state.wilderness_chunk_y if chunk_y is None else int(chunk_y)
-        plan = self.wilderness_settlement_plan(cx, cy)
+        context = self.founded_town_root_context(cx, cy)
+        root_x, root_y = (context[0], context[1]) if context else (cx, cy)
+        plan = self.wilderness_settlement_plan(root_x, root_y)
         if not plan:
             self.set_message("Found a town here before queueing town construction.")
             return False
-        buildings = self.reclaimed_stronghold_town_buildings(cx, cy, queued_only=False)
+        buildings = self.reclaimed_stronghold_town_buildings(root_x, root_y, queued_only=False)
         if not buildings:
             self.set_message(f"All planned buildings at {plan.get('name', 'this town')} are complete.")
             return False
@@ -18015,7 +19282,7 @@ class FarmGame(
             self.set_message("No town project queued.")
             return False
         building_id = str(choice.value)
-        if self.queue_wilderness_settlement_building(cx, cy, building_id):
+        if self.queue_wilderness_settlement_building(root_x, root_y, building_id):
             building = plan.get("buildings", {}).get(building_id, {})
             self.autosave_with_message(f"Queued {building.get('name', building_id)} at {plan.get('name', 'the founded town')}.")
             return True
@@ -18029,11 +19296,13 @@ class FarmGame(
     ) -> bool:
         cx = self.state.wilderness_chunk_x if chunk_x is None else int(chunk_x)
         cy = self.state.wilderness_chunk_y if chunk_y is None else int(chunk_y)
-        plan = self.wilderness_settlement_plan(cx, cy)
+        context = self.founded_town_root_context(cx, cy)
+        root_x, root_y = (context[0], context[1]) if context else (cx, cy)
+        plan = self.wilderness_settlement_plan(root_x, root_y)
         if not plan:
             self.set_message("Found a town here before contributing to construction.")
             return False
-        queued = self.reclaimed_stronghold_town_buildings(cx, cy, queued_only=True)
+        queued = self.reclaimed_stronghold_town_buildings(root_x, root_y, queued_only=True)
         if not queued:
             self.set_message("Queue a town project before contributing supplies.")
             return False
@@ -18053,7 +19322,7 @@ class FarmGame(
             return False
         building_id = str(choice.value)
         building = plan.get("buildings", {}).get(building_id, {})
-        accepted = self.contribute_to_wilderness_settlement(cx, cy, building_id, use_available=True)
+        accepted = self.contribute_to_wilderness_settlement(root_x, root_y, building_id, use_available=True)
         parts: List[str] = []
         if accepted.get("materials"):
             parts.append(format_drops(accepted["materials"]))
@@ -18075,22 +19344,24 @@ class FarmGame(
     ) -> bool:
         cx = self.state.wilderness_chunk_x if chunk_x is None else int(chunk_x)
         cy = self.state.wilderness_chunk_y if chunk_y is None else int(chunk_y)
-        plan = self.wilderness_settlement_plan(cx, cy)
+        context = self.founded_town_root_context(cx, cy)
+        root_x, root_y = (context[0], context[1]) if context else (cx, cy)
+        plan = self.wilderness_settlement_plan(root_x, root_y)
         if not plan:
             self.set_message("Found a town here before working on construction.")
             return False
-        queued = self.reclaimed_stronghold_town_buildings(cx, cy, queued_only=True)
+        queued = self.reclaimed_stronghold_town_buildings(root_x, root_y, queued_only=True)
         if not queued:
             self.set_message("Queue a town project before working construction.")
             return False
-        ready = self.reclaimed_stronghold_town_ready_buildings(cx, cy)
+        ready = self.reclaimed_stronghold_town_ready_buildings(root_x, root_y)
         if not ready:
             first = queued[0]
             self.set_message(f"{first.get('name', 'The queued project')} needs {self.wilderness_settlement_building_need_summary(first)} first.")
             return False
         if not self.spend_stamina(stamina_cost):
             return False
-        completed = self.advance_wilderness_settlement_construction(cx, cy, labor)
+        completed = self.advance_wilderness_settlement_construction(root_x, root_y, labor)
         self.advance_time(minutes)
         if completed:
             progress = "; ".join(completed[:3])
@@ -18105,13 +19376,15 @@ class FarmGame(
     def show_reclaimed_stronghold_town_construction(self):
         cx = self.state.wilderness_chunk_x
         cy = self.state.wilderness_chunk_y
-        plan = self.wilderness_settlement_plan(cx, cy)
+        context = self.founded_town_root_context(cx, cy)
+        root_x, root_y = (context[0], context[1]) if context else (cx, cy)
+        plan = self.wilderness_settlement_plan(root_x, root_y)
         if not plan:
             self.set_message("No founded town exists at this reclaimed stronghold.")
             return
         while True:
-            queued = self.reclaimed_stronghold_town_buildings(cx, cy, queued_only=True)
-            ready = self.reclaimed_stronghold_town_ready_buildings(cx, cy)
+            queued = self.reclaimed_stronghold_town_buildings(root_x, root_y, queued_only=True)
+            ready = self.reclaimed_stronghold_town_ready_buildings(root_x, root_y)
             items = [
                 MenuItem(label="Open build board", value="build_board", enabled=True, hint="cursor place"),
                 MenuItem(label="Town overview", value="overview", enabled=True),
@@ -18129,19 +19402,19 @@ class FarmGame(
                 self.show_reclaimed_stronghold_build_board()
                 return
             if choice.value == "overview":
-                self.vertical_panel_view(str(plan.get("name", "Founded Town")), self.reclaimed_stronghold_town_overview_lines(cx, cy), LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
+                self.vertical_panel_view(str(plan.get("name", "Founded Town")), self.reclaimed_stronghold_town_overview_lines(root_x, root_y), LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
                 continue
             if choice.value == "blueprint":
-                self.show_wilderness_settlement_blueprint(cx, cy)
+                self.show_wilderness_settlement_blueprint(root_x, root_y)
                 continue
             if choice.value == "queue":
-                self.queue_reclaimed_stronghold_town_building(cx, cy)
+                self.queue_reclaimed_stronghold_town_building(root_x, root_y)
                 return
             if choice.value == "contribute":
-                self.contribute_to_reclaimed_stronghold_town_building(cx, cy)
+                self.contribute_to_reclaimed_stronghold_town_building(root_x, root_y)
                 return
             if choice.value == "work":
-                self.work_on_reclaimed_stronghold_town(cx, cy)
+                self.work_on_reclaimed_stronghold_town(root_x, root_y)
                 return
 
     def wilderness_stronghold_status_lines(self, chunk_x: Optional[int] = None, chunk_y: Optional[int] = None) -> List[str]:
@@ -19258,9 +20531,16 @@ class FarmGame(
                     "symbol": str(island_profile.get("symbol", "I"))[:1],
                     "color": C.WOOD,
                 }
-        stronghold = self.wilderness_stronghold_record(chunk_x, chunk_y, create=False)
+        founded_context = self.founded_town_root_context(chunk_x, chunk_y)
+        stronghold = (
+            founded_context[2]
+            if founded_context
+            else self.wilderness_stronghold_record(chunk_x, chunk_y, create=False)
+        )
         if stronghold.get("cleared"):
-            for feature in self.reclaimed_stronghold_feature_records(stronghold).values():
+            for feature in self.reclaimed_stronghold_feature_records(
+                stronghold, chunk_x, chunk_y
+            ).values():
                 if not isinstance(feature, dict):
                     continue
                 color = {
@@ -20229,6 +21509,8 @@ class FarmGame(
         rejected = self.drop_rejected_inventory_near_player()
         if rejected:
             msg = f"{msg} Backpack full; {format_drops(rejected)} was left in a dropped pack here."
+        if self.check_victory_completion(interactive=True):
+            return
         if self.save(quiet=True):
             self.set_message(msg)
 
@@ -20489,6 +21771,34 @@ class FarmGame(
         """
         self.world_tick(FRAME_SECONDS)
 
+    def try_enter_wilderness_transition_at(self, x: int, y: int) -> bool:
+        """Enter only a coordinate-owned wilderness doorway.
+
+        Glyphs are deliberately insufficient here: authored façades and
+        wilderness features reuse several letters for unrelated purposes.
+        """
+        if not self.on_wilderness() or not self.in_active_bounds(x, y):
+            return False
+        if self.enter_seamless_home_world_door(x, y):
+            return True
+        home_gateway = self.origin_world_gateway_at(x, y)
+        if home_gateway:
+            self.enter_origin_world_gateway(home_gateway)
+            return True
+        if self.current_wilderness_outpost_door_at(x, y):
+            return bool(self.enter_wilderness_outpost(x, y))
+        if self.current_wilderness_structure_door_at(x, y):
+            return bool(self.enter_wilderness_structure(x, y))
+        building = self.procedural_town_building_door_at(x, y)
+        if building:
+            self.enter_procedural_town_building(building)
+            return True
+        if self.is_wilderness_cave_entrance_at(x, y):
+            return bool(self.enter_wilderness_cave(x, y))
+        if self.is_wilderness_dungeon_entrance_at(x, y):
+            return bool(self.enter_wilderness_dungeon(x, y))
+        return False
+
     def move(self, dx: int, dy: int):
         s = self.state
         if s.fishing_active:
@@ -20551,35 +21861,6 @@ class FarmGame(
                 self.set_message(f"{animal.get('name', 'The animal')} greets you. Use Z/Enter to give individual care.")
             return
 
-        town_npc_context = (
-            self.on_town() or self.on_town_interior() or self.on_house()
-            or self.on_farm() or self.on_mine()
-            or (self.on_wilderness() and self.in_seamless_town_district(nx, ny))
-            or (self.on_wilderness() and self.in_seamless_farm_district(nx, ny))
-        )
-        nearby_town_npc = (
-            self.town_npc_at(nx, ny)
-            if town_npc_context and self.in_active_bounds(nx, ny)
-            else None
-        )
-        if nearby_town_npc:
-            npc = nearby_town_npc
-            self.town_npc_face_player(npc)
-            self.set_message(f"{npc.get('name', 'Someone')} pauses, {self.town_npc_activity_label(npc)}. Use Z/Enter to talk.")
-            return
-        if (
-            (self.on_wilderness() or self.on_procedural_town_interior())
-            and self.in_active_bounds(nx, ny)
-        ):
-            resident = self.procedural_town_resident_at(nx, ny)
-            if resident:
-                self.set_message(
-                    f"{resident.get('name', 'A resident')} pauses, "
-                    f"{resident.get('runtime_activity', 'following today’s routine')}. "
-                    "Use Z/Enter to talk."
-                )
-                return
-
         if self.on_farm() and nx <= 0 and 8 <= ny <= 12: self.transition_to_town(); return
         if self.on_farm() and ny <= 0 and 25 <= nx <= 29: self.transition_to_mine(); return
         if self.on_farm() and nx >= self.active_map_width() - 1 and 8 <= ny <= 12:
@@ -20630,6 +21911,12 @@ class FarmGame(
         if self.on_wilderness_dungeon() and self.in_active_bounds(nx, ny) and self.dungeon_door_closed(nx, ny):
             self.dungeon_use_door(nx, ny)
             return
+        if self.on_procedural_town_interior() and self.in_active_bounds(nx, ny) and self.active_map()[ny][nx] == "_":
+            self.use_procedural_town_interior_action(nx, ny)
+            return
+        if self.on_town_interior() and self.in_active_bounds(nx, ny) and self.active_map()[ny][nx] == "_":
+            self.use_town_room_door_action(nx, ny)
+            return
         if self.on_wilderness_dungeon() and self.in_active_bounds(nx, ny) and self.wilderness_dungeon_enemy_at(nx, ny):
             self.start_wilderness_dungeon_combat_encounter(self.wilderness_dungeon_enemy_at(nx, ny), reason="bump")
             return
@@ -20640,24 +21927,8 @@ class FarmGame(
             self.exit_wilderness_structure()
             return
         if self.on_wilderness():
-            if self.in_active_bounds(nx, ny) and self.enter_seamless_home_world_door(nx, ny):
+            if self.try_enter_wilderness_transition_at(nx, ny):
                 return
-            if self.in_active_bounds(nx, ny):
-                home_gateway = self.origin_world_gateway_at(nx, ny)
-                if home_gateway:
-                    self.enter_origin_world_gateway(home_gateway)
-                    return
-            if self.in_active_bounds(nx, ny):
-                if self.active_map()[ny][nx] == WILDERNESS_OUTPOST_SYMBOL:
-                    self.enter_wilderness_outpost(nx, ny)
-                    return
-                if self.current_wilderness_structure_door_at(nx, ny):
-                    self.enter_wilderness_structure(nx, ny)
-                    return
-                building = self.procedural_town_building_door_at(nx, ny)
-                if building:
-                    self.enter_procedural_town_building(building)
-                    return
             if self.in_active_bounds(nx, ny) and self.wilderness_stronghold_enemy_at(nx, ny):
                 self.start_wilderness_stronghold_combat_encounter(self.wilderness_stronghold_enemy_at(nx, ny), reason="bump")
                 return
@@ -20673,12 +21944,6 @@ class FarmGame(
                 animal = self.animal_at(nx, ny)
                 self.set_message(f"A {animal.get('species', 'wild animal')} is in the way. Use Z/Enter to observe it.")
                 self.startle_animal(animal)
-                return
-            if self.in_active_bounds(nx, ny) and self.active_map()[ny][nx] == "V":
-                self.enter_wilderness_cave(nx, ny)
-                return
-            if self.in_active_bounds(nx, ny) and self.is_wilderness_dungeon_entrance_at(nx, ny):
-                self.enter_wilderness_dungeon(nx, ny)
                 return
             # The player may stand on the outermost tile. Only the next step
             # crosses, preserving exact world coordinates across the seam.
@@ -20882,7 +22147,8 @@ class FarmGame(
         if self.travel_follower_at(x, y):
             return True
         if (
-            self.on_farm() or self.on_mine()
+            self.on_town() or self.on_town_interior() or self.on_house()
+            or self.on_farm() or self.on_mine()
             or self.in_seamless_farm_district(x, y)
             or self.in_seamless_town_district(x, y)
         ) and self.town_npc_at(x, y):
@@ -20976,7 +22242,8 @@ class FarmGame(
             if self.get_placed_object(x, y) or self.get_crop(x, y) or self.near_shipping_bin(x, y):
                 return True
             return (
-                tile in ["S", "=", "~", FIELD_SITE_SYMBOL, WILDERNESS_OUTPOST_SYMBOL, WILDERNESS_LANDSCAPE_SYMBOL, WILDERNESS_DOCK_SYMBOL, WILDERNESS_FISHING_SETTLEMENT_SYMBOL, WILDERNESS_CLAIM_SYMBOL, "R", "H", "B", "J", "P", "Y", "u", "K", "Q", "?", "W", "N", "F", "!"]
+                tile in ["S", "=", "~", FIELD_SITE_SYMBOL, WILDERNESS_LANDSCAPE_SYMBOL, WILDERNESS_DOCK_SYMBOL, WILDERNESS_FISHING_SETTLEMENT_SYMBOL, WILDERNESS_CLAIM_SYMBOL, "R", "H", "B", "J", "P", "Y", "u", "K", "Q", "?", "W", "N", "F", "!"]
+                or self.current_wilderness_outpost_door_at(x, y)
                 or self.current_wilderness_structure_door_at(x, y)
                 or tile in WILDERNESS_FORAGE_SYMBOLS
                 or tile in ["T", "o", "*", "^"]
@@ -21113,6 +22380,9 @@ class FarmGame(
                 return "Walk onto stairs: go up"
             if tile == ">":
                 return "Walk onto stairs: go down"
+            game_id = self.game_table_fixture_id(tile)
+            if game_id:
+                return f"Z/Enter: play {GAME_TABLE_DATA[game_id]['name']}"
             if tile == "&":
                 building = self.current_procedural_town_building()
                 staff = self.procedural_town_building_service_staff(building) if building else []
@@ -21134,6 +22404,14 @@ class FarmGame(
             return {"D": "Walk into door: return to wilderness", "b": "Z/Enter: rest at outpost", "P": "Z/Enter: review regional records", "&": "Z/Enter: check outpost supplies", "s": "Z/Enter: check weekly supply locker"}.get(tile, "Z/Enter: inspect outpost")
         if self.on_wilderness_structure():
             tile = self.active_map()[y][x]
+            record = self.wilderness_structure_record()
+            game_id = self.game_table_fixture_id(tile)
+            if game_id and str(record.get("type_id", "")) in {"roadside_inn", "desert_caravanserai", "tundra_wayhouse"}:
+                return (
+                    f"Z/Enter: play {GAME_TABLE_DATA[game_id]['name']}"
+                    if record.get("repaired")
+                    else "Z/Enter: inspect unrestored game table"
+                )
             return {"D": "Walk into door: return to wilderness", "b": "Z/Enter: rest here", "P": "Z/Enter: review structure records", "&": "Z/Enter: use restored service counter", "s": "Z/Enter: check regional supplies", "@": "Z/Enter: talk to caretaker", "+": "Z/Enter: visit wayside shrine"}.get(tile, "Z/Enter: inspect structure")
 
         if self.on_town_interior():
@@ -21333,7 +22611,7 @@ class FarmGame(
             if tile == "G": return "Z/Enter: gather wild roots"
             if tile == "Z": return "Z/Enter: gather mushroom log"
             if tile == "M": return "F with Pickaxe: break mineral outcrop"
-            if tile == WILDERNESS_OUTPOST_SYMBOL: return "Z/Enter: open outpost door"
+            if self.current_wilderness_outpost_door_at(x, y): return "Z/Enter: open outpost door"
             if tile == WILDERNESS_STRUCTURE_SYMBOL and self.current_wilderness_structure_door_at(x, y): return "Z/Enter: open building door"
             if tile == WILDERNESS_LANDSCAPE_SYMBOL: return "Z/Enter: use major landscape route, work, or charting"
             if tile == WILDERNESS_DOCK_SYMBOL: return "Z/Enter: ferries, rentals, skiffs, and Explorer Raft plans"
@@ -21418,6 +22696,9 @@ class FarmGame(
             tile = self.active_map()[y][x]
             if tile == "D": return "Walk into door: leave inn"
             if tile in ["n", "&", "$"]: return "Z/Enter: talk to innkeeper"
+            game_id = self.game_table_fixture_id(tile)
+            if game_id:
+                return f"Z/Enter: play {GAME_TABLE_DATA[game_id]['name']}"
             if tile == "B": return "Z/Enter: inspect guest bed"
             return "Z/Enter: inspect inn"
         if self.on_furniture_store():
@@ -21551,6 +22832,10 @@ class FarmGame(
             "Family Table": 5,
             "Keepsake Chest": 3,
         }
+        furniture_scores.update({
+            furniture_name: 4
+            for furniture_name in GAME_TABLE_BY_FURNITURE
+        })
         upgrade_scores = {
             "Kitchen Addition": 4,
             "Bedroom Expansion": 5,
@@ -21782,6 +23067,24 @@ class FarmGame(
                     "- Mortality Mode in Settings controls adult aging, old-age succession, lethal combat, and true permadeath.",
                 ],
             },
+            "run_modes_and_victory": {
+                "title": "Run Modes and Victory Contracts",
+                "hint": "sandbox or finite challenge",
+                "lines": [
+                    "RUN MODES AND VICTORY CONTRACTS",
+                    "",
+                    "- Run mode is chosen during character creation and applies only to that save.",
+                    "- Open-Ended mode has no formal win condition; the farm, family, and world can continue indefinitely.",
+                    "- Finite Challenge creates five hard randomized objectives: Economy, Exploration, Mastery, Community, and Legacy.",
+                    "- The exact contract is shown before the character is confirmed, so you know what the run requires.",
+                    "- Contract objectives use persistent accomplishments such as wealth, explored regions, combat growth, town work, relationships, and holdings.",
+                    "- Open Tab > Journal > Victory Contract to see exact targets and live progress.",
+                    "- A finite contract cannot be rerolled, disabled, or replaced after the run begins.",
+                    "- Completing all five objectives immediately records final statistics, ends the run, and makes that save permanently read-only.",
+                    "- Victory saves remain available from Continue or Load so their ending record can be viewed again.",
+                    "- Mortality still follows the selected Mortality Mode; a lethal ending can end a finite run before its contract is complete.",
+                ],
+            },
             "stamina_leveling": {
                 "title": "Stamina, Leveling, and Recovery",
                 "hint": f"current cap {self.max_stamina()}",
@@ -21949,6 +23252,100 @@ class FarmGame(
                     "- Market Row rotates goods according to date, weather, projects, and relationships.",
                     "- Prices, daily limits, town reputation, policies, and restoration can alter what is available.",
                     "- Preserve scarce crafting resources until you know whether a project or recipe needs them.",
+                ],
+            },
+            "tavern_games": {
+                "title": "Tavern Games: Cards and Board Games",
+                "hint": "cards and board games",
+                "lines": [
+                    "TAVERN GAME TABLES",
+                    "",
+                    "- Each card or board game now belongs to a physical table, board, or furniture item.",
+                    "- Mae's Inn keeps Blackjack, Hearts, and Checkers in its common room.",
+                    "- Generated-town inns and restored roadside venues carry different stable selections.",
+                    "- The Furniture Store rotates two game furnishings each week; rare tables can also be recovered from wilderness and ruin containers.",
+                    "- Place recovered or purchased game furniture in any home you own, then interact with it to play.",
+                    "- Blackjack uses wagers. Checkers and chess are free. Mancala offers both free practice and wagers.",
+                    "- Reach 21 without going over. Face cards count as 10; Aces count as 11 or 1 as needed.",
+                    "- The dealer draws through 16 and stands on every 17. Equal totals return the wager as a push.",
+                    "- Ordinary wins pay 1:1, while an opening Ace plus a ten-value card pays 3:2.",
+                    "- Double Down pays a second wager, draws exactly one card, and automatically stands.",
+                    "- Equal-value opening cards can be split into separate hands by paying another wager.",
+                    "- Use W/S or arrows to choose an action and Z/Enter to confirm. X/Escape safely stands.",
+                    "- Wagers use in-game gold, begin at 10g, and are capped at 1,000g per initial hand.",
+                    "- In checkers, red pieces move diagonally upward; captures and chained jumps are mandatory.",
+                    "- Reach the far edge to crown a King, which can move and capture in either direction.",
+                    "- Checkers supports Friendly, Practiced, and Expert opponents.",
+                    "- X/Escape clears a selected piece, then pauses and saves the match when pressed again.",
+                    "- Chess includes castling, en passant, promotion, checkmate, stalemate, repetition, insufficient-material, and fifty-move draws.",
+                    "- In chess you play White; uppercase pieces are yours and lowercase pieces belong to the opponent.",
+                    "- Mancala uses six pits and one store per side. Sow every stone counterclockwise from a selected lower pit.",
+                    "- Landing in your store grants another turn. Landing in an empty pit on your side captures the stones opposite it.",
+                    "- Mancala wins earn 1x wager profit on Friendly, 1.5x on Practiced, or 2x on Expert; draws refund the wager.",
+                    "- Texas Hold'em, Hearts, Solitaire, and the Royal Game of Ur have dedicated tutorials below.",
+                    "- Tavern Game Records track every card and board game, including applicable net winnings.",
+                    "- Tavern games advance the in-game clock and are recreation, not guaranteed income.",
+                ],
+            },
+            "texas_holdem": {
+                "title": "Texas Hold'em",
+                "hint": "community cards and betting",
+                "lines": [
+                    "TEXAS HOLD'EM",
+                    "",
+                    "- Four seats receive two private cards each. The flop, turn, and river create five shared community cards.",
+                    "- Make the best five-card poker hand from any combination of your private and community cards.",
+                    "- Hands rank from High Card through Pair, Two Pair, Trips, Straight, Flush, Full House, Quads, and Straight Flush.",
+                    "- Every player antes. Check, call, make a fixed-limit raise, or fold during each betting street.",
+                    "- A selected table buy-in is the absolute maximum that hand can cost.",
+                    "- Chips that were never committed to the pot return after a fold or showdown.",
+                    "- Exact ties split the pot. Opponent strength affects hand valuation and willingness to defend bets.",
+                    "- X/Escape folds safely; it never removes more gold than the original table-stakes buy-in.",
+                ],
+            },
+            "hearts": {
+                "title": "Hearts",
+                "hint": "passing and trick-taking",
+                "lines": [
+                    "HEARTS",
+                    "",
+                    "- Four players receive thirteen cards and pass three left, right, across, then hold on successive rounds.",
+                    "- The holder of 2C leads. Follow the led suit whenever possible.",
+                    "- Hearts cannot be led before one is discarded unless the leader has only Hearts.",
+                    "- Hearts are worth 1 penalty point each and QS is worth 13.",
+                    "- Taking all 26 penalty points shoots the moon and gives 26 points to every opponent instead.",
+                    "- A match ends after any total reaches 100; the lowest score wins.",
+                    "- Passing selections, hands, tricks, scores, and round position all persist when paused.",
+                ],
+            },
+            "solitaire": {
+                "title": "Klondike Solitaire",
+                "hint": "persistent solo card puzzle",
+                "lines": [
+                    "KLONDIKE SOLITAIRE",
+                    "",
+                    "- Build four suited foundations from Ace through King.",
+                    "- Tableau columns descend in alternating colors. Empty columns accept only Kings.",
+                    "- Move any complete face-up descending sequence; newly exposed cards turn face up.",
+                    "- Draw the stock one card at a time and recycle the waste when the stock empties.",
+                    "- A/D selects stock, waste, foundations, or columns. W/S chooses a deeper face-up sequence.",
+                    "- Z selects and places cards. F tries the selected card on its foundation; H gives a legal hint.",
+                    "- X clears a selection and then pauses the complete deal.",
+                ],
+            },
+            "royal_game_of_ur": {
+                "title": "The Royal Game of Ur",
+                "hint": "ancient dice race",
+                "lines": [
+                    "THE ROYAL GAME OF UR",
+                    "",
+                    "- Race seven pieces through a fourteen-space route using four binary tetrahedral dice.",
+                    "- Rolls range from zero to four. Zero loses the turn; bearing off requires an exact roll.",
+                    "- The middle route is shared. Landing on an opposing piece sends it home.",
+                    "- The central rosette is safe and cannot be captured or entered while an opponent occupies it.",
+                    "- Every rosette grants another roll. The first side to bear off all seven pieces wins.",
+                    "- Free and wagered games are available with three opponent strengths and escalating win profits.",
+                    "- A paused game preserves piece positions, the current dice roll, whose turn it is, and its wager.",
                 ],
             },
             "town": {
@@ -22151,6 +23548,26 @@ class FarmGame(
                     "- Bring food, potions, and mana supplies before long trips.",
                 ],
             },
+            "field_excavation": {
+                "title": "Archaeology and Paleontology",
+                "hint": "excavation minigames",
+                "lines": [
+                    "ARCHAEOLOGY AND PALEONTOLOGY",
+                    "",
+                    "- Old route ruins provide archaeological trenches; exposed fossil beds and old quarries provide paleontology digs.",
+                    "- Each site is a persistent 7x5 field grid that can be left and resumed during the same week.",
+                    "- Move the cursor with WASD, arrows, or the numpad. Use Q/E or 1-5 to select a field tool.",
+                    "- Survey first: the probe reports finds in or around the selected square and becomes more precise with experience.",
+                    "- Brushes remove one layer safely. Rock picks remove two layers but can damage fragile finds as they are exposed.",
+                    "- Stabilize delicate exposed finds before recovering them to preserve their condition.",
+                    "- Recovering a find adds it to your backpack, records its condition, and grants field-research experience.",
+                    "- Archaeology tends to be shallower; surveying neighboring squares records context and grants bonus experience.",
+                    "- Fossils lie in deeper, harder stone. Surveying a fossil square also reduces damage when a pick exposes it.",
+                    "- Care represents the safe work available during this week's field session. Sites refresh on the weekly cycle.",
+                    "- Recovered artifacts and fossils can be stored, sold, or donated to dedicated Museum collections.",
+                    "- The Journal overview tracks your field level and total finds. Higher levels improve surveys and reduce pick damage.",
+                ],
+            },
             "overworld_travel": {
                 "title": "Overworld Map, Travel, Caves, and Waypoints",
                 "hint": "long-distance exploration",
@@ -22298,6 +23715,13 @@ class FarmGame(
                     "- Dungeon companions use their real positions and HP. Knocked-out followers recover safely after the party leaves.",
                     "- Defeated dungeon enemies leave physical loot piles that persist until collected.",
                     "- Wilderness enemies also leave physical loot. Put distance between yourself and alerted enemies or cross into the next region to escape.",
+                    "- Enemies and treasure chests can yield persistent generated weapons, armor, and accessories with distinct levels, rarities, traits, and values.",
+                    "- Ordinary enemies rarely carry unique gear; elites, bosses, deeper chests, and difficult tactical victories offer better chances.",
+                    "- Inspect generated gear from the backpack, equip it through Adventure > Loadout, store it in physical containers, or ship it for its listed value.",
+                    "- The Blacksmith's Gear Workshop enhances authored or generated equipment with exact before/after stat previews.",
+                    "- Enhancement caps depend on the item: authored gear reaches +3, while generated rarity sets caps from +2 through +6.",
+                    "- Salvage unequipped generated gear for Tempering Shards and bounded ore/scrap returns. Equipped gear cannot be dismantled.",
+                    "- Reforging replaces one chosen generated trait with the displayed result. Repeat reforges become progressively more expensive.",
                     "- HP and MP persist between fights.",
                     "- Sleeping restores HP and MP to your current maximums.",
                     "- Food, health potions, and mana potions can restore combat resources.",
@@ -22457,7 +23881,14 @@ class FarmGame(
             (
                 "Getting Started",
                 "controls, time, stamina",
-                ["quick_start", "controls_ui", "time_weather_calendar", "stamina_leveling", "journal"],
+                [
+                    "quick_start",
+                    "controls_ui",
+                    "time_weather_calendar",
+                    "run_modes_and_victory",
+                    "stamina_leveling",
+                    "journal",
+                ],
             ),
             (
                 "Farm and Craft",
@@ -22471,6 +23902,11 @@ class FarmGame(
                     "farm_buildings",
                     "shipping",
                     "money_and_shops",
+                    "tavern_games",
+                    "texas_holdem",
+                    "hearts",
+                    "solitaire",
+                    "royal_game_of_ur",
                     "housing",
                     "automation",
                 ],
@@ -22495,6 +23931,7 @@ class FarmGame(
                 "travel, ruins, battles",
                 [
                     "wilderness",
+                    "field_excavation",
                     "overworld_travel",
                     "land_claims",
                     "procedural_towns",
@@ -22814,6 +24251,9 @@ class FarmGame(
 
 
     def use_house_furniture(self, placed: str):
+        if placed in GAME_TABLE_BY_FURNITURE:
+            self.use_game_table_furniture(placed, "Home Game Room")
+            return
         if placed == "Bed":
             self.sleep()
             return
@@ -23599,7 +25039,12 @@ class FarmGame(
             return
 
         if self.on_authored_town_residence():
+            if self.use_town_room_door_action(x, y):
+                return
             self.use_authored_town_residence_action(x, y)
+            return
+
+        if self.on_town_interior() and self.use_town_room_door_action(x, y):
             return
 
         if self.on_general_store():
@@ -24441,6 +25886,16 @@ class FarmGame(
                 "short": "ores",
                 "note": "Geology donations document mining resources, gems, clay, and refined bars.",
             },
+            "archaeology": {
+                "title": "Archaeology",
+                "short": "artifacts",
+                "note": "Archaeology donations preserve objects and stories recovered from old settlement layers.",
+            },
+            "paleontology": {
+                "title": "Paleontology",
+                "short": "fossils",
+                "note": "Paleontology donations reconstruct ancient habitats from fossils, impressions, and trackways.",
+            },
             "bestiary": {
                 "title": "Bestiary Specimens",
                 "short": "monster samples",
@@ -24540,6 +25995,12 @@ class FarmGame(
         for item_name in geology_names:
             note = "Mining, smelting, or cave resource sample."
             self.museum_add_catalog_record(catalog, "geology", item_name, note=note)
+        for item_name, find_data in EXCAVATION_FIND_DATA.items():
+            category = str(find_data.get("discipline", "archaeology"))
+            note = str(find_data.get("description", "Recovered through careful field excavation."))
+            rarity = int(find_data.get("rarity", 1) or 1)
+            note += f" Field rarity: {rarity}/3."
+            self.museum_add_catalog_record(catalog, category, item_name, note=note)
         for enemy_name in self.tactical_mission_roster_names():
             sample = self.museum_bestiary_sample_for_enemy(enemy_name)
             profile = mine_enemy_profile(enemy_name) if enemy_name in MINE_ENEMY_PROFILES else {}
@@ -24627,6 +26088,15 @@ class FarmGame(
             defeated = int((getattr(self.state, "combat_bestiary_defeated", {}) or {}).get(source_key, 0) or 0)
             seen = source_key in set(getattr(self.state, "combat_bestiary_seen", []) or [])
             lines.extend(["", f"Bestiary: {'seen' if seen else 'unknown'}, defeated {defeated}"])
+        if category in {"archaeology", "paleontology"}:
+            recovered = [
+                row
+                for row in getattr(self.state, "excavation_discoveries", []) or []
+                if isinstance(row, dict) and str(row.get("item", "")) == item_name
+            ]
+            if recovered:
+                best = max(int(row.get("condition", 0) or 0) for row in recovered)
+                lines.extend(["", f"Field journal: recovered {len(recovered)} time(s); best condition {best}%."])
         lines.extend(["", "Museum donations consume one item and permanently update the exhibit hall."])
         return lines
 
@@ -24657,6 +26127,8 @@ class FarmGame(
             "fishing": ("Cave Herbs", 2),
             "forage": ("Wildflower", 2),
             "geology": ("Coal", 4),
+            "archaeology": ("Surveyor's Lens", 1),
+            "paleontology": ("Fossil Fragment", 1),
             "bestiary": ("Cave Herbs", 3),
             "engineering": ("Copper Ore", 4),
         }
@@ -24813,6 +26285,7 @@ class FarmGame(
                 MenuItem(label="Donate item", value="donate", enabled=True, hint=f"{len(self.museum_donation_candidates())} carried"),
                 MenuItem(label="View exhibits", value="exhibits", enabled=True, hint=f"{self.museum_total_donated()}/{self.museum_total_possible()}"),
                 MenuItem(label="Collection progress", value="progress", enabled=True),
+                MenuItem(label="Field research journal", value="fieldwork", enabled=True, hint=f"level {self.excavation_level()}"),
                 MenuItem(label="Journal / Codex", value="journal", enabled=True, hint="existing records"),
                 MenuItem(label="Back", value=MENU_BACK, enabled=True),
             ]
@@ -24828,6 +26301,9 @@ class FarmGame(
                 continue
             if choice.value == "progress":
                 self.vertical_panel_view("Museum Collection", self.museum_collection_progress_lines(), LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
+                continue
+            if choice.value == "fieldwork":
+                self.vertical_panel_view("Field Research Journal", self.excavation_journal_lines(), LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
                 continue
             if choice.value == "journal":
                 self.show_journal_codex_menu()
@@ -25006,8 +26482,12 @@ class FarmGame(
         if tile == "&":
             self.safe_menu(self.inn_menu, "Inn services closed.")
             return
+        game_id = self.game_table_fixture_id(tile)
+        if game_id:
+            self.open_physical_game_table(game_id, "Mae's Inn")
+            return
         if tile in ["n", "$"]:
-            self.set_message("The inn counter is tidy and open. Talk to the innkeeper for meals, rooms, and gossip.")
+            self.set_message("The inn counter is tidy and open. Talk to the innkeeper for meals, rooms, and gossip; the game tables are in the common room.")
             return
         if tile == "P":
             self.vertical_panel_view("Inn Guest Register", self.inn_guest_register_lines(), LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
@@ -25463,13 +26943,13 @@ class FarmGame(
         if tile == "~":
             self.set_message(self.wilderness_water_description(x, y))
             return
-        if tile == "V":
+        if self.is_wilderness_cave_entrance_at(x, y):
             self.enter_wilderness_cave(x, y)
             return
         if self.is_wilderness_dungeon_entrance_at(x, y):
             self.enter_wilderness_dungeon(x, y)
             return
-        if tile == WILDERNESS_OUTPOST_SYMBOL:
+        if self.current_wilderness_outpost_door_at(x, y):
             self.enter_wilderness_outpost(x, y)
             return
         if tile == WILDERNESS_STRUCTURE_SYMBOL and self.current_wilderness_structure_door_at(x, y):
@@ -29873,7 +31353,21 @@ class FarmGame(
             self.set_message("Visit the Furniture Store clerk to buy furniture.")
             return
 
-        furniture_names = [name for name, data in INFRASTRUCTURE_DATA.items() if data.get("category") == "furniture" and int(data.get("price", 0)) > 0]
+        ordinary_furniture = [
+            name
+            for name, data in INFRASTRUCTURE_DATA.items()
+            if data.get("category") == "furniture"
+            and int(data.get("price", 0)) > 0
+            and name not in GAME_TABLE_BY_FURNITURE
+        ]
+        rotation_key = (
+            f"{int(s.year)}:{int(s.month)}:"
+            f"{max(0, int(s.day) - 1) // 7}"
+        )
+        furniture_names = [
+            *ordinary_furniture,
+            *rotating_game_furniture(rotation_key, count=2),
+        ]
 
         while True:
             items: List[MenuItem] = []
@@ -29926,16 +31420,17 @@ class FarmGame(
             self.autosave_with_message(f"Bought {qty} {name}(s) for ${total}. Place furniture inside your farmhouse from the Tab menu.")
             return
 
-    def blacksmith_menu(self, auto_opened: bool = False):
+    def blacksmith_menu(self, auto_opened: bool = False, service_override: bool = False):
         s = self.state
-        if self.on_blacksmith_interior() and not self.ensure_current_town_service_unlocked():
-            return
-        if not self.is_town_building_unlocked("blacksmith"):
-            self.set_message(self.locked_town_building_message("blacksmith"))
-            return
-        if not (self.in_blacksmith(s.player_x, s.player_y) or self.on_blacksmith_interior()):
-            self.set_message("Visit the Blacksmith to buy tools, upgrades, and ore.")
-            return
+        if not service_override:
+            if self.on_blacksmith_interior() and not self.ensure_current_town_service_unlocked():
+                return
+            if not self.is_town_building_unlocked("blacksmith"):
+                self.set_message(self.locked_town_building_message("blacksmith"))
+                return
+            if not (self.in_blacksmith(s.player_x, s.player_y) or self.on_blacksmith_interior()):
+                self.set_message("Visit the Blacksmith to buy tools, upgrades, and ore.")
+                return
 
         page = "main"
 
@@ -29952,6 +31447,7 @@ class FarmGame(
                     MenuItem(label="Buy ore", value="ore", enabled=True, hint="materials"),
                     MenuItem(label="Farm Automation", value="automation", enabled=True, hint=f"{len(self.automation_shop_item_names('blacksmith'))} item(s)"),
                     MenuItem(label="Combat Gear", value="combat_gear", enabled=True, hint=f"{self.available_blacksmith_combat_gear_count()} available"),
+                    MenuItem(label="Gear Workshop", value="gear_workshop", enabled=True, hint="enhance, reforge, salvage"),
                     MenuItem(label="Party Loadout", value="party_loadout", enabled=True, hint="tactical gear, supplies, drills"),
                     MenuItem(label="Leave", value="leave", enabled=True),
                 ]
@@ -29984,6 +31480,9 @@ class FarmGame(
                     continue
                 if selected_main.value == "combat_gear":
                     page = "combat_gear"
+                    continue
+                if selected_main.value == "gear_workshop":
+                    page = "gear_workshop"
                     continue
                 if selected_main.value == "party_loadout":
                     page = "party_loadout"
@@ -30196,6 +31695,15 @@ class FarmGame(
 
             elif page == "combat_gear":
                 result = self.blacksmith_combat_gear_menu()
+                if result == MENU_BACK:
+                    page = "main"
+                    continue
+                if auto_opened:
+                    s.shop_menu_suppressed_until_exit = True
+                return
+
+            elif page == "gear_workshop":
+                result = self.blacksmith_gear_workshop_menu()
                 if result == MENU_BACK:
                     page = "main"
                     continue
@@ -31868,6 +33376,37 @@ class FarmGame(
             elif key in ["s", "DOWN"]:
                 cursor_day = self.move_calendar_cursor(cursor_day, 7, view_month, 1)
 
+    def choose_victory_mode_menu(self) -> Optional[str]:
+        items = [
+            MenuItem(
+                label=VICTORY_MODE_OPEN,
+                value=VICTORY_MODE_OPEN,
+                enabled=True,
+                hint="unlimited sandbox",
+            ),
+            MenuItem(
+                label=VICTORY_MODE_FINITE,
+                value=VICTORY_MODE_FINITE,
+                enabled=True,
+                hint="five randomized hard goals; permanent ending",
+            ),
+            MenuItem(label="Back", value=MENU_BACK, enabled=True),
+        ]
+        choice = menu_select(
+            "Run Mode",
+            items,
+            footer="Finite contracts cannot be disabled or rerolled after starting.",
+            extra_lines=[
+                "Choose how this save can end.",
+                "",
+                f"{VICTORY_MODE_OPEN}: {VICTORY_MODE_DESCRIPTIONS[VICTORY_MODE_OPEN]}",
+                f"{VICTORY_MODE_FINITE}: {VICTORY_MODE_DESCRIPTIONS[VICTORY_MODE_FINITE]}",
+            ],
+        )
+        if choice is None or choice.value == MENU_BACK:
+            return None
+        return str(choice.value)
+
     def character_creation_menu(self) -> bool:
         name = text_entry_menu("Character Creation", "What is your name?", self.state.player_name, 16)
         if name is None:
@@ -31888,6 +33427,9 @@ class FarmGame(
         starting_class = self.choose_player_starting_class_menu()
         if starting_class is None:
             return False
+        victory_mode = self.choose_victory_mode_menu()
+        if victory_mode is None:
+            return False
         birthday_passed = (
             birthday_month,
             birthday_day,
@@ -31900,6 +33442,11 @@ class FarmGame(
             if birthday_passed
             else int(self.state.year) - starting_age - 1
         )
+        victory_contract = (
+            self.build_victory_contract_for_identity(name, birth_year, starting_class)
+            if victory_mode == VICTORY_MODE_FINITE
+            else {}
+        )
 
         preview = [
             f"Name: {name}",
@@ -31908,9 +33455,22 @@ class FarmGame(
             f"Born: {format_date(birthday_month, birthday_day, birth_year)}",
             f"Starting age: {starting_age}",
             f"Combat class: {starting_class}",
+            f"Run mode: {victory_mode}",
             "",
             "Marriage will be available with opposite-sex romance candidates.",
         ]
+        if victory_contract:
+            preview.extend([
+                "",
+                f"Victory contract: {victory_contract.get('title')}",
+                *[
+                    f"- {objective.get('category')}: {objective.get('title')} "
+                    f"({objective.get('target')} {objective.get('unit')})"
+                    for objective in victory_contract.get("objectives", [])
+                    if isinstance(objective, dict)
+                ],
+                "Completing every objective permanently ends this save.",
+            ])
         items = [
             MenuItem(label="Start game", value="start", enabled=True),
             MenuItem(label="Back", value=MENU_BACK, enabled=True),
@@ -31939,6 +33499,7 @@ class FarmGame(
         )
         self.state.player_background = "First-Generation Farmer"
         self.state.player_starting_class = starting_class
+        self.configure_victory_mode(victory_mode, victory_contract)
         self.state.message = f"Welcome, {name}. Press H for help or K for calendar."
         return True
 
@@ -32876,7 +34437,10 @@ class FarmGame(
         if not info:
             return "unknown gear"
         _field_name, data, _default = info
-        item = data.get(str(item_name), {})
+        item = combat_equipment_data_for(self.state, str(slot), item_name, data) or {}
+        return self.combat_equipment_effect_text_for_data(slot, item)
+
+    def combat_equipment_effect_text_for_data(self, slot: str, item: Dict[str, object]) -> str:
         parts: List[str] = []
         for key, label in [
             ("attack", "Attack"),
@@ -32900,10 +34464,10 @@ class FarmGame(
         if not info:
             return ["Unknown equipment slot."]
         _field_name, data, _default = info
-        item = data.get(str(item_name), {})
+        item = combat_equipment_data_for(self.state, str(slot), item_name, data) or {}
         if not item:
             return [f"{item_name}: invalid equipment."]
-        return [
+        lines = [
             f"{item_name}",
             "",
             f"Slot: {slot.title()}",
@@ -32911,6 +34475,21 @@ class FarmGame(
             "",
             str(item.get("description", "No description.")),
         ]
+        enhancement = int(item.get("enhancement", 0) or 0)
+        if enhancement:
+            lines[2:2] = [
+                f"Enhancement: +{enhancement} / +{int(item.get('enhancement_cap', enhancement) or enhancement)}",
+            ]
+        if bool(item.get("generated", False)):
+            lines[2:2] = [
+                f"Rarity: {item.get('rarity', 'Common')}",
+                f"Item level: {item.get('item_level', 1)}",
+            ]
+            affixes = [str(value) for value in item.get("affixes", []) if str(value)]
+            if affixes:
+                lines.extend(["", f"Traits: {', '.join(affixes)}"])
+            lines.append(f"Shipping value: ${int(item.get('value', 0) or 0)}")
+        return lines
 
     def owned_combat_equipment_names(self, slot: str) -> List[str]:
         info = COMBAT_EQUIPMENT_SLOTS.get(str(slot))
@@ -32924,7 +34503,19 @@ class FarmGame(
         for item_name in data:
             if int(self.state.inventory.get(item_name, 0) or 0) > 0:
                 owned.add(item_name)
-        return [item_name for item_name in data if item_name in owned]
+        generated_names = []
+        for item_name, record in (getattr(self.state, "generated_equipment", {}) or {}).items():
+            if not isinstance(record, dict) or str(record.get("slot", "")) != str(slot):
+                continue
+            if int(self.state.inventory.get(item_name, 0) or 0) > 0 or item_name == current:
+                generated_names.append(str(item_name))
+        generated_names.sort(
+            key=lambda name: (
+                -int((getattr(self.state, "generated_equipment", {}).get(name, {}) or {}).get("item_level", 1) or 1),
+                name,
+            )
+        )
+        return [item_name for item_name in data if item_name in owned] + generated_names
 
     def equip_combat_item(self, slot: str, item_name: str) -> bool:
         info = COMBAT_EQUIPMENT_SLOTS.get(str(slot))
@@ -32933,7 +34524,7 @@ class FarmGame(
             return False
         field_name, data, default = info
         item_name = str(item_name or default)
-        if item_name not in data:
+        if not combat_equipment_data_for(self.state, slot, item_name, data):
             setattr(self.state, field_name, default)
             self.set_message(f"Invalid gear. {slot.title()} reset to {default}.")
             return False
@@ -34619,8 +36210,39 @@ class FarmGame(
                     merged[item_name] = merged.get(item_name, 0) + int(qty)
         return merged
 
-    def grant_farm_combat_loot(self, loot: Dict[str, int]) -> Tuple[int, Dict[str, int]]:
+    def grant_farm_combat_loot(
+        self,
+        loot: Dict[str, int],
+        *,
+        result: object = None,
+        source_key: str = "",
+        boss: bool = False,
+    ) -> Tuple[int, Dict[str, int]]:
         money, items = translated_battle_loot(self.tactical_int_dict(loot))
+        if result is not None:
+            defeated = [str(name) for name in (getattr(result, "defeated_enemies", []) or [])]
+            elite = any(name.startswith("Elite ") for name in defeated)
+            depth = self.combat_depth_for_result(
+                result,
+                max(1, int(getattr(self.state, "combat_level", 1) or 1)),
+            )
+            sequence = max(0, int(getattr(self.state, "mine_combat_victories", 0) or 0))
+            mission_id = str(getattr(result, "mission_id", "") or "")
+            reward_key = (
+                f"tactical:{source_key or mission_id or 'encounter'}:"
+                f"{self.state.year}-{self.state.month}-{self.state.day}:{sequence}"
+            )
+            gear_chance = 0.48 if boss else min(0.16, 0.045 + len(defeated) * 0.018 + (0.05 if elite else 0.0))
+            items = add_random_reward_items(
+                self.state,
+                items,
+                reward_key,
+                depth,
+                gear_chance=gear_chance,
+                consumable_chance=0.48 if boss else min(0.28, 0.08 + len(defeated) * 0.035),
+                valuable_chance=0.42 if boss else min(0.22, 0.05 + len(defeated) * 0.025),
+                quality_bonus=4 if boss else (2 if elite else 0),
+            )
         if money:
             self.state.money += money
         if items:
@@ -35658,7 +37280,12 @@ class FarmGame(
 
         if outcome == "victory":
             loot = self.combat_loot_for_result(result)
-            money, items = self.grant_farm_combat_loot(loot)
+            money, items = self.grant_farm_combat_loot(
+                loot,
+                result=result,
+                source_key=f"mission:{mission_id or mission_name}",
+                boss=any("Boss" in str(name) for name in defeated),
+            )
             exp_gain = mine_combat_exp_for_defeated(defeated, max(1, int(getattr(self.state, "deepest_mine_floor", 1) or 1)))
             _amount, level_lines = grant_combat_exp(self.state, exp_gain)
             self.state.mine_combat_victories += 1
@@ -35833,7 +37460,9 @@ class FarmGame(
             items: List[MenuItem] = []
             for item_name in self.owned_combat_equipment_names(slot):
                 equipped = item_name == current
-                label = f"{item_name} [equipped]" if equipped else item_name
+                enhancement = equipment_enhancement_level(self.state, item_name)
+                shown_name = f"{item_name} +{enhancement}" if enhancement else item_name
+                label = f"{shown_name} [equipped]" if equipped else shown_name
                 owned_qty = int(self.state.inventory.get(item_name, 0) or 0)
                 source = "starter" if item_name == default else (f"x{owned_qty}" if owned_qty else "equipped")
                 items.append(MenuItem(
@@ -35909,13 +37538,17 @@ class FarmGame(
 
     def combat_gear_slot_for_item(self, item_name: str) -> str:
         item_name = str(item_name)
+        generated = generated_equipment_record(self.state, item_name)
+        if generated:
+            return str(generated.get("slot", ""))
         for slot, (_field_name, data, _default) in COMBAT_EQUIPMENT_SLOTS.items():
             if item_name in data:
                 return slot
         return ""
 
     def combat_gear_data(self, item_name: str) -> Dict[str, object]:
-        return self.combat_gear_catalog().get(str(item_name), {})
+        generated = generated_equipment_record(self.state, item_name)
+        return generated if generated else self.combat_gear_catalog().get(str(item_name), {})
 
     def combat_gear_is_starter(self, item_name: str) -> bool:
         data = self.combat_gear_data(item_name)
@@ -36129,6 +37762,303 @@ class FarmGame(
                 self.purchase_combat_gear(item_name, equip_now=True)
                 return "changed"
 
+    def workshop_equipment_names(self) -> List[str]:
+        names: List[str] = []
+        seen = set()
+        for slot in ("weapon", "armor", "accessory"):
+            for item_name in self.owned_combat_equipment_names(slot):
+                generated = generated_equipment_record(self.state, item_name)
+                if generated and int(self.state.inventory.get(item_name, 0) or 0) <= 0:
+                    continue
+                if item_name == DEFAULT_COMBAT_ACCESSORY or item_name in seen:
+                    continue
+                seen.add(item_name)
+                names.append(item_name)
+        return names
+
+    def workshop_equipment_slot(self, item_name: str) -> str:
+        return self.combat_gear_slot_for_item(item_name)
+
+    def workshop_equipment_base_data(self, item_name: str) -> Dict[str, object]:
+        generated = generated_equipment_record(self.state, item_name)
+        if generated:
+            return generated
+        slot = self.workshop_equipment_slot(item_name)
+        info = COMBAT_EQUIPMENT_SLOTS.get(slot)
+        return dict(info[1].get(item_name, {})) if info else {}
+
+    def workshop_item_is_equipped(self, item_name: str) -> bool:
+        return item_name in {
+            str(getattr(self.state, "equipped_weapon", "") or ""),
+            str(getattr(self.state, "equipped_armor", "") or ""),
+            str(getattr(self.state, "equipped_accessory", "") or ""),
+        }
+
+    def workshop_cost_status(self, cost: Tuple[int, Dict[str, int]]) -> str:
+        if can_afford_workshop_cost(self.state, cost):
+            return "ready"
+        money, items = cost
+        missing: List[str] = []
+        if int(self.state.money) < int(money):
+            missing.append(f"${int(money) - int(self.state.money)}")
+        for item_name, quantity in items.items():
+            have = int(self.state.inventory.get(item_name, 0) or 0)
+            if have < int(quantity):
+                missing.append(f"{int(quantity) - have} {item_name}")
+        return "need " + ", ".join(missing[:2])
+
+    def workshop_affix_effect_text(self, label: str) -> str:
+        bonuses = AFFIX_BONUS_BY_LABEL.get(str(label), {})
+        parts = []
+        for stat, amount in bonuses.items():
+            stat_label = {
+                "attack": "Attack",
+                "defense": "Defense",
+                "max_hp": "Max HP",
+                "max_focus": "Max Focus",
+            }.get(stat, stat)
+            parts.append(f"+{int(amount)} {stat_label}")
+        return ", ".join(parts) if parts else "no stat change"
+
+    def workshop_enhancement_preview(self, item_name: str, level: int) -> Dict[str, object]:
+        slot = self.workshop_equipment_slot(item_name)
+        return apply_equipment_enhancement(
+            self.state,
+            slot,
+            item_name,
+            self.workshop_equipment_base_data(item_name),
+            level_override=level,
+        )
+
+    def blacksmith_enhance_equipment_menu(self, item_name: str):
+        slot = self.workshop_equipment_slot(item_name)
+        current = equipment_enhancement_level(self.state, item_name)
+        cap = equipment_enhancement_cap(self.state, item_name)
+        if current >= cap:
+            self.set_message(f"{item_name} is already at its +{cap} enhancement cap.")
+            return MENU_BACK
+        cost = equipment_enhancement_cost(self.state, item_name)
+        current_data = self.workshop_enhancement_preview(item_name, current)
+        next_data = self.workshop_enhancement_preview(item_name, current + 1)
+        affordable = can_afford_workshop_cost(self.state, cost)
+        items = [
+            MenuItem(
+                label=f"Current +{current}: {self.combat_equipment_effect_text_for_data(slot, current_data)}",
+                value="current", enabled=False,
+            ),
+            MenuItem(
+                label=f"After +{current + 1}: {self.combat_equipment_effect_text_for_data(slot, next_data)}",
+                value="after", enabled=False,
+            ),
+            MenuItem(
+                label="Enhance",
+                value="enhance",
+                enabled=affordable,
+                hint=f"{workshop_cost_text(cost)} | {self.workshop_cost_status(cost)}",
+            ),
+            MenuItem(label="Back", value=MENU_BACK, enabled=True),
+        ]
+        choice = self.vertical_panel_select(
+            f"Enhance {item_name}",
+            items,
+            LEFT_PANEL_WIDTH,
+            LEFT_PANEL_HEIGHT,
+            return_back=True,
+        )
+        if choice is None or choice.value == MENU_BACK:
+            return MENU_BACK
+        if choice.value == "enhance" and enhance_equipment(self.state, item_name):
+            self.repair_combat_equipment()
+            self.advance_time(30 + current * 10)
+            self.autosave_with_message(f"Enhanced {item_name} to +{current + 1}.")
+            return "changed"
+        self.set_message(f"Cannot enhance {item_name}: {self.workshop_cost_status(cost)}.")
+        return MENU_BACK
+
+    def blacksmith_reforge_equipment_menu(self, item_name: str):
+        generated = generated_equipment_record(self.state, item_name)
+        affixes = [str(label) for label in ((generated or {}).get("affixes", []) or [])]
+        if not generated or not affixes:
+            self.set_message("Only generated equipment with at least one trait can be reforged.")
+            return MENU_BACK
+        choices = [
+            MenuItem(
+                label=label,
+                value=label,
+                enabled=bool(preview_reforge_affix(self.state, item_name, label)),
+                hint=self.workshop_affix_effect_text(label),
+            )
+            for label in affixes
+        ]
+        choices.append(MenuItem(label="Back", value=MENU_BACK, enabled=True))
+        selected = self.vertical_panel_select(
+            "Choose Trait to Replace",
+            choices,
+            LEFT_PANEL_WIDTH,
+            LEFT_PANEL_HEIGHT,
+            return_back=True,
+        )
+        if selected is None or selected.value == MENU_BACK:
+            return MENU_BACK
+        old_affix = str(selected.value)
+        replacement = preview_reforge_affix(self.state, item_name, old_affix)
+        cost = equipment_reforge_cost(self.state, item_name)
+        affordable = can_afford_workshop_cost(self.state, cost)
+        confirm = self.vertical_panel_select(
+            f"Reforge {item_name}",
+            [
+                MenuItem(
+                    label=f"Current: {old_affix} ({self.workshop_affix_effect_text(old_affix)})",
+                    value="old", enabled=False,
+                ),
+                MenuItem(
+                    label=f"Result: {replacement} ({self.workshop_affix_effect_text(replacement)})",
+                    value="new", enabled=False,
+                ),
+                MenuItem(
+                    label="Reforge trait",
+                    value="reforge",
+                    enabled=affordable and bool(replacement),
+                    hint=f"{workshop_cost_text(cost)} | {self.workshop_cost_status(cost)}",
+                ),
+                MenuItem(label="Back", value=MENU_BACK, enabled=True),
+            ],
+            LEFT_PANEL_WIDTH,
+            LEFT_PANEL_HEIGHT,
+            return_back=True,
+        )
+        if confirm is None or confirm.value == MENU_BACK:
+            return MENU_BACK
+        if confirm.value == "reforge":
+            result = reforge_generated_equipment(self.state, item_name, old_affix)
+            if result:
+                self.repair_combat_equipment()
+                self.advance_time(45)
+                self.autosave_with_message(f"Reforged {item_name}: {old_affix} became {result}.")
+                return "changed"
+        self.set_message(f"Cannot reforge {item_name}: {self.workshop_cost_status(cost)}.")
+        return MENU_BACK
+
+    def blacksmith_salvage_equipment_menu(self, item_name: str):
+        yields = generated_equipment_salvage_yield(self.state, item_name)
+        if not yields:
+            self.set_message("Only generated equipment can be dismantled for tempering materials.")
+            return MENU_BACK
+        if self.workshop_item_is_equipped(item_name):
+            self.set_message(f"Unequip {item_name} before salvaging it.")
+            return MENU_BACK
+        confirm = self.vertical_panel_select(
+            f"Salvage {item_name}",
+            [
+                MenuItem(label=f"Recover: {format_drops(yields)}", value="yield", enabled=False),
+                MenuItem(
+                    label="Dismantle permanently",
+                    value="salvage",
+                    enabled=int(self.state.inventory.get(item_name, 0) or 0) > 0,
+                    hint="cannot be undone",
+                ),
+                MenuItem(label="Back", value=MENU_BACK, enabled=True),
+            ],
+            LEFT_PANEL_WIDTH,
+            LEFT_PANEL_HEIGHT,
+            return_back=True,
+        )
+        if confirm is None or confirm.value == MENU_BACK:
+            return MENU_BACK
+        if confirm.value == "salvage":
+            recovered = salvage_generated_equipment(self.state, item_name)
+            if recovered:
+                self.advance_time(20)
+                self.autosave_with_message(f"Salvaged {item_name}; recovered {format_drops(recovered)}.")
+                return "changed"
+        self.set_message(f"{item_name} could not be salvaged.")
+        return MENU_BACK
+
+    def blacksmith_gear_workshop_menu(self):
+        while True:
+            names = self.workshop_equipment_names()
+            items: List[MenuItem] = []
+            for item_name in names:
+                slot = self.workshop_equipment_slot(item_name)
+                level = equipment_enhancement_level(self.state, item_name)
+                cap = equipment_enhancement_cap(self.state, item_name)
+                generated = generated_equipment_record(self.state, item_name)
+                rarity = f"{generated.get('rarity')} | " if generated else ""
+                equipped = " [equipped]" if self.workshop_item_is_equipped(item_name) else ""
+                items.append(MenuItem(
+                    label=f"{item_name}{equipped}",
+                    value=item_name,
+                    enabled=True,
+                    hint=f"{rarity}{slot} | +{level}/+{cap}",
+                ))
+            items.append(MenuItem(label="Back", value=MENU_BACK, enabled=True))
+            choice = self.vertical_panel_select(
+                "Gear Workshop",
+                items,
+                LEFT_PANEL_WIDTH,
+                LEFT_PANEL_HEIGHT,
+                return_back=True,
+            )
+            if choice is None or choice.value == MENU_BACK:
+                return MENU_BACK
+            item_name = str(choice.value)
+            level = equipment_enhancement_level(self.state, item_name)
+            cap = equipment_enhancement_cap(self.state, item_name)
+            generated = generated_equipment_record(self.state, item_name)
+            affixes = list((generated or {}).get("affixes", []) or [])
+            enhance_cost = equipment_enhancement_cost(self.state, item_name)
+            action = self.vertical_panel_select(
+                item_name,
+                [
+                    MenuItem(
+                        label="Enhance",
+                        value="enhance",
+                        enabled=level < cap,
+                        hint=(
+                            f"+{level}->+{level + 1} | {workshop_cost_text(enhance_cost)}"
+                            if level < cap else f"+{cap} maximum"
+                        ),
+                    ),
+                    MenuItem(
+                        label="Reforge a trait",
+                        value="reforge",
+                        enabled=bool(generated and affixes),
+                        hint=workshop_cost_text(equipment_reforge_cost(self.state, item_name)) if generated and affixes else "generated trait required",
+                    ),
+                    MenuItem(
+                        label="Salvage",
+                        value="salvage",
+                        enabled=bool(generated) and not self.workshop_item_is_equipped(item_name),
+                        hint=format_drops(generated_equipment_salvage_yield(self.state, item_name)) if generated else "generated gear only",
+                    ),
+                    MenuItem(label="Inspect", value="inspect", enabled=True),
+                    MenuItem(label="Back", value=MENU_BACK, enabled=True),
+                ],
+                LEFT_PANEL_WIDTH,
+                LEFT_PANEL_HEIGHT,
+                return_back=True,
+            )
+            if action is None or action.value == MENU_BACK:
+                continue
+            if action.value == "inspect":
+                slot = self.workshop_equipment_slot(item_name)
+                self.vertical_panel_view(
+                    item_name,
+                    self.combat_equipment_lines(slot, item_name),
+                    LEFT_PANEL_WIDTH,
+                    LEFT_PANEL_HEIGHT,
+                )
+                continue
+            if action.value == "enhance":
+                if self.blacksmith_enhance_equipment_menu(item_name) == "changed":
+                    return "changed"
+            elif action.value == "reforge":
+                if self.blacksmith_reforge_equipment_menu(item_name) == "changed":
+                    return "changed"
+            elif action.value == "salvage":
+                if self.blacksmith_salvage_equipment_menu(item_name) == "changed":
+                    return "changed"
+
     def show_tool_status(self):
         rows = []
         rows.append("Tool rotation:")
@@ -36220,6 +38150,7 @@ class FarmGame(
             "Ancient Seed",
             "Animal Medicine",
             "Basic Fertilizer",
+            WORKSHOP_SALVAGE_ITEM,
         }
         protected.update(str(item) for item in RESOURCE_ITEMS if str(item) not in safe_resource_goods)
         for recipe in list(CRAFTING_RECIPES.values()) + list(SMELTING_RECIPES.values()):
@@ -36908,6 +38839,22 @@ class FarmGame(
         return lines
 
     def journal_overview_lines(self) -> List[str]:
+        self.ensure_tavern_game_state()
+        self.ensure_checkers_state()
+        self.ensure_chess_state()
+        self.ensure_mancala_state()
+        self.ensure_holdem_state()
+        self.ensure_hearts_state()
+        self.ensure_solitaire_state()
+        self.ensure_ur_state()
+        blackjack_stats = self.state.tavern_blackjack_stats
+        checkers_stats = self.state.tavern_checkers_stats
+        chess_stats = self.state.tavern_chess_stats
+        mancala_stats = self.state.tavern_mancala_stats
+        holdem_stats = self.state.tavern_holdem_stats
+        hearts_stats = self.state.tavern_hearts_stats
+        solitaire_stats = self.state.tavern_solitaire_stats
+        ur_stats = self.state.tavern_ur_stats
         ready_jobs = sum(1 for job in self.today_bulletin_jobs() if self.can_complete_bulletin_job(job))
         ready_requests = sum(1 for request_id in self.resident_request_data() if self.resident_request_status(request_id) == "Ready")
         claim_count = len(self.state.owned_wilderness_claims) if isinstance(self.state.owned_wilderness_claims, dict) else 0
@@ -36927,6 +38874,16 @@ class FarmGame(
                 f"(Generation {self.state.player_generation})"
             ),
             f"Weather: {self.state.weather} - {weather_forecast_summary(self.state.weather)}",
+            f"Run mode: {self.victory_mode()}",
+            *(
+                [
+                    f"Victory contract: "
+                    f"{(self.state.victory_contract or {}).get('title', 'Finite Challenge')} "
+                    f"({self.victory_status_hint()})"
+                ]
+                if self.victory_mode() == VICTORY_MODE_FINITE
+                else []
+            ),
             "",
             "Today's notices:",
         ]
@@ -36953,6 +38910,42 @@ class FarmGame(
             f"- Relationships tracked: {len(self.active_town_npcs())} active residents",
             f"- Bestiary: {seen_count}/{roster_count} seen",
             f"- Museum donations: {self.museum_total_donated()}/{self.museum_total_possible()}",
+            (
+                f"- Field research: level {self.excavation_level()}, "
+                f"{int(getattr(self.state, 'archaeology_finds', 0) or 0)} artifacts and "
+                f"{int(getattr(self.state, 'paleontology_finds', 0) or 0)} fossils recovered"
+            ),
+            (
+                f"- Blackjack: {blackjack_stats['wins']} win(s) from "
+                f"{blackjack_stats['hands_played']} hand(s), "
+                f"{int(blackjack_stats['net_winnings']):+d}g net"
+            ),
+            (
+                f"- Checkers: {checkers_stats['wins']} win(s), "
+                f"{checkers_stats['losses']} loss(es), {checkers_stats['draws']} draw(s)"
+            ),
+            (
+                f"- Chess: {chess_stats['wins']} win(s), "
+                f"{chess_stats['losses']} loss(es), {chess_stats['draws']} draw(s)"
+            ),
+            (
+                f"- Mancala: {mancala_stats['wins']} win(s), "
+                f"{mancala_stats['losses']} loss(es), {mancala_stats['draws']} draw(s), "
+                f"{int(mancala_stats['net_winnings']):+d}g net"
+            ),
+            (
+                f"- Hold'em: {holdem_stats['wins']} win(s) from "
+                f"{holdem_stats['hands_played']} hand(s), {int(holdem_stats['net_winnings']):+d}g net"
+            ),
+            (
+                f"- Hearts: {hearts_stats['wins']} match win(s) | "
+                f"Solitaire: {solitaire_stats['wins']} solved deal(s)"
+            ),
+            (
+                f"- Royal Game of Ur: {ur_stats['wins']} win(s), "
+                f"{ur_stats['losses']} loss(es), {int(ur_stats['net_winnings']):+d}g net"
+            ),
+            f"- Game tables discovered: {len(getattr(self.state, 'tavern_game_discoveries', []) or [])}/8",
             f"- Party: {self.party_menu_hint()}",
             "",
             "Use Progress Goals for the big-picture path, or the other Journal pages for details.",
@@ -37247,6 +39240,8 @@ class FarmGame(
                 MenuItem(label="Relationship records", value="relationships", enabled=True, hint="friendship overview"),
                 MenuItem(label="Family records", value="family", enabled=True, hint="household overview"),
                 MenuItem(label="Dynasty records", value="dynasty", enabled=True, hint=f"generation {self.state.player_generation}"),
+                MenuItem(label="Field research", value="fieldwork", enabled=True, hint=f"level {self.excavation_level()}"),
+                MenuItem(label="Tavern game records", value="tavern_games", enabled=True, hint="cards and board games"),
                 MenuItem(label="Bestiary records", value="bestiary", enabled=True, hint="seen and defeated"),
                 MenuItem(label="Combat reports", value="combat", enabled=True, hint="recent results"),
                 MenuItem(label="Crafting goals", value="crafting", enabled=True, hint="known recipes"),
@@ -37263,6 +39258,8 @@ class FarmGame(
                 "relationships": ("Relationship Records", self.journal_relationship_lines),
                 "family": ("Family Records", self.family_status_lines),
                 "dynasty": ("Dynasty Records", self.dynasty_ledger_lines),
+                "fieldwork": ("Field Research", self.excavation_journal_lines),
+                "tavern_games": ("Tavern Game Records", self.tavern_game_record_lines),
                 "bestiary": ("Bestiary Records", self.journal_bestiary_lines),
                 "combat": ("Combat Reports", self.journal_combat_report_lines),
                 "crafting": ("Crafting Goals", self.journal_crafting_goal_lines),
@@ -37277,6 +39274,12 @@ class FarmGame(
                 MenuItem(label="Quests", value="quests", enabled=True),
                 MenuItem(label="Calendar & Birthdays", value="calendar", enabled=True),
                 MenuItem(label="Progress Goals", value="progress", enabled=True),
+                MenuItem(
+                    label="Victory Contract",
+                    value="victory",
+                    enabled=self.victory_mode() == VICTORY_MODE_FINITE,
+                    hint=self.victory_status_hint(),
+                ),
                 MenuItem(label="Records & Discoveries", value="records", enabled=True),
                 MenuItem(label="Back", value=MENU_BACK, enabled=True),
             ]
@@ -37289,6 +39292,14 @@ class FarmGame(
                 continue
             if choice.value == "progress":
                 self.vertical_panel_view("Progress Goals", self.journal_progression_lines(), LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
+                continue
+            if choice.value == "victory":
+                self.vertical_panel_view(
+                    "Victory Contract",
+                    self.victory_contract_lines(),
+                    LEFT_PANEL_WIDTH,
+                    LEFT_PANEL_HEIGHT,
+                )
                 continue
             if choice.value == "quests":
                 self.vertical_panel_view("Quest Journal", self.journal_quest_lines(), LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
@@ -37488,13 +39499,17 @@ class FarmGame(
                 return False
             self.set_message(f"{item_name} is not shippable.")
             return False
+        transferable = max(0, int(qty_owned) - equipped_inventory_reserve(self.state, item_name))
+        if transferable <= 0:
+            self.set_message(f"Unequip {item_name} before shipping it.")
+            return False
 
         qty = self.vertical_quantity_select(
             "Ship Item",
             item_name,
             unit_price,
-            max_qty=qty_owned,
-            start_qty=qty_owned,
+            max_qty=transferable,
+            start_qty=transferable,
             panel_width=LEFT_PANEL_WIDTH,
             panel_height=LEFT_PANEL_HEIGHT,
             return_back=True,
@@ -38558,7 +40573,10 @@ class FarmGame(
             self.set_message(f"Startup menu error logged. Starting new farm. Debug: {CRASH_REPORT_PATH.name}")
 
         if bool(getattr(self.state, "player_run_ended", False)):
-            self.show_player_memorial()
+            if str(getattr(self.state, "player_run_outcome", "")) == "victory":
+                self.show_victory_screen()
+            else:
+                self.show_player_memorial()
             return
 
         self._world_time_accumulator = 0.0
@@ -38567,7 +40585,10 @@ class FarmGame(
         while self.running:
             try:
                 if bool(getattr(self.state, "player_run_ended", False)):
-                    self.show_player_memorial()
+                    if str(getattr(self.state, "player_run_outcome", "")) == "victory":
+                        self.show_victory_screen()
+                    else:
+                        self.show_player_memorial()
                     self.running = False
                     continue
                 frame_start = time.monotonic()
@@ -38580,6 +40601,7 @@ class FarmGame(
                     if key:
                         append_debug_log(f"Scene key pressed: {repr(key)} scene={self.state.active_scene_id}")
                         self.handle_key(key)
+                        self.check_victory_completion(interactive=True)
                     frame_elapsed = time.monotonic() - frame_start
                     if frame_elapsed < FRAME_SECONDS:
                         time.sleep(FRAME_SECONDS - frame_elapsed)
@@ -38592,6 +40614,7 @@ class FarmGame(
                 if key:
                     append_debug_log(f"Key pressed: {repr(key)} location={self.state.location}")
                     self.handle_key(key)
+                    self.check_victory_completion(interactive=True)
 
                 frame_elapsed = time.monotonic() - frame_start
                 if frame_elapsed < FRAME_SECONDS:

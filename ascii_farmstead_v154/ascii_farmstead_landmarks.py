@@ -5,6 +5,7 @@ from __future__ import annotations
 import random
 from typing import Dict, List, Tuple
 
+from ascii_farmstead_data import MENU_BACK
 from ascii_farmstead_inventory import add_inventory_items, format_drops
 
 
@@ -333,31 +334,29 @@ class WildernessLandmarkMixin:
             return
         names = {"old_quarry": "Old Quarry", "spring_garden": "Abandoned Spring Garden", "fungal_garden": "Sheltered Fungal Garden", "waystone": "Waystone Crossroads"}
         labels = {"old_quarry": "Work the accessible seam", "spring_garden": "Tend the growing beds", "fungal_garden": "Tend the fungal beds", "waystone": "Align stones and chart trails"}
+        items = [self._wilderness_menu_item("work", labels.get(kind, "Use landmark"), "A concrete weekly activity tied to this place.")]
+        if kind == "old_quarry":
+            items.append(self._wilderness_menu_item(
+                "fossils",
+                "Survey the fossil layers",
+                "Open a persistent paleontology dig in the quarry wall.",
+            ))
         choice = self.vertical_panel_select(
             names.get(kind, "Wilderness Landmark"),
-            [self._wilderness_menu_item("work", labels.get(kind, "Use landmark"), "A concrete weekly activity tied to this place.")],
+            items,
             48, 18, return_back=True,
         )
         if choice and choice.value == "work":
             self.work_wilderness_minor_landmark(x, y, kind)
+        elif choice and choice.value == "fossils":
+            self.launch_excavation_minigame("paleontology", x, y, "old_quarry")
 
     def excavate_wilderness_ruin(self, x: int, y: int) -> bool:
-        record = self.wilderness_poi_record(x, y, "ruin")
-        week = self.stronghold_cache_week_key()
-        if record.get("excavation_week") == week:
-            self.set_message("The safe excavation areas have already been worked this week.")
-            return False
-        if not self.spend_stamina(5): return False
-        rng = self.wilderness_poi_rng(x, y, "ruin", 56000 + int(self.state.year) * 97 + int(self.state.day))
-        drops: Dict[str, int] = {"Ruin Scrap": rng.randint(1, 2), "Stone": rng.randint(1, 3)}
-        if rng.random() < 0.45: drops["Mixed Seeds"] = 1
-        if rng.random() < 0.12: drops["Ancient Seed"] = 1
-        add_inventory_items(self.state.inventory, drops)
-        self.advance_time(45)
-        record["excavation_week"] = week
-        record["excavations"] = int(record.get("excavations", 0)) + 1
-        self.autosave_with_message(f"Excavated the ruin and recovered {format_drops(drops)}.")
-        return True
+        changed = self.launch_excavation_minigame("archaeology", x, y, "route_ruin")
+        if changed:
+            record = self.wilderness_poi_record(x, y, "ruin")
+            record["excavations"] = int(record.get("excavations", 0)) + 1
+        return changed
 
     def restore_wilderness_ruin(self, x: int, y: int) -> bool:
         record = self.wilderness_poi_record(x, y, "ruin")
@@ -388,7 +387,7 @@ class WildernessLandmarkMixin:
         else:
             items.append(self._wilderness_menu_item("restore", "Restore courtyard - 10 Stone, 4 Wood", "Permanent regional improvement."))
         choice = self.vertical_panel_select("Old Route Ruin", items, 48, 18, return_back=True)
-        if not choice: return
+        if not choice or choice.value == MENU_BACK: return
         if choice.value == "excavate": self.excavate_wilderness_ruin(x, y)
         elif choice.value == "restore": self.restore_wilderness_ruin(x, y)
         elif choice.value == "route":
@@ -406,7 +405,7 @@ class WildernessLandmarkMixin:
             ],
             48, 18, return_back=True,
         )
-        if not choice: return
+        if not choice or choice.value == MENU_BACK: return
         if choice.value == "survey":
             week = self.stronghold_cache_week_key()
             if record.get("survey_week") == week:
@@ -461,7 +460,7 @@ class WildernessLandmarkMixin:
             ],
             50, 19, return_back=True,
         )
-        if not choice: return
+        if not choice or choice.value == MENU_BACK: return
         if choice.value == "route": self.explore_wilderness_landscape_route()
         elif choice.value == "special": self.interact_with_wilderness_landscape()
         elif choice.value == "map":

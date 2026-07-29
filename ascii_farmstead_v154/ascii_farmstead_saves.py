@@ -128,6 +128,12 @@ class SaveLoadMixin:
             money = state.get("money", "?")
             player_name = GameState.clean_player_name(state.get("player_name", "Farmer"))
             if bool(state.get("player_run_ended", False)):
+                if (
+                    str(state.get("player_run_outcome", "")).lower() == "victory"
+                    or isinstance(state.get("victory_record"), dict)
+                    and bool(state.get("victory_record"))
+                ):
+                    return f"VICTORY | {player_name} | {format_date(month, day, year)}"
                 return f"MEMORIAL | {player_name} | {format_date(month, day, year)}"
             return f"{player_name} | {format_date(month, day, year)} | ${money}"
         except Exception:
