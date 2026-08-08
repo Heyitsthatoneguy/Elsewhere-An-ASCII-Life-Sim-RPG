@@ -401,7 +401,7 @@ class DynastyMixin:
             choice = menu_select(
                 "Mortality Mode",
                 items,
-                footer="Choose how player death and succession work | X/Esc back",
+                footer="Choose how player death and succession work | B/X/Esc/Q/Tab back",
                 extra_lines=[
                     "Strict modes can end a character or the entire run.",
                     "The setting can be changed later from System > Settings.",
@@ -1428,6 +1428,8 @@ class DynastyMixin:
         self.state.player_birthday_day = int(child.get("birth_day", 1))
         self.state.player_birth_year = int(child.get("birth_year", self.state.year - 18))
         self.state.player_generation = old_generation + 1
+        farmstead_name = str(getattr(self.state, "farm_name", "") or "Elsewhere Farmstead")
+        self.state.player_origin = farmstead_name
         self.state.player_lifespan_age = self.dynasty_lifespan_for_identity(
             self.state.player_name,
             self.state.player_birth_year,

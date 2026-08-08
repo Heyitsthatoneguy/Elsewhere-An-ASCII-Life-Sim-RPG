@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Sequence
+import copy
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 from ascii_farmstead_custom_content import (
     ABILITY_EFFECTS,
@@ -22,9 +23,17 @@ from ascii_farmstead_custom_content import (
     sanitize_custom_ability,
     sanitize_custom_class,
 )
-from ascii_farmstead_data import MENU_CONFIRM_KEYS
-from ascii_farmstead_support import C, clear_screen, colorize, normalize_key, read_key
+from ascii_farmstead_data import AUTHORED_TOWN_RESIDENCE_DATA, MENU_CONFIRM_KEYS
+from ascii_farmstead_support import (
+    C,
+    clear_screen,
+    colorize,
+    normalize_key,
+    read_key,
+    read_key_or_mouse,
+)
 from ascii_farmstead_ui import MenuItem, menu_select, text_entry_menu
+from ascii_farmstead_visuals import interior_tile_color
 from ascii_battle_prototype.combat.classes import class_defs as tactical_class_defs
 from ascii_battle_prototype.combat.enemies import create_enemy_templates
 from ascii_battle_prototype.combat.equipment import equipment_defs as tactical_equipment_defs
@@ -39,6 +48,7 @@ from ascii_farmstead_custom_extended import (
     BUILDING_TEMPLATE_HEIGHT,
     BUILDING_TEMPLATE_COLOR_KEYS,
     BUILDING_TEMPLATE_COLOR_LABELS,
+    BUILDING_TEMPLATE_FURNISHING_DATA,
     BUILDING_TEMPLATE_MAX_COLOR_MARKS,
     BUILDING_TEMPLATE_MAX_SPAWNS,
     BUILDING_TEMPLATE_MAX_FLOORS,
@@ -50,6 +60,7 @@ from ascii_farmstead_custom_extended import (
     custom_dungeon_room_summary,
     custom_enemy_summary,
     custom_equipment_summary,
+    custom_building_template_override,
     custom_building_template_summary,
     default_custom_building_template_rows,
     custom_map_summary,
@@ -62,6 +73,22 @@ from ascii_farmstead_custom_extended import (
 
 
 MENU_BACK = "__back__"
+
+BUILT_IN_AUTHORED_BUILDING_PRESETS = (
+    ("Farmhouse", "home", "make_house_map", 6),
+    ("General Store", "general_store", "make_general_store_map", 0),
+    ("Blacksmith", "workshop", "make_blacksmith_interior_map", 0),
+    ("Library", "library", "make_library_interior_map", 0),
+    ("Mayor's House", "home", "make_mayor_house_map", 4),
+    ("Mae's Inn", "inn", "make_inn_interior_map", 8),
+    ("Museum", "library", "make_museum_interior_map", 0),
+    ("Furniture Store", "general_store", "make_furniture_store_map", 0),
+    ("Carpenter Store", "carpenter", "make_carpenter_store_map", 0),
+    ("Animal Store", "general_store", "make_animal_store_map", 0),
+    ("Clinic", "clinic", "make_clinic_map", 0),
+    ("Town Hall", "town_hall", "make_town_hall_map", 0),
+    ("Market Row", "market_stall", "make_market_row_map", 0),
+)
 
 
 class CustomContentMenuMixin:
@@ -92,6 +119,7 @@ class CustomContentMenuMixin:
             title,
             items,
             footer=f"Choose {label.lower()}. Current/default: {default}.",
+            mouse_enabled=True,
         )
         if choice is None or choice.value == MENU_BACK:
             return None
@@ -117,7 +145,12 @@ class CustomContentMenuMixin:
             for value in choices
         ]
         items.append(MenuItem(label="Back", value=MENU_BACK, enabled=True))
-        choice = menu_select(title, items, footer="Choose one option.")
+        choice = menu_select(
+            title,
+            items,
+            footer="Choose one option.",
+            mouse_enabled=True,
+        )
         if choice is None or choice.value == MENU_BACK:
             return None
         return str(choice.value)
@@ -160,9 +193,9 @@ class CustomContentMenuMixin:
             print("+" + "-" * (radius * 2 + 1) + "+")
             print(f"Cursor: {cursor_x:+d},{cursor_y:+d} | Affected tiles: {len(selected)}/169")
             print(notice)
-            print("WASD/arrows move | Z/Space toggle | C clear | R reset | Enter accept | X/Esc cancel")
+            print("WASD/arrows move | Z/Space toggle | C clear | R reset | Enter accept | B/X/Esc/Q/Tab cancel")
             key = normalize_key(read_key())
-            if key in {"\x1b", "x", "q", "b"}:
+            if key in {"\x1b", "x", "q", "b", "\t"}:
                 return None
             if key in {"w", "UP"}:
                 cursor_y = max(-radius, cursor_y - 1)
@@ -1303,6 +1336,56 @@ class CustomContentMenuMixin:
             points.append((int(record.get("x", 0) or 0), int(record.get("y", 0) or 0)))
         return points
 
+    @staticmethod
+    def custom_building_mouse_canvas_point(
+        event: Dict[str, object],
+    ) -> Optional[tuple]:
+        """Translate a screen-space mouse event into template coordinates."""
+        if event.get("kind") != "mouse":
+            return None
+        try:
+            x = int(event.get("x", -1))
+            y = int(event.get("y", -1)) - 2
+        except (TypeError, ValueError):
+            return None
+        if (
+            0 <= x < BUILDING_TEMPLATE_WIDTH
+            and 0 <= y < BUILDING_TEMPLATE_HEIGHT
+        ):
+            return x, y
+        return None
+
+    @staticmethod
+    def custom_building_line_points(
+        start: tuple,
+        end: tuple,
+    ) -> List[tuple]:
+        """Return an unbroken Bresenham stroke between two cursor positions."""
+        x1, y1 = int(start[0]), int(start[1])
+        x2, y2 = int(end[0]), int(end[1])
+        points: List[tuple] = []
+        dx = abs(x2 - x1)
+        sx = 1 if x1 < x2 else -1
+        dy = -abs(y2 - y1)
+        sy = 1 if y1 < y2 else -1
+        error = dx + dy
+        while True:
+            if (
+                0 <= x1 < BUILDING_TEMPLATE_WIDTH
+                and 0 <= y1 < BUILDING_TEMPLATE_HEIGHT
+            ):
+                points.append((x1, y1))
+            if (x1, y1) == (x2, y2):
+                break
+            doubled = 2 * error
+            if doubled >= dy:
+                error += dy
+                x1 += sx
+            if doubled <= dx:
+                error += dx
+                y1 += sy
+        return points
+
     def draw_custom_building_template_canvas(
         self,
         title: str,
@@ -1314,6 +1397,8 @@ class CustomContentMenuMixin:
         footer: str = "",
         color_overlays: Optional[Dict[tuple, str]] = None,
         spawn_points: Optional[Sequence[tuple]] = None,
+        zone_overlays: Optional[Dict[tuple, str]] = None,
+        preview_tiles: Optional[Dict[tuple, tuple]] = None,
     ) -> None:
         clear_screen()
         print(title)
@@ -1339,6 +1424,8 @@ class CustomContentMenuMixin:
             }
         color_overlays = color_overlays or {}
         spawn_set = set(spawn_points or [])
+        zone_overlays = zone_overlays or {}
+        preview_tiles = preview_tiles or {}
         for y in range(BUILDING_TEMPLATE_HEIGHT):
             raw = str(rows[y]) if y < len(rows) else ""
             line = []
@@ -1348,13 +1435,29 @@ class CustomContentMenuMixin:
                     line.append(colorize("@", C.PLACEMENT))
                 elif (x, y) in rect:
                     line.append(colorize("*", C.PLACEMENT))
+                elif (x, y) in preview_tiles:
+                    preview_glyph, overwrites = preview_tiles[(x, y)]
+                    line.append(colorize(
+                        str(preview_glyph)[:1],
+                        C.PLACEMENT if bool(overwrites) else C.UI_SELECTED,
+                    ))
                 elif (x, y) in spawn_set:
                     line.append(colorize("N", C.PLACEMENT))
+                elif (x, y) in zone_overlays:
+                    line.append(colorize(str(zone_overlays[(x, y)])[:1], C.INFRA))
                 elif (x, y) in color_overlays:
                     line.append(colorize(ch, self.custom_building_color_code(color_overlays[(x, y)]) or C.WOOD))
                 else:
-                    line.append(ch)
+                    line.append(colorize(
+                        ch,
+                        interior_tile_color(
+                            ch,
+                            context="public",
+                            ambient=False,
+                        ),
+                    ))
             print("".join(line))
+        print(f"Cursor: {cursor_x},{cursor_y}")
         print(footer)
 
     def custom_building_boundary_editor(
@@ -1365,6 +1468,7 @@ class CustomContentMenuMixin:
     ) -> Optional[List[str]]:
         cursor_x, cursor_y = BUILDING_TEMPLATE_WIDTH // 2, BUILDING_TEMPLATE_HEIGHT - 2
         anchor: Optional[tuple] = None
+        mouse_left_down = False
         while True:
             self.draw_custom_building_template_canvas(
                 f"Building Boundary - Floor {floor_index + 1}",
@@ -1373,7 +1477,7 @@ class CustomContentMenuMixin:
                 cursor_y,
                 anchor=anchor,
                 footer=(
-                    "WASD/Arrows move | Z set first/second corner | C clear | Q/Esc keep current\n"
+                    "Left-drag draw | Right-click/C clear | WASD/Arrows move | Z corners | B/Q/Esc/Tab keep current\n"
                     +
                     (
                         "Draw the outer rectangle of the building. A door is added to the bottom wall."
@@ -1382,7 +1486,37 @@ class CustomContentMenuMixin:
                     )
                 ),
             )
-            key = normalize_key(read_key())
+            event = read_key_or_mouse()
+            if event.get("kind") == "mouse":
+                point = self.custom_building_mouse_canvas_point(event)
+                raw_left = bool(event.get("left", False))
+                moved = bool(event.get("moved", False))
+                left = raw_left and (mouse_left_down or not moved)
+                if bool(event.get("right", False)):
+                    anchor = None
+                    mouse_left_down = False
+                    continue
+                if point is not None and left:
+                    cursor_x, cursor_y = point
+                    if not mouse_left_down:
+                        anchor = point
+                    mouse_left_down = True
+                    continue
+                if mouse_left_down and not raw_left:
+                    mouse_left_down = False
+                    if point is not None and anchor is not None:
+                        cursor_x, cursor_y = point
+                        ax, ay = anchor
+                        return self.custom_building_rows_from_boundary(
+                            ax,
+                            ay,
+                            cursor_x,
+                            cursor_y,
+                            building_type,
+                            floor_index,
+                        )
+                continue
+            key = normalize_key(str(event.get("key", "")))
             key = key.lower() if len(key) == 1 and key.isalpha() else key
             if key in ["q", "b", "\t", "\x1b"]:
                 return list(rows)
@@ -1420,9 +1554,12 @@ class CustomContentMenuMixin:
         self,
         title: str,
         rows: Sequence[str],
+        *,
+        initial_rect: Optional[tuple] = None,
     ) -> Optional[Dict[str, int]]:
         cursor_x, cursor_y = BUILDING_TEMPLATE_WIDTH // 2, BUILDING_TEMPLATE_HEIGHT // 2
         anchor: Optional[tuple] = None
+        mouse_left_down = False
         while True:
             self.draw_custom_building_template_canvas(
                 title,
@@ -1430,9 +1567,38 @@ class CustomContentMenuMixin:
                 cursor_x,
                 cursor_y,
                 anchor=anchor,
-                footer="WASD/Arrows move | Z set first/second corner | C clear | Q/Esc cancel",
+                selected_rect=initial_rect if anchor is None else None,
+                footer=(
+                    "Left-drag draw new boundaries | Right-click/C clear selection | "
+                    "WASD/Arrows move | Z corners | B/Q/Esc/Tab cancel"
+                ),
             )
-            key = normalize_key(read_key())
+            event = read_key_or_mouse()
+            if event.get("kind") == "mouse":
+                point = self.custom_building_mouse_canvas_point(event)
+                raw_left = bool(event.get("left", False))
+                moved = bool(event.get("moved", False))
+                left = raw_left and (mouse_left_down or not moved)
+                if bool(event.get("right", False)):
+                    anchor = None
+                    mouse_left_down = False
+                    continue
+                if point is not None and left:
+                    cursor_x, cursor_y = point
+                    if not mouse_left_down:
+                        anchor = point
+                    mouse_left_down = True
+                    continue
+                if mouse_left_down and not raw_left:
+                    mouse_left_down = False
+                    if point is not None and anchor is not None:
+                        cursor_x, cursor_y = point
+                        ax, ay = anchor
+                        x1, x2 = sorted((ax, cursor_x))
+                        y1, y2 = sorted((ay, cursor_y))
+                        return {"x1": x1, "y1": y1, "x2": x2, "y2": y2}
+                continue
+            key = normalize_key(str(event.get("key", "")))
             key = key.lower() if len(key) == 1 and key.isalpha() else key
             if key in ["q", "b", "\t", "\x1b"]:
                 return None
@@ -1466,11 +1632,18 @@ class CustomContentMenuMixin:
         title: str,
         rows: Sequence[str],
         *,
-        footer: str = "WASD/Arrows move | Z select point | Q/Esc cancel",
+        footer: str = "WASD/Arrows move | Z select point | B/Q/Esc/Tab cancel",
         color_overlays: Optional[Dict[tuple, str]] = None,
         spawn_points: Optional[Sequence[tuple]] = None,
+        initial_point: Optional[tuple] = None,
     ) -> Optional[Dict[str, int]]:
-        cursor_x, cursor_y = BUILDING_TEMPLATE_WIDTH // 2, BUILDING_TEMPLATE_HEIGHT // 2
+        if initial_point is None:
+            cursor_x, cursor_y = BUILDING_TEMPLATE_WIDTH // 2, BUILDING_TEMPLATE_HEIGHT // 2
+        else:
+            cursor_x = max(0, min(BUILDING_TEMPLATE_WIDTH - 1, int(initial_point[0])))
+            cursor_y = max(0, min(BUILDING_TEMPLATE_HEIGHT - 1, int(initial_point[1])))
+        if "Left-click" not in footer:
+            footer = f"Left-click select | Right-click cancel | {footer}"
         while True:
             self.draw_custom_building_template_canvas(
                 title,
@@ -1481,7 +1654,20 @@ class CustomContentMenuMixin:
                 color_overlays=color_overlays,
                 spawn_points=spawn_points,
             )
-            key = normalize_key(read_key())
+            event = read_key_or_mouse()
+            if event.get("kind") == "mouse":
+                if bool(event.get("right", False)):
+                    return None
+                point = self.custom_building_mouse_canvas_point(event)
+                if (
+                    point is not None
+                    and bool(event.get("left", False))
+                    and not bool(event.get("moved", False))
+                ):
+                    cursor_x, cursor_y = point
+                    return {"x": cursor_x, "y": cursor_y}
+                continue
+            key = normalize_key(str(event.get("key", "")))
             key = key.lower() if len(key) == 1 and key.isalpha() else key
             if key in ["q", "b", "\t", "\x1b"]:
                 return None
@@ -1508,25 +1694,89 @@ class CustomContentMenuMixin:
         floor_index: int = 0,
     ) -> List[Dict[str, object]]:
         current_zones = [dict(zone) for zone in zones if isinstance(zone, dict)]
-        while True:
-            items = [
-                MenuItem(label="Add functional zone", value="add", enabled=len(current_zones) < 16),
-            ]
-            items.extend(
-                MenuItem(
-                    label=f"F{int(zone.get('floor', 0)) + 1} {BUILDING_TEMPLATE_ZONE_LABELS.get(str(zone.get('kind')), str(zone.get('kind')))} "
-                    f"{zone.get('x1')},{zone.get('y1')}-{zone.get('x2')},{zone.get('y2')}",
-                    value=f"zone:{index}",
-                    enabled=True,
-                    hint="inspect/delete",
-                )
-                for index, zone in enumerate(current_zones)
-            )
-            items.append(MenuItem(label="Back", value=MENU_BACK, enabled=True))
+
+        def choose_zone(title: str, indices: Sequence[int]) -> Optional[int]:
             choice = menu_select(
-                "Building Zones",
+                title,
+                [
+                    MenuItem(
+                        label=(
+                            f"F{int(current_zones[index].get('floor', 0)) + 1} "
+                            f"{BUILDING_TEMPLATE_ZONE_LABELS.get(str(current_zones[index].get('kind')), str(current_zones[index].get('kind')))}"
+                        ),
+                        value=index,
+                        enabled=True,
+                        hint=(
+                            f"{current_zones[index].get('x1')},{current_zones[index].get('y1')} to "
+                            f"{current_zones[index].get('x2')},{current_zones[index].get('y2')}"
+                        ),
+                    )
+                    for index in indices
+                ] + [MenuItem(label="Back", value=MENU_BACK, enabled=True)],
+                footer="Choose the zone you want to change.",
+                mouse_enabled=True,
+            )
+            if choice is None or choice.value == MENU_BACK:
+                return None
+            try:
+                return int(choice.value)
+            except (TypeError, ValueError):
+                return None
+
+        while True:
+            floor_indices = [
+                index
+                for index, zone in enumerate(current_zones)
+                if int(zone.get("floor", 0) or 0) == int(floor_index)
+            ]
+            items = [
+                MenuItem(
+                    label="Draw a new zone",
+                    value="add",
+                    enabled=len(current_zones) < 16,
+                    hint="choose a function, then drag its boundaries",
+                ),
+                MenuItem(
+                    label="Redraw a zone",
+                    value="redraw",
+                    enabled=bool(floor_indices),
+                    hint="replace an existing zone's boundaries",
+                ),
+                MenuItem(
+                    label="Change a zone's function",
+                    value="kind",
+                    enabled=bool(current_zones),
+                ),
+                MenuItem(
+                    label="Delete one zone",
+                    value="delete",
+                    enabled=bool(current_zones),
+                ),
+                MenuItem(
+                    label="Delete all zones on this floor",
+                    value="delete_floor",
+                    enabled=bool(floor_indices),
+                    hint=f"{len(floor_indices)} zone{'s' if len(floor_indices) != 1 else ''}",
+                ),
+            ]
+            items.append(MenuItem(label="Back", value=MENU_BACK, enabled=True))
+            floor_zone_lines = [
+                (
+                    f"- {BUILDING_TEMPLATE_ZONE_LABELS.get(str(current_zones[index].get('kind')), str(current_zones[index].get('kind')))}: "
+                    f"{current_zones[index].get('x1')},{current_zones[index].get('y1')} to "
+                    f"{current_zones[index].get('x2')},{current_zones[index].get('y2')}"
+                )
+                for index in floor_indices
+            ]
+            choice = menu_select(
+                f"Functional Zones - Floor {floor_index + 1}",
                 items,
-                footer="Zones describe room functions for NPC schedules. They do not place furniture.",
+                footer="Draw, redraw, rename, or delete zones here. Zones guide NPC schedules and never place furniture.",
+                extra_lines=[
+                    f"{len(floor_indices)} zone{'s' if len(floor_indices) != 1 else ''} on this floor",
+                    *(floor_zone_lines or ["- No zones drawn yet."]),
+                ],
+                mouse_enabled=True,
             )
             if choice is None or choice.value == MENU_BACK:
                 return current_zones
@@ -1548,28 +1798,60 @@ class CustomContentMenuMixin:
                     rect["floor"] = floor_index
                     current_zones.append(rect)
                 continue
-            try:
-                index = int(str(choice.value).split(":", 1)[1])
+            if choice.value == "redraw":
+                index = choose_zone("Redraw Zone", floor_indices)
+                if index is None:
+                    continue
                 zone = current_zones[index]
-            except (ValueError, IndexError):
-                continue
-            action = menu_select(
-                "Zone",
-                [
-                    MenuItem(label="Delete zone", value="delete", enabled=True),
-                    MenuItem(label="Back", value=MENU_BACK, enabled=True),
-                ],
-                extra_lines=[
-                    BUILDING_TEMPLATE_ZONE_LABELS.get(str(zone.get("kind")), str(zone.get("kind"))),
-                    f"Floor {int(zone.get('floor', 0)) + 1}",
-                    f"{zone.get('x1')},{zone.get('y1')} to {zone.get('x2')},{zone.get('y2')}",
-                ],
-            )
-            if action is not None and action.value == "delete":
+                rect = self.custom_building_rect_selector(
+                    f"Redraw {BUILDING_TEMPLATE_ZONE_LABELS.get(str(zone.get('kind')), str(zone.get('kind')))} Zone",
+                    rows,
+                    initial_rect=(
+                        int(zone.get("x1", 0)),
+                        int(zone.get("y1", 0)),
+                        int(zone.get("x2", 0)),
+                        int(zone.get("y2", 0)),
+                    ),
+                )
+                if rect is not None:
+                    current_zones[index].update(rect)
+            elif choice.value == "kind":
+                index = choose_zone("Change Zone Function", list(range(len(current_zones))))
+                if index is None:
+                    continue
+                zone = current_zones[index]
+                new_kind = self.custom_choice_menu(
+                    "Zone Function",
+                    BUILDING_TEMPLATE_ZONE_KINDS,
+                    str(zone.get("kind", "bedroom")),
+                    labels=BUILDING_TEMPLATE_ZONE_LABELS,
+                )
+                if new_kind is not None:
+                    current_zones[index]["kind"] = new_kind
+            elif choice.value == "delete":
+                index = choose_zone("Delete Zone", list(range(len(current_zones))))
+                if index is None:
+                    continue
                 del current_zones[index]
+            elif choice.value == "delete_floor":
+                confirm = menu_select(
+                    "Delete Floor Zones",
+                    [
+                        MenuItem(label="Delete all zones on this floor", value="delete", enabled=True),
+                        MenuItem(label="Cancel", value=MENU_BACK, enabled=True),
+                    ],
+                    footer="This only removes schedule zones; it does not erase the map or furniture.",
+                    mouse_enabled=True,
+                )
+                if confirm is not None and confirm.value == "delete":
+                    current_zones = [
+                        zone
+                        for zone in current_zones
+                        if int(zone.get("floor", 0) or 0) != int(floor_index)
+                    ]
 
     def custom_building_fixture_brushes(self) -> List[tuple]:
-        return [
+        brushes = [
             ("Floor", ".", "open walkable floor"),
             ("Wall", "#", "outer or heavy interior wall"),
             ("Horizontal Partition", "-", "thin divider/room boundary"),
@@ -1593,12 +1875,98 @@ class CustomContentMenuMixin:
             ("Records/Desk", "P", "records, notice, or public desk"),
             ("Writing Desk", "d", "office/civic desk"),
             ("Planter/Decor", "p", "decoration"),
+            ("Kitchen", "k", "kitchen fixture"),
+            ("Pantry/Medicine", "m", "contextual supplies"),
+            ("Notice", "n", "posted notice"),
+            ("Rug/Records", "r", "contextual rug or records"),
+            ("Wardrobe/Utility", "u", "contextual household fixture"),
+            ("Produce Display", "v", "market produce"),
+            ("Examination Fixture", "e", "clinic examination equipment"),
+            ("Animal Fixture", "h", "animal-store fixture"),
+            ("Forge", "q", "smithing or quenching fixture"),
+            ("Ore Storage", "o", "smithing material storage"),
+            ("Large Bed", "B", "authored bedroom fixture"),
+            ("Display A", "A", "contextual authored display"),
+            ("Display C", "C", "contextual authored display"),
+            ("Display E", "E", "contextual authored display"),
+            ("Display F", "F", "contextual authored display"),
+            ("Display G", "G", "contextual authored display"),
+            ("Lamp", "L", "interior lamp"),
+            ("Display M", "M", "contextual authored display"),
+            ("Display S", "S", "contextual authored display"),
+            ("Large Table", "T", "authored table fixture"),
+            ("Catalog/Notice", "!", "catalog or warning fixture"),
+            ("Blackjack Table", "1", "playable game table"),
+            ("Hold'em Table", "2", "playable game table"),
+            ("Hearts Table", "3", "playable game table"),
+            ("Solitaire Table", "4", "playable game table"),
+            ("Checkers Table", "5", "playable game table"),
+            ("Chess Table", "6", "playable game table"),
+            ("Mancala Board", "7", "playable game table"),
+            ("Royal Game of Ur", "8", "playable game table"),
             ("Rug", ",", "soft decoration"),
-            ("Erase Outside", " ", "empty exterior void"),
+            ("Erase to Blank", " ", "remove the tile completely, leaving empty space"),
+        ]
+        brushes.extend(
+            (
+                str(record["name"]),
+                str(symbol),
+                str(record["hint"]),
+            )
+            for symbol, record in BUILDING_TEMPLATE_FURNISHING_DATA.items()
+        )
+        return brushes
+
+    def custom_building_fixture_brush_groups(self) -> List[tuple]:
+        brushes = self.custom_building_fixture_brushes()
+        by_symbol = {str(symbol): (label, str(symbol), hint) for label, symbol, hint in brushes}
+        groups = [
+            ("Architecture", (".", "#", "-", "|", "_", "D", "<", ">")),
+            ("Services & Work", ("&", "$", "+", "w", "a", "x", "P", "d", "f", "k", "m", "n", "e", "h", "q", "o", "v")),
+            ("Beds", ("b", "B", "I", "J", "K")),
+            ("Tables & Seating", ("t", "T", "c", "C", "O", "Q", "R")),
+            ("Storage & Containers", ("s", "u", "j", "g", "W", "y", "z", "N", "X", "Y", "Z")),
+            ("Books & Displays", ("l", "L", "H", "i", "V", "p", ",", "r", "!")),
+            ("Displays", ("A", "E", "F", "G", "M", "S")),
+            ("Game Tables", ("1", "2", "3", "4", "5", "6", "7", "8")),
+            ("Erase", (" ",)),
+        ]
+        return [
+            (group_name, [by_symbol[symbol] for symbol in symbols if symbol in by_symbol])
+            for group_name, symbols in groups
         ]
 
     def custom_building_fixture_palette(self, current_brush: str) -> Optional[str]:
-        brushes = self.custom_building_fixture_brushes()
+        groups = self.custom_building_fixture_brush_groups()
+        current_group = next(
+            (
+                group_name
+                for group_name, brushes in groups
+                if any(str(symbol) == str(current_brush) for _label, symbol, _hint in brushes)
+            ),
+            "",
+        )
+        group_choice = menu_select(
+            "Fixture Categories",
+            [
+                MenuItem(
+                    label=group_name,
+                    value=group_name,
+                    enabled=True,
+                    hint=f"{len(brushes)} brushes{' | current' if group_name == current_group else ''}",
+                )
+                for group_name, brushes in groups
+            ] + [MenuItem(label="Back", value=MENU_BACK, enabled=True)],
+            footer="Choose a compact fixture category.",
+            mouse_enabled=True,
+        )
+        if group_choice is None or group_choice.value == MENU_BACK:
+            return None
+        brushes = next(
+            brushes
+            for group_name, brushes in groups
+            if group_name == str(group_choice.value)
+        )
         items = [
             MenuItem(
                 label=f"{label} ({symbol if symbol != ' ' else 'space'})",
@@ -1609,10 +1977,555 @@ class CustomContentMenuMixin:
             for label, symbol, hint in brushes
         ]
         items.append(MenuItem(label="Back", value=MENU_BACK, enabled=True))
-        choice = menu_select("Fixture Brush", items, footer="Choose what Z/Enter paints on the template.")
+        choice = menu_select(
+            "Fixture Brush",
+            items,
+            footer="Choose what Z/Enter or left-drag paints on the template.",
+            mouse_enabled=True,
+        )
         if choice is None or choice.value == MENU_BACK:
             return None
         return str(choice.value)
+
+    @staticmethod
+    def custom_building_flood_points(
+        rows: Sequence[str],
+        start_x: int,
+        start_y: int,
+    ) -> List[tuple]:
+        """Return the connected four-way region matching the selected tile."""
+        if not (
+            0 <= int(start_y) < len(rows)
+            and 0 <= int(start_x) < len(str(rows[int(start_y)]))
+        ):
+            return []
+        start_x, start_y = int(start_x), int(start_y)
+        target = str(rows[start_y])[start_x]
+        pending = [(start_x, start_y)]
+        seen = set()
+        points: List[tuple] = []
+        while pending:
+            x, y = pending.pop()
+            if (x, y) in seen:
+                continue
+            seen.add((x, y))
+            if not (
+                0 <= y < len(rows)
+                and 0 <= x < len(str(rows[y]))
+                and str(rows[y])[x] == target
+            ):
+                continue
+            points.append((x, y))
+            pending.extend(((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)))
+        return points
+
+    @staticmethod
+    def custom_building_extract_clipboard(
+        rows: Sequence[str],
+        rect: Dict[str, int],
+    ) -> List[str]:
+        x1, x2 = sorted((int(rect["x1"]), int(rect["x2"])))
+        y1, y2 = sorted((int(rect["y1"]), int(rect["y2"])))
+        return [
+            str(rows[y]).ljust(BUILDING_TEMPLATE_WIDTH)[x1:x2 + 1]
+            for y in range(max(0, y1), min(len(rows), y2 + 1))
+        ]
+
+    @staticmethod
+    def custom_building_transform_clipboard(
+        clipboard: Sequence[str],
+        transform: str,
+    ) -> List[str]:
+        rows = [str(row) for row in clipboard]
+        if not rows:
+            return []
+        width = max(len(row) for row in rows)
+        grid = [list(row.ljust(width)) for row in rows]
+        if transform == "horizontal":
+            return ["".join(reversed(row)) for row in grid]
+        if transform == "vertical":
+            return ["".join(row) for row in reversed(grid)]
+        if transform == "clockwise":
+            return [
+                "".join(grid[y][x] for y in range(len(grid) - 1, -1, -1))
+                for x in range(width)
+            ]
+        return ["".join(row) for row in grid]
+
+    @staticmethod
+    def custom_building_paste_clipboard(
+        rows: Sequence[str],
+        clipboard: Sequence[str],
+        start_x: int,
+        start_y: int,
+        *,
+        transparent: bool = False,
+    ) -> List[str]:
+        grid = [
+            list(str(row).ljust(BUILDING_TEMPLATE_WIDTH)[:BUILDING_TEMPLATE_WIDTH])
+            for row in rows[:BUILDING_TEMPLATE_HEIGHT]
+        ]
+        while len(grid) < BUILDING_TEMPLATE_HEIGHT:
+            grid.append([" " for _ in range(BUILDING_TEMPLATE_WIDTH)])
+        for local_y, clipboard_row in enumerate(clipboard):
+            y = int(start_y) + local_y
+            if not 0 <= y < BUILDING_TEMPLATE_HEIGHT:
+                continue
+            for local_x, tile in enumerate(str(clipboard_row)):
+                x = int(start_x) + local_x
+                if not 0 <= x < BUILDING_TEMPLATE_WIDTH:
+                    continue
+                if transparent and tile == " ":
+                    continue
+                grid[y][x] = tile
+        return ["".join(row) for row in grid]
+
+    @staticmethod
+    def custom_building_clipboard_preview(
+        rows: Sequence[str],
+        clipboard: Sequence[str],
+        start_x: int,
+        start_y: int,
+        *,
+        transparent: bool = False,
+    ) -> Dict[str, object]:
+        tiles: Dict[tuple, tuple] = {}
+        clipped = 0
+        overwritten = 0
+        for local_y, clipboard_row in enumerate(clipboard):
+            for local_x, tile in enumerate(str(clipboard_row)):
+                if transparent and tile == " ":
+                    continue
+                x, y = int(start_x) + local_x, int(start_y) + local_y
+                if not (
+                    0 <= x < BUILDING_TEMPLATE_WIDTH
+                    and 0 <= y < BUILDING_TEMPLATE_HEIGHT
+                ):
+                    clipped += 1
+                    continue
+                source_row = str(rows[y]) if y < len(rows) else ""
+                existing = source_row[x] if x < len(source_row) else " "
+                overwrites = existing not in {" ", "."} and existing != tile
+                if overwrites:
+                    overwritten += 1
+                tiles[(x, y)] = (
+                    tile if tile != " " else "\u00b7",
+                    overwrites,
+                )
+        return {
+            "tiles": tiles,
+            "clipped": clipped,
+            "overwritten": overwritten,
+            "width": max((len(str(row)) for row in clipboard), default=0),
+            "height": len(clipboard),
+        }
+
+    def custom_building_clipboard_placement_selector(
+        self,
+        title: str,
+        rows: Sequence[str],
+        clipboard: Sequence[str],
+        *,
+        transparent: bool = False,
+        initial_point: Optional[tuple] = None,
+    ) -> Optional[Dict[str, int]]:
+        if not clipboard:
+            return None
+        if initial_point is None:
+            cursor_x, cursor_y = BUILDING_TEMPLATE_WIDTH // 2, BUILDING_TEMPLATE_HEIGHT // 2
+        else:
+            cursor_x = max(0, min(BUILDING_TEMPLATE_WIDTH - 1, int(initial_point[0])))
+            cursor_y = max(0, min(BUILDING_TEMPLATE_HEIGHT - 1, int(initial_point[1])))
+        while True:
+            preview = self.custom_building_clipboard_preview(
+                rows,
+                clipboard,
+                cursor_x,
+                cursor_y,
+                transparent=transparent,
+            )
+            warnings = []
+            if int(preview["clipped"]):
+                warnings.append(f"{preview['clipped']} clipped")
+            if int(preview["overwritten"]):
+                warnings.append(f"{preview['overwritten']} overwrite")
+            status = ", ".join(warnings) if warnings else "clear placement"
+            self.draw_custom_building_template_canvas(
+                title,
+                rows,
+                cursor_x,
+                cursor_y,
+                preview_tiles=preview["tiles"],
+                footer=(
+                    f"Preview: {preview['width']}x{preview['height']} | {status}\n"
+                    "Left-click/Z place | Right-click/B/Q/Esc/Tab cancel | WASD/Arrows move"
+                ),
+            )
+            event = read_key_or_mouse()
+            if event.get("kind") == "mouse":
+                if bool(event.get("right", False)):
+                    return None
+                point = self.custom_building_mouse_canvas_point(event)
+                if point is not None:
+                    cursor_x, cursor_y = point
+                    if bool(event.get("left", False)):
+                        return {"x": cursor_x, "y": cursor_y}
+                continue
+            key = normalize_key(str(event.get("key", "")))
+            key = key.lower() if len(key) == 1 and key.isalpha() else key
+            if key in ["q", "b", "\t", "\x1b"]:
+                return None
+            dx, dy = 0, 0
+            if key in ["w", "UP"]:
+                dy = -1
+            elif key in ["s", "DOWN"]:
+                dy = 1
+            elif key in ["a", "LEFT"]:
+                dx = -1
+            elif key in ["d", "RIGHT"]:
+                dx = 1
+            if dx or dy:
+                cursor_x = max(0, min(BUILDING_TEMPLATE_WIDTH - 1, cursor_x + dx))
+                cursor_y = max(0, min(BUILDING_TEMPLATE_HEIGHT - 1, cursor_y + dy))
+                continue
+            if key in MENU_CONFIRM_KEYS:
+                return {"x": cursor_x, "y": cursor_y}
+
+    @staticmethod
+    def custom_building_room_shell(
+        rows: Sequence[str],
+        rect: Dict[str, int],
+    ) -> List[str]:
+        grid = [
+            list(str(row).ljust(BUILDING_TEMPLATE_WIDTH)[:BUILDING_TEMPLATE_WIDTH])
+            for row in rows[:BUILDING_TEMPLATE_HEIGHT]
+        ]
+        while len(grid) < BUILDING_TEMPLATE_HEIGHT:
+            grid.append([" " for _ in range(BUILDING_TEMPLATE_WIDTH)])
+        x1, x2 = sorted((int(rect["x1"]), int(rect["x2"])))
+        y1, y2 = sorted((int(rect["y1"]), int(rect["y2"])))
+        for y in range(max(0, y1), min(BUILDING_TEMPLATE_HEIGHT - 1, y2) + 1):
+            for x in range(max(0, x1), min(BUILDING_TEMPLATE_WIDTH - 1, x2) + 1):
+                grid[y][x] = "#" if x in {x1, x2} or y in {y1, y2} else "."
+        return ["".join(row) for row in grid]
+
+    @staticmethod
+    def custom_building_move_selection(
+        rows: Sequence[str],
+        rect: Dict[str, int],
+        destination_x: int,
+        destination_y: int,
+    ) -> List[str]:
+        clipboard = CustomContentMenuMixin.custom_building_extract_clipboard(rows, rect)
+        grid = [
+            list(str(row).ljust(BUILDING_TEMPLATE_WIDTH)[:BUILDING_TEMPLATE_WIDTH])
+            for row in rows[:BUILDING_TEMPLATE_HEIGHT]
+        ]
+        while len(grid) < BUILDING_TEMPLATE_HEIGHT:
+            grid.append([" " for _ in range(BUILDING_TEMPLATE_WIDTH)])
+        x1, x2 = sorted((int(rect["x1"]), int(rect["x2"])))
+        y1, y2 = sorted((int(rect["y1"]), int(rect["y2"])))
+        for y in range(max(0, y1), min(BUILDING_TEMPLATE_HEIGHT - 1, y2) + 1):
+            for x in range(max(0, x1), min(BUILDING_TEMPLATE_WIDTH - 1, x2) + 1):
+                grid[y][x] = " "
+        return CustomContentMenuMixin.custom_building_paste_clipboard(
+            ["".join(row) for row in grid],
+            clipboard,
+            int(destination_x),
+            int(destination_y),
+        )
+
+    @staticmethod
+    def custom_building_room_kits() -> List[Dict[str, object]]:
+        return [
+            {
+                "name": "Simple Bedroom",
+                "zone": "bedroom",
+                "hint": "bed, wardrobe, lamp, and a small table",
+                "rows": [
+                    "#########",
+                    "#I....YN#",
+                    "#.......#",
+                    "#..t.cL.#",
+                    "#.......#",
+                    "####_####",
+                ],
+            },
+            {
+                "name": "Inn Guest Room",
+                "zone": "bedroom",
+                "hint": "one bed per private inn room",
+                "rows": [
+                    "#######",
+                    "#b...N#",
+                    "#.....#",
+                    "#.t.c.#",
+                    "###_###",
+                ],
+            },
+            {
+                "name": "Kitchen and Dining",
+                "zone": "kitchen",
+                "hint": "one compact kitchen with pantry and dining space",
+                "rows": [
+                    "###########",
+                    "#k.W.Z..f.#",
+                    "#.........#",
+                    "#..c.t.c..#",
+                    "#.........#",
+                    "#####_#####",
+                ],
+            },
+            {
+                "name": "Shop Counter Room",
+                "zone": "shopping_counter",
+                "hint": "stock wall, continuous counter, and an open service lane",
+                "rows": [
+                    "#############",
+                    "#VVV.zz.....#",
+                    "#...........#",
+                    "#&&&&&&&....#",
+                    "#...........#",
+                    "######_######",
+                ],
+            },
+            {
+                "name": "Office",
+                "zone": "office",
+                "hint": "desk, records, chair, and visitor table",
+                "rows": [
+                    "#########",
+                    "#d.P...g#",
+                    "#.c.....#",
+                    "#...t.c.#",
+                    "#.......#",
+                    "####_####",
+                ],
+            },
+            {
+                "name": "Library Reading Room",
+                "zone": "library_stacks",
+                "hint": "bookcases around a clear reading area",
+                "rows": [
+                    "###########",
+                    "#HHH...iii#",
+                    "#.........#",
+                    "#.c.t.t.c.#",
+                    "#.........#",
+                    "#####_#####",
+                ],
+            },
+            {
+                "name": "Empty Hallway Segment",
+                "zone": "",
+                "hint": "clear three-wide circulation lane with doors at both ends",
+                "rows": [
+                    "###_###",
+                    "#.....#",
+                    "#.....#",
+                    "#.....#",
+                    "###_###",
+                ],
+            },
+            {
+                "name": "Bedroom Suite Arrangement",
+                "group": "Furnishing Arrangements",
+                "zone": "bedroom",
+                "hint": "double bed, dresser, nightstand, seating, and table",
+                "rows": [
+                    "I.....YN.",
+                    ".........",
+                    ".R..t..Q.",
+                    ".........",
+                ],
+            },
+            {
+                "name": "Bunk Room Arrangement",
+                "group": "Furnishing Arrangements",
+                "zone": "bedroom",
+                "hint": "two bunk beds with separate nightstands and benches",
+                "rows": [
+                    "J.N...J.N",
+                    ".........",
+                    ".O..t..O.",
+                    ".........",
+                ],
+            },
+            {
+                "name": "Reading Nook Arrangement",
+                "group": "Furnishing Arrangements",
+                "zone": "library_stacks",
+                "hint": "mixed bookcases, armchair, table, and lamp",
+                "rows": [
+                    "HHi....",
+                    ".......",
+                    ".R.t.L.",
+                    ".......",
+                ],
+            },
+            {
+                "name": "Living Room Arrangement",
+                "group": "Furnishing Arrangements",
+                "zone": "public_hall",
+                "hint": "sofa, armchair, side table, and chair",
+                "rows": [
+                    "Q.......R",
+                    ".........",
+                    "...t.c...",
+                    ".........",
+                ],
+            },
+            {
+                "name": "Dining Set Arrangement",
+                "group": "Furnishing Arrangements",
+                "zone": "dining",
+                "hint": "shared benches, dining table, and chairs",
+                "rows": [
+                    "..O...O..",
+                    ".........",
+                    ".c..T..c.",
+                    ".c.....c.",
+                    ".........",
+                ],
+            },
+            {
+                "name": "Storage Wall Arrangement",
+                "group": "Furnishing Arrangements",
+                "zone": "storage",
+                "hint": "ten distinct book and storage fixtures",
+                "rows": [
+                    "HigWjyzXYZ",
+                    "..........",
+                ],
+            },
+            {
+                "name": "Clinic Bay Arrangement",
+                "group": "Furnishing Arrangements",
+                "zone": "clinic_ward",
+                "hint": "cot, medical storage, waiting chair, and cabinet",
+                "rows": [
+                    "K..+..W..",
+                    ".........",
+                    ".c...g...",
+                ],
+            },
+            {
+                "name": "Shop Display Arrangement",
+                "group": "Furnishing Arrangements",
+                "zone": "shopping_counter",
+                "hint": "display cases, crates, and a staffed counter",
+                "rows": [
+                    "VVV...zz...",
+                    "...........",
+                    "&&&&&&.....",
+                    "...........",
+                ],
+            },
+            {
+                "name": "Workshop Storage Arrangement",
+                "group": "Furnishing Arrangements",
+                "zone": "workshop",
+                "hint": "tools, workbenches, cabinet, crates, barrel, and chest",
+                "rows": [
+                    "a.w.x.W..",
+                    ".........",
+                    "z..X..y..",
+                ],
+            },
+        ]
+
+    def custom_building_room_kit_palette(self) -> Optional[List[str]]:
+        kits = self.custom_building_room_kits()
+        items: List[MenuItem] = []
+        groups = ("Complete Rooms", "Furnishing Arrangements")
+        for group in groups:
+            items.append(MenuItem(
+                label=f"-- {group} --",
+                value=f"group:{group}",
+                enabled=False,
+            ))
+            items.extend(
+                MenuItem(
+                    label=str(kit["name"]),
+                    value=index,
+                    enabled=True,
+                    hint=f"{len(kit['rows'][0])}x{len(kit['rows'])} | {kit['hint']}",
+                )
+                for index, kit in enumerate(kits)
+                if str(kit.get("group", "Complete Rooms")) == group
+            )
+        choice = menu_select(
+            "Room and Furnishing Kit Library",
+            items + [MenuItem(label="Back", value=MENU_BACK, enabled=True)],
+            footer="The selected room is loaded into the clipboard. Use V to place it, or transform it first.",
+            mouse_enabled=True,
+        )
+        if choice is None or choice.value == MENU_BACK:
+            return None
+        try:
+            return [str(row) for row in kits[int(choice.value)]["rows"]]
+        except (IndexError, TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def custom_building_floor_zone_overlay(
+        zones: Sequence[Dict[str, object]],
+        floor_index: int,
+    ) -> Dict[tuple, str]:
+        overlay: Dict[tuple, str] = {}
+        for zone in zones:
+            if not isinstance(zone, dict) or int(zone.get("floor", 0) or 0) != int(floor_index):
+                continue
+            x1, x2 = sorted((int(zone.get("x1", 0)), int(zone.get("x2", 0))))
+            y1, y2 = sorted((int(zone.get("y1", 0)), int(zone.get("y2", 0))))
+            label = BUILDING_TEMPLATE_ZONE_LABELS.get(
+                str(zone.get("kind", "")),
+                str(zone.get("kind", "Zone")),
+            )
+            marker = str(label).strip()[:1].upper() or "Z"
+            for y in range(max(0, y1), min(BUILDING_TEMPLATE_HEIGHT - 1, y2) + 1):
+                for x in range(max(0, x1), min(BUILDING_TEMPLATE_WIDTH - 1, x2) + 1):
+                    if x not in {x1, x2} and y not in {y1, y2}:
+                        continue
+                    overlay[(x, y)] = marker if (x, y) not in overlay else "+"
+        return overlay
+
+    @staticmethod
+    def custom_building_smart_door(
+        rows: Sequence[str],
+        x: int,
+        y: int,
+        *,
+        exterior: bool = False,
+    ) -> tuple:
+        grid = [
+            list(str(row).ljust(BUILDING_TEMPLATE_WIDTH)[:BUILDING_TEMPLATE_WIDTH])
+            for row in rows[:BUILDING_TEMPLATE_HEIGHT]
+        ]
+        while len(grid) < BUILDING_TEMPLATE_HEIGHT:
+            grid.append([" " for _ in range(BUILDING_TEMPLATE_WIDTH)])
+        x, y = int(x), int(y)
+        if not (0 <= x < BUILDING_TEMPLATE_WIDTH and 0 <= y < BUILDING_TEMPLATE_HEIGHT):
+            return ["".join(row) for row in grid], False
+        if grid[y][x] not in {"#", "-", "|", "_", "D"}:
+            return ["".join(row) for row in grid], False
+        if exterior:
+            grid[y][x] = "D"
+            return ["".join(row) for row in grid], True
+        horizontal_access = (
+            0 < x < BUILDING_TEMPLATE_WIDTH - 1
+            and grid[y][x - 1] in {".", ","}
+            and grid[y][x + 1] in {".", ","}
+        )
+        vertical_access = (
+            0 < y < BUILDING_TEMPLATE_HEIGHT - 1
+            and grid[y - 1][x] in {".", ","}
+            and grid[y + 1][x] in {".", ","}
+        )
+        if not horizontal_access and not vertical_access:
+            return ["".join(row) for row in grid], False
+        grid[y][x] = "|" if horizontal_access and not vertical_access else "_"
+        return ["".join(row) for row in grid], True
 
     def custom_building_inspect_tile(
         self,
@@ -1643,29 +2556,168 @@ class CustomContentMenuMixin:
                 f"Current brush: {brush if brush != ' ' else 'space'} | Press any key to return to the editor."
             ),
         )
-        read_key()
+        read_key_or_mouse()
 
-    def custom_building_fixture_editor(self, rows: Sequence[str], floor_index: int = 0) -> List[str]:
+    def custom_building_fixture_editor(
+        self,
+        rows: Sequence[str],
+        floor_index: int = 0,
+        *,
+        zones: Sequence[Dict[str, object]] = (),
+        spawns: Sequence[Dict[str, object]] = (),
+        colors: Sequence[Dict[str, object]] = (),
+    ) -> List[str]:
         grid = [list(str(row).ljust(BUILDING_TEMPLATE_WIDTH)[:BUILDING_TEMPLATE_WIDTH]) for row in rows]
         while len(grid) < BUILDING_TEMPLATE_HEIGHT:
             grid.append([" " for _ in range(BUILDING_TEMPLATE_WIDTH)])
         cursor_x, cursor_y = BUILDING_TEMPLATE_WIDTH // 2, BUILDING_TEMPLATE_HEIGHT // 2
         brush = "."
+        mouse_left_down = False
+        mouse_right_down = False
+        last_mouse_point: Optional[tuple] = None
+        undo_stack: List[List[str]] = []
+        redo_stack: List[List[str]] = []
+        clipboard: List[str] = []
+        transparent_paste = False
+        metadata_overlay = True
+
+        def snapshot() -> List[str]:
+            return ["".join(row) for row in grid]
+
+        def remember_change() -> None:
+            current = snapshot()
+            if not undo_stack or undo_stack[-1] != current:
+                undo_stack.append(current)
+                if len(undo_stack) > 50:
+                    del undo_stack[0]
+            redo_stack.clear()
+
         while True:
+            brush_data = {
+                str(symbol): (str(label), str(hint))
+                for label, symbol, hint in self.custom_building_fixture_brushes()
+            }
+            brush_label = brush_data.get(brush, ("Unknown tile", ""))[0]
+            clipboard_label = (
+                f"{max((len(row) for row in clipboard), default=0)}x{len(clipboard)}"
+                if clipboard
+                else "empty"
+            )
             self.draw_custom_building_template_canvas(
-                f"Place Fixtures and Decorations - Floor {floor_index + 1}",
+                f"Building Map Canvas - Floor {floor_index + 1}",
                 ["".join(row) for row in grid],
                 cursor_x,
                 cursor_y,
+                color_overlays=(
+                    self.custom_building_floor_color_map(colors, floor_index)
+                    if metadata_overlay
+                    else None
+                ),
+                spawn_points=(
+                    self.custom_building_floor_spawn_points(spawns, floor_index)
+                    if metadata_overlay
+                    else None
+                ),
+                zone_overlays=(
+                    self.custom_building_floor_zone_overlay(zones, floor_index)
+                    if metadata_overlay
+                    else None
+                ),
                 footer=(
-                    f"Brush: {brush if brush != ' ' else 'space'} | "
-                    "WASD move | Z paint | P palette | I inspect | Q/Esc done"
+                    f"Brush: {brush if brush != ' ' else 'space'} ({brush_label}) | "
+                    "Left-drag draw | Right-drag erase to blank | Wheel change brush\n"
+                    "P choose tile | Middle-click/G pick tile | U/Y undo/redo | "
+                    f"Overlay: {'on' if metadata_overlay else 'off'} | Clipboard: {clipboard_label}\n"
+                    "? all tools | B/Q/Esc/Tab return to template menu"
                 ),
             )
-            key = normalize_key(read_key())
+            event = read_key_or_mouse()
+            if event.get("kind") == "mouse":
+                wheel = int(event.get("wheel", 0) or 0)
+                if wheel:
+                    symbols = [str(symbol) for _label, symbol, _hint in self.custom_building_fixture_brushes()]
+                    brush_index = symbols.index(brush) if brush in symbols else 0
+                    brush = symbols[(brush_index - wheel) % len(symbols)]
+                    mouse_left_down = False
+                    mouse_right_down = False
+                    last_mouse_point = None
+                    continue
+                point = self.custom_building_mouse_canvas_point(event)
+                raw_left = bool(event.get("left", False))
+                raw_right = bool(event.get("right", False))
+                moved = bool(event.get("moved", False))
+                left = raw_left and (mouse_left_down or not moved)
+                right = raw_right and (mouse_right_down or not moved)
+                middle = bool(int(event.get("buttons", 0) or 0) & 0x0004)
+                if point is not None and middle:
+                    cursor_x, cursor_y = point
+                    brush = grid[cursor_y][cursor_x]
+                    mouse_left_down = False
+                    mouse_right_down = False
+                    last_mouse_point = None
+                    continue
+                if point is not None and (left or right):
+                    cursor_x, cursor_y = point
+                    same_stroke = (
+                        (left and mouse_left_down)
+                        or (right and mouse_right_down)
+                    )
+                    if not same_stroke:
+                        remember_change()
+                    start = last_mouse_point if same_stroke and last_mouse_point is not None else point
+                    paint_tile = brush if left else " "
+                    for paint_x, paint_y in self.custom_building_line_points(start, point):
+                        grid[paint_y][paint_x] = paint_tile
+                    last_mouse_point = point
+                elif not raw_left and not raw_right:
+                    last_mouse_point = None
+                mouse_left_down = left
+                mouse_right_down = right
+                continue
+            key = normalize_key(str(event.get("key", "")))
             key = key.lower() if len(key) == 1 and key.isalpha() else key
             if key in ["q", "b", "\t", "\x1b"]:
                 return ["".join(row) for row in grid]
+            if key == "?":
+                menu_select(
+                    "Map Canvas Controls",
+                    [MenuItem(label="Return to canvas", value=MENU_BACK, enabled=True)],
+                    extra_lines=[
+                        "BASIC DRAWING",
+                        "Left-drag or Z: draw with the current tile",
+                        "Right-drag: erase completely to blank space",
+                        "Mouse wheel: change tile",
+                        "P: open the categorized tile palette",
+                        "Middle-click or G: pick the tile under the cursor",
+                        "WASD/arrows: move the cursor",
+                        "U / Y: undo / redo",
+                        "",
+                        "ROOMS AND SHAPES",
+                        "O: draw an empty room shell",
+                        "F: flood fill",
+                        "L: draw a straight line",
+                        "R: draw a filled rectangle",
+                        "K: replace every matching tile",
+                        "[: place a correctly oriented room door",
+                        "]: place the ground-floor exterior exit",
+                        "",
+                        "SELECTIONS",
+                        "C / X: copy / cut a rectangle",
+                        "M: move a rectangle",
+                        "V: paste with a placement preview",
+                        "E: choose a room or furnishing kit",
+                        "H / J / T: mirror horizontal / mirror vertical / rotate clipboard",
+                        "N: toggle transparent paste",
+                        "",
+                        "INFORMATION",
+                        "I: inspect the current tile",
+                        "9: show or hide zones, NPC positions, and paint",
+                        "Q / Esc: return to the template menu",
+                    ],
+                    footer="The canvas is edited freely; saving happens from the template menu.",
+                    mouse_enabled=True,
+                )
+                continue
             if key == "p":
                 selected = self.custom_building_fixture_palette(brush)
                 if selected is not None:
@@ -1678,6 +2730,214 @@ class CustomContentMenuMixin:
                     cursor_y,
                     brush,
                 )
+                continue
+            if key == "u":
+                if undo_stack:
+                    redo_stack.append(snapshot())
+                    grid = [list(row) for row in undo_stack.pop()]
+                continue
+            if key == "y":
+                if redo_stack:
+                    undo_stack.append(snapshot())
+                    grid = [list(row) for row in redo_stack.pop()]
+                continue
+            if key == "g":
+                brush = grid[cursor_y][cursor_x]
+                continue
+            if key == "e":
+                selected_kit = self.custom_building_room_kit_palette()
+                if selected_kit is not None:
+                    clipboard = selected_kit
+                continue
+            if key == "9":
+                metadata_overlay = not metadata_overlay
+                continue
+            if key in {"c", "x"}:
+                rect = self.custom_building_rect_selector(
+                    "Copy Area" if key == "c" else "Cut Area",
+                    snapshot(),
+                )
+                if rect is None:
+                    continue
+                clipboard = self.custom_building_extract_clipboard(snapshot(), rect)
+                if key == "x":
+                    remember_change()
+                    for edit_y in range(int(rect["y1"]), int(rect["y2"]) + 1):
+                        for edit_x in range(int(rect["x1"]), int(rect["x2"]) + 1):
+                            grid[edit_y][edit_x] = " "
+                cursor_x, cursor_y = int(rect["x1"]), int(rect["y1"])
+                continue
+            if key == "m":
+                rect = self.custom_building_rect_selector(
+                    "Select Area to Move",
+                    snapshot(),
+                )
+                if rect is None:
+                    continue
+                clipboard = self.custom_building_extract_clipboard(snapshot(), rect)
+                move_preview_grid = [list(row) for row in snapshot()]
+                for preview_y in range(int(rect["y1"]), int(rect["y2"]) + 1):
+                    for preview_x in range(int(rect["x1"]), int(rect["x2"]) + 1):
+                        move_preview_grid[preview_y][preview_x] = " "
+                destination = self.custom_building_clipboard_placement_selector(
+                    "Move Selection - Choose New Top-Left Corner",
+                    ["".join(row) for row in move_preview_grid],
+                    clipboard,
+                    initial_point=(int(rect["x1"]), int(rect["y1"])),
+                )
+                if destination is not None:
+                    remember_change()
+                    moved = self.custom_building_move_selection(
+                        snapshot(),
+                        rect,
+                        int(destination["x"]),
+                        int(destination["y"]),
+                    )
+                    grid = [list(row) for row in moved]
+                    cursor_x, cursor_y = int(destination["x"]), int(destination["y"])
+                continue
+            if key == "v":
+                if clipboard:
+                    destination = self.custom_building_clipboard_placement_selector(
+                        "Place Clipboard",
+                        snapshot(),
+                        clipboard,
+                        transparent=transparent_paste,
+                        initial_point=(cursor_x, cursor_y),
+                    )
+                    if destination is not None:
+                        remember_change()
+                        pasted = self.custom_building_paste_clipboard(
+                            snapshot(),
+                            clipboard,
+                            int(destination["x"]),
+                            int(destination["y"]),
+                            transparent=transparent_paste,
+                        )
+                        grid = [list(row) for row in pasted]
+                        cursor_x, cursor_y = int(destination["x"]), int(destination["y"])
+                continue
+            if key == "h":
+                clipboard = self.custom_building_transform_clipboard(
+                    clipboard,
+                    "horizontal",
+                )
+                continue
+            if key == "j":
+                clipboard = self.custom_building_transform_clipboard(
+                    clipboard,
+                    "vertical",
+                )
+                continue
+            if key == "t":
+                clipboard = self.custom_building_transform_clipboard(
+                    clipboard,
+                    "clockwise",
+                )
+                continue
+            if key == "n":
+                transparent_paste = not transparent_paste
+                continue
+            if key in {"[", "]"}:
+                if key == "]" and floor_index != 0:
+                    continue
+                door_rows, door_placed = self.custom_building_smart_door(
+                    snapshot(),
+                    cursor_x,
+                    cursor_y,
+                    exterior=key == "]",
+                )
+                if door_placed:
+                    remember_change()
+                    grid = [list(row) for row in door_rows]
+                continue
+            if key == "o":
+                rect = self.custom_building_rect_selector(
+                    "Draw Room Shell",
+                    snapshot(),
+                )
+                if rect is not None:
+                    remember_change()
+                    grid = [
+                        list(row)
+                        for row in self.custom_building_room_shell(snapshot(), rect)
+                    ]
+                    cursor_x, cursor_y = int(rect["x2"]), int(rect["y2"])
+                continue
+            if key == "k":
+                target = grid[cursor_y][cursor_x]
+                replace_count = sum(row.count(target) for row in grid)
+                if target == brush or replace_count <= 0:
+                    continue
+                replace_choice = menu_select(
+                    "Replace Tiles",
+                    [
+                        MenuItem(
+                            label=f"Replace {replace_count} '{target if target != ' ' else 'space'}' tiles",
+                            value="replace",
+                            enabled=True,
+                            hint=f"with '{brush if brush != ' ' else 'space'}'",
+                        ),
+                        MenuItem(label="Cancel", value=MENU_BACK, enabled=True),
+                    ],
+                    footer="Undo remains available after replacement.",
+                    mouse_enabled=True,
+                )
+                if replace_choice is not None and replace_choice.value == "replace":
+                    remember_change()
+                    for edit_y, row in enumerate(grid):
+                        for edit_x, tile in enumerate(row):
+                            if tile == target:
+                                grid[edit_y][edit_x] = brush
+                continue
+            if key == "f":
+                points = self.custom_building_flood_points(
+                    snapshot(),
+                    cursor_x,
+                    cursor_y,
+                )
+                if points and any(grid[y][x] != brush for x, y in points):
+                    remember_change()
+                    for paint_x, paint_y in points:
+                        grid[paint_y][paint_x] = brush
+                continue
+            if key == "l":
+                first = self.custom_building_point_selector(
+                    "Line Start",
+                    snapshot(),
+                    footer="Left-click/Z select line start | B/Q/Esc/Tab cancel",
+                    initial_point=(cursor_x, cursor_y),
+                )
+                if first is None:
+                    continue
+                second = self.custom_building_point_selector(
+                    "Line End",
+                    snapshot(),
+                    footer="Left-click/Z select line end | B/Q/Esc/Tab cancel",
+                    initial_point=(int(first["x"]), int(first["y"])),
+                )
+                if second is None:
+                    continue
+                remember_change()
+                for paint_x, paint_y in self.custom_building_line_points(
+                    (int(first["x"]), int(first["y"])),
+                    (int(second["x"]), int(second["y"])),
+                ):
+                    grid[paint_y][paint_x] = brush
+                cursor_x, cursor_y = int(second["x"]), int(second["y"])
+                continue
+            if key == "r":
+                rect = self.custom_building_rect_selector(
+                    "Filled Fixture Rectangle",
+                    snapshot(),
+                )
+                if rect is None:
+                    continue
+                remember_change()
+                for paint_y in range(int(rect["y1"]), int(rect["y2"]) + 1):
+                    for paint_x in range(int(rect["x1"]), int(rect["x2"]) + 1):
+                        grid[paint_y][paint_x] = brush
+                cursor_x, cursor_y = int(rect["x2"]), int(rect["y2"])
                 continue
             dx, dy = 0, 0
             if key in ["w", "UP"]:
@@ -1693,6 +2953,7 @@ class CustomContentMenuMixin:
                 cursor_y = max(0, min(BUILDING_TEMPLATE_HEIGHT - 1, cursor_y + dy))
                 continue
             if key in MENU_CONFIRM_KEYS:
+                remember_change()
                 grid[cursor_y][cursor_x] = brush
 
     def custom_building_color_palette(self, current_color: str) -> Optional[str]:
@@ -1710,7 +2971,12 @@ class CustomContentMenuMixin:
                 )
             )
         items.append(MenuItem(label="Back", value=MENU_BACK, enabled=True))
-        choice = menu_select("Paint Color", items, footer="Default removes custom color from the tile.")
+        choice = menu_select(
+            "Paint Color",
+            items,
+            footer="Default removes custom color from the tile.",
+            mouse_enabled=True,
+        )
         if choice is None or choice.value == MENU_BACK:
             return None
         return str(choice.value)
@@ -1751,6 +3017,23 @@ class CustomContentMenuMixin:
         painted = [dict(record) for record in colors if isinstance(record, dict)]
         cursor_x, cursor_y = BUILDING_TEMPLATE_WIDTH // 2, BUILDING_TEMPLATE_HEIGHT // 2
         brush = "brown"
+        mouse_left_down = False
+        mouse_right_down = False
+        last_mouse_point: Optional[tuple] = None
+        undo_stack: List[List[Dict[str, object]]] = []
+        redo_stack: List[List[Dict[str, object]]] = []
+
+        def paint_snapshot() -> List[Dict[str, object]]:
+            return [dict(record) for record in painted]
+
+        def remember_paint_change() -> None:
+            current = paint_snapshot()
+            if not undo_stack or undo_stack[-1] != current:
+                undo_stack.append(current)
+                if len(undo_stack) > 50:
+                    del undo_stack[0]
+            redo_stack.clear()
+
         while True:
             color_map = self.custom_building_floor_color_map(painted, floor_index)
             brush_label = BUILDING_TEMPLATE_COLOR_LABELS.get(brush, brush.title())
@@ -1760,12 +3043,62 @@ class CustomContentMenuMixin:
                 cursor_x,
                 cursor_y,
                 footer=(
-                    f"Color: {brush_label} | WASD move | Z paint | E erase | P palette | Q/Esc done\n"
-                    "Paint changes color only; it does not change what the tile does."
+                    f"Color: {brush_label} | Left-drag paint | Right-drag erase | Wheel color | "
+                    "WASD move | Z paint | E erase | P palette | G pick | U/Y undo/redo\n"
+                    "F fill region | L line | R filled rectangle | B/Q/Esc/Tab done"
                 ),
                 color_overlays=color_map,
             )
-            key = normalize_key(read_key())
+            event = read_key_or_mouse()
+            if event.get("kind") == "mouse":
+                wheel = int(event.get("wheel", 0) or 0)
+                if wheel:
+                    color_keys = list(BUILDING_TEMPLATE_COLOR_KEYS)
+                    color_index = color_keys.index(brush) if brush in color_keys else 0
+                    brush = color_keys[(color_index - wheel) % len(color_keys)]
+                    mouse_left_down = False
+                    mouse_right_down = False
+                    last_mouse_point = None
+                    continue
+                point = self.custom_building_mouse_canvas_point(event)
+                raw_left = bool(event.get("left", False))
+                raw_right = bool(event.get("right", False))
+                moved = bool(event.get("moved", False))
+                left = raw_left and (mouse_left_down or not moved)
+                right = raw_right and (mouse_right_down or not moved)
+                middle = bool(int(event.get("buttons", 0) or 0) & 0x0004)
+                if point is not None and middle:
+                    cursor_x, cursor_y = point
+                    brush = color_map.get(point, "default")
+                    mouse_left_down = False
+                    mouse_right_down = False
+                    last_mouse_point = None
+                    continue
+                if point is not None and (left or right):
+                    cursor_x, cursor_y = point
+                    same_stroke = (
+                        (left and mouse_left_down)
+                        or (right and mouse_right_down)
+                    )
+                    if not same_stroke:
+                        remember_paint_change()
+                    start = last_mouse_point if same_stroke and last_mouse_point is not None else point
+                    color_key = brush if left else "default"
+                    for paint_x, paint_y in self.custom_building_line_points(start, point):
+                        painted = self.set_custom_building_color_mark(
+                            painted,
+                            floor_index,
+                            paint_x,
+                            paint_y,
+                            color_key,
+                        )
+                    last_mouse_point = point
+                elif not raw_left and not raw_right:
+                    last_mouse_point = None
+                mouse_left_down = left
+                mouse_right_down = right
+                continue
+            key = normalize_key(str(event.get("key", "")))
             key = key.lower() if len(key) == 1 and key.isalpha() else key
             if key in ["q", "b", "\t", "\x1b"]:
                 return painted
@@ -1775,6 +3108,7 @@ class CustomContentMenuMixin:
                     brush = selected
                 continue
             if key == "e":
+                remember_paint_change()
                 painted = self.set_custom_building_color_mark(
                     painted,
                     floor_index,
@@ -1782,6 +3116,88 @@ class CustomContentMenuMixin:
                     cursor_y,
                     "default",
                 )
+                continue
+            if key == "u":
+                if undo_stack:
+                    redo_stack.append(paint_snapshot())
+                    painted = [dict(record) for record in undo_stack.pop()]
+                continue
+            if key == "y":
+                if redo_stack:
+                    undo_stack.append(paint_snapshot())
+                    painted = [dict(record) for record in redo_stack.pop()]
+                continue
+            if key == "g":
+                brush = self.custom_building_floor_color_map(
+                    painted,
+                    floor_index,
+                ).get((cursor_x, cursor_y), "default")
+                continue
+            if key == "f":
+                points = self.custom_building_flood_points(rows, cursor_x, cursor_y)
+                if points:
+                    remember_paint_change()
+                    for paint_x, paint_y in points:
+                        painted = self.set_custom_building_color_mark(
+                            painted,
+                            floor_index,
+                            paint_x,
+                            paint_y,
+                            brush,
+                        )
+                continue
+            if key == "l":
+                overlays = self.custom_building_floor_color_map(painted, floor_index)
+                first = self.custom_building_point_selector(
+                    "Color Line Start",
+                    rows,
+                    footer="Left-click/Z select line start | B/Q/Esc/Tab cancel",
+                    color_overlays=overlays,
+                    initial_point=(cursor_x, cursor_y),
+                )
+                if first is None:
+                    continue
+                second = self.custom_building_point_selector(
+                    "Color Line End",
+                    rows,
+                    footer="Left-click/Z select line end | B/Q/Esc/Tab cancel",
+                    color_overlays=overlays,
+                    initial_point=(int(first["x"]), int(first["y"])),
+                )
+                if second is None:
+                    continue
+                remember_paint_change()
+                for paint_x, paint_y in self.custom_building_line_points(
+                    (int(first["x"]), int(first["y"])),
+                    (int(second["x"]), int(second["y"])),
+                ):
+                    painted = self.set_custom_building_color_mark(
+                        painted,
+                        floor_index,
+                        paint_x,
+                        paint_y,
+                        brush,
+                    )
+                cursor_x, cursor_y = int(second["x"]), int(second["y"])
+                continue
+            if key == "r":
+                rect = self.custom_building_rect_selector(
+                    "Filled Color Rectangle",
+                    rows,
+                )
+                if rect is None:
+                    continue
+                remember_paint_change()
+                for paint_y in range(int(rect["y1"]), int(rect["y2"]) + 1):
+                    for paint_x in range(int(rect["x1"]), int(rect["x2"]) + 1):
+                        painted = self.set_custom_building_color_mark(
+                            painted,
+                            floor_index,
+                            paint_x,
+                            paint_y,
+                            brush,
+                        )
+                cursor_x, cursor_y = int(rect["x2"]), int(rect["y2"])
                 continue
             dx, dy = 0, 0
             if key in ["w", "UP"]:
@@ -1797,6 +3213,7 @@ class CustomContentMenuMixin:
                 cursor_y = max(0, min(BUILDING_TEMPLATE_HEIGHT - 1, cursor_y + dy))
                 continue
             if key in MENU_CONFIRM_KEYS:
+                remember_paint_change()
                 painted = self.set_custom_building_color_mark(
                     painted,
                     floor_index,
@@ -1832,7 +3249,7 @@ class CustomContentMenuMixin:
                     label=f"F{int(spawn.get('floor', 0)) + 1} spawn at {spawn.get('x')},{spawn.get('y')}",
                     value=f"spawn:{index}",
                     enabled=True,
-                    hint="delete",
+                    hint="move or delete",
                 )
                 for index, spawn in enumerate(current_spawns)
             )
@@ -1845,6 +3262,7 @@ class CustomContentMenuMixin:
                     f"Editing floor {floor_index + 1}",
                     f"Visible on this floor: {len(floor_spawns)}",
                 ],
+                mouse_enabled=True,
             )
             if choice is None or choice.value == MENU_BACK:
                 return current_spawns
@@ -1852,7 +3270,7 @@ class CustomContentMenuMixin:
                 point = self.custom_building_point_selector(
                     f"Place NPC Spawn - Floor {floor_index + 1}",
                     rows,
-                    footer="WASD/Arrows move | Z place NPC spawn | Q/Esc cancel",
+                    footer="WASD/Arrows move | Z place NPC spawn | B/Q/Esc/Tab cancel",
                     color_overlays=self.custom_building_floor_color_map(colors, floor_index),
                     spawn_points=self.custom_building_floor_spawn_points(current_spawns, floor_index),
                 )
@@ -1873,60 +3291,1097 @@ class CustomContentMenuMixin:
                 continue
             try:
                 index = int(str(choice.value).split(":", 1)[1])
+                spawn = current_spawns[index]
             except (ValueError, IndexError):
                 continue
-            if 0 <= index < len(current_spawns):
+            action = menu_select(
+                "NPC Spawn Point",
+                [
+                    MenuItem(
+                        label="Move spawn point",
+                        value="move",
+                        enabled=int(spawn.get("floor", 0) or 0) == int(floor_index),
+                        hint="switch to that floor first" if int(spawn.get("floor", 0) or 0) != int(floor_index) else "",
+                    ),
+                    MenuItem(label="Delete spawn point", value="delete", enabled=True),
+                    MenuItem(label="Back", value=MENU_BACK, enabled=True),
+                ],
+                footer=f"F{int(spawn.get('floor', 0)) + 1} at {spawn.get('x')},{spawn.get('y')}",
+                mouse_enabled=True,
+            )
+            if action is None or action.value == MENU_BACK:
+                continue
+            if action.value == "move":
+                point = self.custom_building_point_selector(
+                    f"Move NPC Spawn - Floor {floor_index + 1}",
+                    rows,
+                    footer="WASD/Arrows move | Z place NPC spawn | B/Q/Esc/Tab cancel",
+                    color_overlays=self.custom_building_floor_color_map(colors, floor_index),
+                    spawn_points=self.custom_building_floor_spawn_points(current_spawns, floor_index),
+                    initial_point=(int(spawn.get("x", 0)), int(spawn.get("y", 0))),
+                )
+                if point is not None:
+                    duplicate = any(
+                        other_index != index
+                        and int(other.get("floor", 0) or 0) == int(floor_index)
+                        and int(other.get("x", 0) or 0) == int(point["x"])
+                        and int(other.get("y", 0) or 0) == int(point["y"])
+                        for other_index, other in enumerate(current_spawns)
+                    )
+                    if not duplicate:
+                        current_spawns[index].update({
+                            "x": int(point["x"]),
+                            "y": int(point["y"]),
+                        })
+            elif action.value == "delete":
                 del current_spawns[index]
 
-    def custom_building_template_builder(self, existing: Optional[Dict[str, object]] = None) -> Optional[Dict[str, object]]:
+    @staticmethod
+    def custom_building_preset_rows(grid: Sequence[Sequence[str]]) -> List[str]:
+        rows = []
+        for y in range(BUILDING_TEMPLATE_HEIGHT):
+            source = grid[y] if y < len(grid) else ()
+            row = "".join(str(tile)[:1] if str(tile) else " " for tile in source)
+            rows.append(row.ljust(BUILDING_TEMPLATE_WIDTH)[:BUILDING_TEMPLATE_WIDTH])
+        return rows
+
+    @staticmethod
+    def custom_building_preset_zones(
+        floors: Sequence[Dict[str, object]],
+        building_type: str,
+    ) -> List[Dict[str, object]]:
+        """Infer schedule zones from actual rooms instead of fixture radii."""
+        zones: List[Dict[str, object]] = []
+
+        def add_zone(kind: str, floor: int, rect: Tuple[int, int, int, int]) -> None:
+            if len(zones) >= 16:
+                return
+            x1, y1, x2, y2 = rect
+            candidate = {
+                "kind": kind,
+                "floor": floor,
+                "x1": max(0, min(x1, x2)),
+                "y1": max(0, min(y1, y2)),
+                "x2": min(BUILDING_TEMPLATE_WIDTH - 1, max(x1, x2)),
+                "y2": min(BUILDING_TEMPLATE_HEIGHT - 1, max(y1, y2)),
+            }
+            signature = (
+                candidate["kind"], candidate["floor"], candidate["x1"],
+                candidate["y1"], candidate["x2"], candidate["y2"],
+            )
+            if not any(
+                (
+                    zone["kind"], zone["floor"], zone["x1"],
+                    zone["y1"], zone["x2"], zone["y2"],
+                ) == signature
+                for zone in zones
+            ):
+                zones.append(candidate)
+
+        for floor_index, floor in enumerate(floors):
+            rows = [
+                str(row).ljust(BUILDING_TEMPLATE_WIDTH)[:BUILDING_TEMPLATE_WIDTH]
+                for row in floor.get("rows", [])
+            ]
+            rows.extend(
+                [" " * BUILDING_TEMPLATE_WIDTH]
+                * max(0, BUILDING_TEMPLATE_HEIGHT - len(rows))
+            )
+            rows = rows[:BUILDING_TEMPLATE_HEIGHT]
+            positions: Dict[str, List[tuple]] = {}
+            for y, row in enumerate(rows):
+                for x, tile in enumerate(row):
+                    positions.setdefault(tile, []).append((x, y))
+
+            def tile_at(x: int, y: int) -> str:
+                if 0 <= y < len(rows) and 0 <= x < len(rows[y]):
+                    return rows[y][x]
+                return " "
+
+            structural = {"#", "-"}
+            excluded = {" ", "#", "-", "D", "|", "_"}
+            room_cells: Set[Tuple[int, int]] = {
+                (x, y)
+                for y, row in enumerate(rows)
+                for x, tile in enumerate(row)
+                if tile not in excluded
+            }
+            # A plain floor gap through a one-cell wall is an architectural
+            # doorway even when the author deliberately leaves it doorless.
+            # Removing those choke cells before flood filling separates rooms
+            # from halls without requiring visible door furniture.
+            separators: Set[Tuple[int, int]] = set()
+            for x, y in room_cells:
+                if tile_at(x, y) not in {".", ":", ","}:
+                    continue
+                horizontal_wall = (
+                    tile_at(x - 1, y) in structural
+                    and tile_at(x + 1, y) in structural
+                    and tile_at(x, y - 1) not in excluded
+                    and tile_at(x, y + 1) not in excluded
+                )
+                vertical_wall = (
+                    tile_at(x, y - 1) in structural
+                    and tile_at(x, y + 1) in structural
+                    and tile_at(x - 1, y) not in excluded
+                    and tile_at(x + 1, y) not in excluded
+                )
+                if horizontal_wall or vertical_wall:
+                    separators.add((x, y))
+            room_cells -= separators
+
+            components: List[Dict[str, object]] = []
+            component_by_point: Dict[Tuple[int, int], int] = {}
+            unseen = set(room_cells)
+            while unseen:
+                start = unseen.pop()
+                cells = {start}
+                pending = [start]
+                while pending:
+                    x, y = pending.pop()
+                    for point in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
+                        if point in unseen:
+                            unseen.remove(point)
+                            cells.add(point)
+                            pending.append(point)
+                xs = [point[0] for point in cells]
+                ys = [point[1] for point in cells]
+                index = len(components)
+                component = {
+                    "cells": cells,
+                    "rect": (min(xs), min(ys), max(xs), max(ys)),
+                    "symbols": {tile_at(x, y) for x, y in cells},
+                }
+                components.append(component)
+                for point in cells:
+                    component_by_point[point] = index
+
+            def component_groups(points: Sequence[Tuple[int, int]]) -> List[Tuple[int, Dict[str, object], List[Tuple[int, int]]]]:
+                grouped: Dict[int, List[Tuple[int, int]]] = {}
+                for point in points:
+                    component_index = component_by_point.get(point)
+                    if component_index is not None:
+                        grouped.setdefault(component_index, []).append(point)
+                return [
+                    (index, components[index], grouped[index])
+                    for index in sorted(grouped)
+                ]
+
+            def cluster_rect(
+                component: Dict[str, object],
+                points: Sequence[Tuple[int, int]],
+                padding_x: int = 1,
+                padding_y: int = 1,
+            ) -> Tuple[int, int, int, int]:
+                cx1, cy1, cx2, cy2 = component["rect"]
+                return (
+                    max(cx1, min(point[0] for point in points) - padding_x),
+                    max(cy1, min(point[1] for point in points) - padding_y),
+                    min(cx2, max(point[0] for point in points) + padding_x),
+                    min(cy2, max(point[1] for point in points) + padding_y),
+                )
+
+            bed_points = (
+                [
+                    point
+                    for symbol in ("b", "B", "I", "J", "K")
+                    for point in positions.get(symbol, [])
+                ]
+                if str(building_type) in {"home", "inn"}
+                else []
+            )
+            claimed_room_components: Set[int] = set()
+            for component_index, component, _points in component_groups(bed_points):
+                add_zone("bedroom", floor_index, component["rect"])
+                claimed_room_components.add(component_index)
+
+            kind_symbols = {
+                "kitchen": ("f", "k", "Z"),
+                "shopping_counter": ("&",),
+                "stockroom": ("s", "H", "i", "j", "g", "W", "y", "z", "V", "X"),
+                "clinic_ward": ("+", "e", "K"),
+                "library_stacks": ("l", "H", "i"),
+                "workshop": ("w", "a", "x", "q", "o", "X"),
+                "office": ("d", "P"),
+                "dining": ("t", "T", "c", "C", "O"),
+                "storage": ("s", "m", "u", "g", "W", "y", "z", "Y", "Z"),
+            }
+            preferred_kinds = {
+                "home": ("kitchen", "dining", "storage", "office"),
+                "general_store": ("shopping_counter", "stockroom", "storage", "office"),
+                "market_stall": ("shopping_counter", "stockroom", "storage", "dining"),
+                "inn": ("shopping_counter", "kitchen", "dining", "storage"),
+                "clinic": ("shopping_counter", "clinic_ward", "storage", "office"),
+                "sheriff_office": ("shopping_counter", "office", "storage"),
+                "library": ("shopping_counter", "library_stacks", "office", "dining"),
+                "carpenter": ("shopping_counter", "workshop", "storage", "office"),
+                "workshop": ("shopping_counter", "workshop", "storage", "office"),
+                "town_hall": ("shopping_counter", "office", "dining", "storage"),
+            }.get(str(building_type), ("office", "storage"))
+            for kind in preferred_kinds:
+                if kind == "kitchen" and str(building_type) not in {"home", "inn"}:
+                    continue
+                anchors = [
+                    point
+                    for symbol in kind_symbols[kind]
+                    for point in positions.get(symbol, [])
+                ]
+                for component_index, component, grouped_points in component_groups(anchors):
+                    rect = component["rect"]
+                    rect_area = (rect[2] - rect[0] + 1) * (rect[3] - rect[1] + 1)
+                    # Whole-room zones are preferable for enclosed bedrooms,
+                    # stockrooms, wards, stacks, workshops, and offices. In a
+                    # shared public room, counters and dining sets get compact
+                    # work areas instead of claiming the entire hall.
+                    if kind in {"shopping_counter", "kitchen", "dining"} and rect_area > 48:
+                        rect = cluster_rect(
+                            component,
+                            grouped_points,
+                            2 if kind != "shopping_counter" else 1,
+                            2 if kind == "dining" else 1,
+                        )
+                    elif component_index in claimed_room_components:
+                        continue
+                    add_zone(kind, floor_index, rect)
+                    if kind not in {"shopping_counter", "kitchen", "dining"}:
+                        claimed_room_components.add(component_index)
+
+            if components:
+                # Prefer the room immediately inside the exterior door. This
+                # identifies the actual lobby/common room even when a side
+                # workshop or gallery happens to have more floor area.
+                entrance_component = None
+                for door_x, door_y in positions.get("D", []):
+                    for point in (
+                        (door_x, door_y - 1),
+                        (door_x - 1, door_y - 1),
+                        (door_x + 1, door_y - 1),
+                        (door_x, door_y - 2),
+                    ):
+                        component_index = component_by_point.get(point)
+                        if component_index is not None:
+                            entrance_component = components[component_index]
+                            break
+                    if entrance_component is not None:
+                        break
+                hall_component = entrance_component or max(
+                    components,
+                    key=lambda component: len(component["cells"]),
+                )
+                add_zone("public_hall", floor_index, hall_component["rect"])
+
+        return zones[:16]
+
+    @staticmethod
+    def custom_building_preset_spawns(
+        floors: Sequence[Dict[str, object]],
+        building_type: str,
+    ) -> List[Dict[str, int]]:
+        spawns: List[Dict[str, int]] = []
+        preferred = ("&", "P", "b", "B") if building_type in {"home", "inn"} else ("&", "P")
+        for floor_index, floor in enumerate(floors):
+            rows = [str(row) for row in floor.get("rows", [])]
+            for symbol in preferred:
+                for y, row in enumerate(rows):
+                    for x, tile in enumerate(row):
+                        if tile != symbol:
+                            continue
+                        landing = None
+                        for dx, dy in ((0, 1), (0, -1), (1, 0), (-1, 0)):
+                            nx, ny = x + dx, y + dy
+                            if (
+                                0 <= ny < len(rows)
+                                and 0 <= nx < len(rows[ny])
+                                and rows[ny][nx] in {".", ","}
+                            ):
+                                landing = (nx, ny)
+                                break
+                        spawn_x, spawn_y = landing or (x, y)
+                        record = {"floor": floor_index, "x": spawn_x, "y": spawn_y}
+                        if record not in spawns:
+                            spawns.append(record)
+                        if len(spawns) >= 12:
+                            return spawns
+        return spawns
+
+    def custom_building_builtin_record(
+        self,
+        *,
+        preset_id: str,
+        name: str,
+        description: str,
+        building_type: str,
+        max_occupancy: int,
+        floors: Sequence[Dict[str, object]],
+        group: str,
+        origin: str,
+    ) -> Optional[Dict[str, object]]:
+        normalized_floors = [
+            {
+                "name": str(floor.get("name", "Ground Floor")),
+                "rows": self.custom_building_preset_rows(floor.get("rows", [])),
+            }
+            for floor in floors
+        ]
+        record = sanitize_custom_building_template({
+            "name": name,
+            "description": description,
+            "building_type": building_type,
+            "max_occupancy": max_occupancy,
+            "enabled": False,
+            "builtin_preset_id": preset_id,
+            "floors": normalized_floors,
+            "zones": [],
+            "spawns": [],
+            "colors": [],
+        })
+        if record is not None:
+            # Validation may add a missing service, bed, or utility fixture.
+            # Infer schedule metadata from that final editable layout.
+            record = sanitize_custom_building_template({
+                **record,
+                "zones": self.custom_building_preset_zones(record.get("floors", []), building_type),
+                "spawns": self.custom_building_preset_spawns(record.get("floors", []), building_type),
+            })
+        if record is not None:
+            record["_preset_group"] = group
+            record["_preset_origin"] = origin
+        return record
+
+    def built_in_building_template_presets(self) -> List[Dict[str, object]]:
+        """Expose stable source records for direct, reversible map overrides."""
+        presets: List[Dict[str, object]] = []
+        authored_group = "Starting Town & Farm"
+        for label, building_type, factory_name, occupancy in BUILT_IN_AUTHORED_BUILDING_PRESETS:
+            factory = getattr(self, factory_name, None)
+            if not callable(factory):
+                continue
+            grid = factory()
+            record = self.custom_building_builtin_record(
+                preset_id=f"authored:{factory_name}",
+                name=f"Built-in {label}",
+                description=(
+                    f"Editable layout for the authored {label} interior."
+                ),
+                building_type=building_type,
+                max_occupancy=occupancy,
+                floors=[{"name": "Ground Floor", "rows": grid}],
+                group=authored_group,
+                origin="authored",
+            )
+            if record is not None:
+                presets.append(record)
+
+        for residence_id, residence in AUTHORED_TOWN_RESIDENCE_DATA.items():
+            label = str(residence.get("label", residence_id.replace("_", " ").title()))
+            grid = self.make_authored_town_residence_map(str(residence_id))
+            record = self.custom_building_builtin_record(
+                preset_id=f"residence:{residence_id}",
+                name=f"Built-in {label}",
+                description=f"Editable layout for the authored {label} residence.",
+                building_type="home",
+                max_occupancy=max(1, len(residence.get("residents", ()) or ())),
+                floors=[{"name": "Ground Floor", "rows": grid}],
+                group=authored_group,
+                origin="authored",
+            )
+            if record is not None:
+                presets.append(record)
+
+        procedural_group = "Procedural Town Layouts"
+        for building_type in BUILDING_TEMPLATE_TYPES:
+            label = BUILDING_TEMPLATE_TYPE_LABELS.get(building_type, building_type.replace("_", " ").title())
+            for layout_variant in range(4):
+                floor_count = 2 if building_type in {"home", "inn"} else 1
+                plan = {
+                    "id": "built-in-template-browser",
+                    "seed": 7301,
+                    "buildings": {},
+                }
+                building = {
+                    "id": f"preset:{building_type}:{layout_variant}",
+                    "type_id": building_type,
+                    "name": label,
+                }
+                ground = self.procedural_town_generated_ground_floor_map(
+                    plan,
+                    building,
+                    floor_count,
+                    None,
+                    None,
+                    {},
+                    layout_variant,
+                    layout_variant,
+                )
+                floors: List[Dict[str, object]] = [{"name": "Ground Floor", "rows": ground}]
+                if floor_count > 1:
+                    floors.append({
+                        "name": "Upper Floor",
+                        "rows": self.procedural_town_generated_upper_floor_map(
+                            plan,
+                            building,
+                            1,
+                            floor_count,
+                            layout_variant,
+                        ),
+                    })
+                variant_name = chr(ord("A") + layout_variant)
+                record = self.custom_building_builtin_record(
+                    preset_id=f"procedural:{building_type}:{layout_variant}",
+                    name=f"{label} Layout {variant_name}",
+                    description=(
+                        f"Editable built-in procedural {label.lower()} layout {variant_name}."
+                    ),
+                    building_type=building_type,
+                    max_occupancy=12 if building_type == "inn" else (6 if building_type == "home" else 0),
+                    floors=floors,
+                    group=procedural_group,
+                    origin="procedural",
+                )
+                if record is not None:
+                    presets.append(record)
+        return presets
+
+    @staticmethod
+    def custom_building_editable_preset_copy(
+        preset: Dict[str, object],
+        existing_records: Sequence[Dict[str, object]],
+    ) -> Optional[Dict[str, object]]:
+        existing_names = {
+            str(record.get("name", "")).casefold()
+            for record in existing_records
+            if isinstance(record, dict)
+        }
+        source_name = str(preset.get("name", "Building")).replace("Built-in ", "", 1).strip()
+        number = 1
+        while True:
+            suffix = " Copy" if number == 1 else f" Copy {number}"
+            candidate_name = f"{source_name[:max(1, 32 - len(suffix))]}{suffix}"
+            if candidate_name.casefold() not in existing_names:
+                break
+            number += 1
+        draft = copy.deepcopy(preset)
+        draft["name"] = candidate_name
+        draft["enabled"] = False
+        draft.pop("_preset_group", None)
+        draft.pop("_preset_origin", None)
+        return sanitize_custom_building_template(draft)
+
+    def custom_building_builtin_preset_menu(self) -> bool:
+        presets = self.built_in_building_template_presets()
+        groups = list(dict.fromkeys(str(record.get("_preset_group", "Built-in")) for record in presets))
+        while True:
+            content = self.custom_content_data()
+            records = [
+                record
+                for record in content.get("building_templates", [])
+                if isinstance(record, dict)
+            ]
+            overrides = {
+                str(record.get("builtin_preset_id", "")): record
+                for record in records
+                if record.get("overrides_builtin") and record.get("builtin_preset_id")
+            }
+            group_choice = menu_select(
+                "Edit Existing Building Maps",
+                [
+                    MenuItem(
+                        label=group,
+                        value=group,
+                        enabled=True,
+                        hint=(
+                            f"{sum(1 for record in presets if record.get('_preset_group') == group)} maps | "
+                            f"{sum(1 for record in presets if record.get('_preset_group') == group and record.get('builtin_preset_id') in overrides)} edited"
+                        ),
+                    )
+                    for group in groups
+                ] + [MenuItem(label="Back", value=MENU_BACK, enabled=True)],
+                footer="Choose a group, then choose a map. It opens directly on the editable canvas.",
+                mouse_enabled=True,
+            )
+            if group_choice is None or group_choice.value == MENU_BACK:
+                return False
+            group = str(group_choice.value)
+            while True:
+                group_presets = [record for record in presets if record.get("_preset_group") == group]
+                modified_presets = [
+                    record
+                    for record in group_presets
+                    if str(record.get("builtin_preset_id", "")) in overrides
+                ]
+                preset_choice = menu_select(
+                    group,
+                    [
+                        MenuItem(
+                            label=str(record.get("name", "Built-in Interior")),
+                            value=index,
+                            enabled=True,
+                            hint=BUILDING_TEMPLATE_TYPE_LABELS.get(
+                                str(record.get("building_type", "")),
+                                str(record.get("building_type", "")),
+                            ) + (
+                                " | EDITED"
+                                if str(record.get("builtin_preset_id", "")) in overrides
+                                else ""
+                            ),
+                        )
+                        for index, record in enumerate(group_presets)
+                    ] + [
+                        MenuItem(
+                            label="Restore an edited map to its original",
+                            value="restore",
+                            enabled=bool(modified_presets),
+                            hint=f"{len(modified_presets)} edited",
+                        ),
+                        MenuItem(label="Back", value=MENU_BACK, enabled=True),
+                    ],
+                    footer="Selecting a map immediately displays it for editing. Saved edits replace that built-in layout.",
+                    mouse_enabled=True,
+                )
+                if preset_choice is None or preset_choice.value == MENU_BACK:
+                    break
+                if preset_choice.value == "restore":
+                    restore_choice = menu_select(
+                        "Restore Original Map",
+                        [
+                            MenuItem(
+                                label=str(record.get("name", "Built-in Interior")),
+                                value=str(record.get("builtin_preset_id", "")),
+                                enabled=True,
+                                hint="remove saved edits",
+                            )
+                            for record in modified_presets
+                        ] + [MenuItem(label="Back", value=MENU_BACK, enabled=True)],
+                        footer="Choose an edited map to restore its original game layout.",
+                        mouse_enabled=True,
+                    )
+                    if restore_choice is None or restore_choice.value == MENU_BACK:
+                        continue
+                    restore_id = str(restore_choice.value)
+                    confirm = menu_select(
+                        "Restore Original Map",
+                        [
+                            MenuItem(label="Restore original", value="restore", enabled=True),
+                            MenuItem(label="Cancel", value=MENU_BACK, enabled=True),
+                        ],
+                        footer="Your edited override will be removed. The original built-in map remains available.",
+                        mouse_enabled=True,
+                    )
+                    if confirm is None or confirm.value != "restore":
+                        continue
+                    records = [
+                        record
+                        for record in records
+                        if not (
+                            record.get("overrides_builtin")
+                            and str(record.get("builtin_preset_id", "")) == restore_id
+                        )
+                    ]
+                    content["building_templates"] = records
+                    saved, message = save_custom_content(content)
+                    self.state.message = "Restored the original building map." if saved else message
+                    if saved:
+                        self.custom_building_refresh_runtime_maps()
+                    break
+                try:
+                    preset = group_presets[int(preset_choice.value)]
+                except (ValueError, TypeError, IndexError):
+                    continue
+                preset_id = str(preset.get("builtin_preset_id", ""))
+                source = overrides.get(preset_id, preset)
+                draft = sanitize_custom_building_template({
+                    **copy.deepcopy(source),
+                    "name": str(preset.get("name", "Built-in Interior")),
+                    "builtin_preset_id": preset_id,
+                    "overrides_builtin": True,
+                    "manual_layout": True,
+                    "enabled": True,
+                })
+                updated = (
+                    self.custom_building_template_builder(draft, open_canvas=True)
+                    if draft is not None
+                    else None
+                )
+                if updated is None:
+                    continue
+                updated["builtin_preset_id"] = preset_id
+                updated["overrides_builtin"] = True
+                updated["manual_layout"] = True
+                updated["enabled"] = True
+                updated["building_type"] = str(preset.get("building_type", "home"))
+                records = [
+                    record
+                    for record in records
+                    if not (
+                        record.get("overrides_builtin")
+                        and str(record.get("builtin_preset_id", "")) == preset_id
+                    )
+                ]
+                records.append(updated)
+                content["building_templates"] = records
+                saved, message = save_custom_content(content)
+                self.state.message = (
+                    f"Saved edits to {updated.get('name', 'Building')}."
+                    if saved
+                    else message
+                )
+                if saved:
+                    self.custom_building_refresh_runtime_maps()
+                break
+
+    @staticmethod
+    def custom_building_builtin_override_grid(preset_id: str) -> Optional[List[List[str]]]:
+        override = custom_building_template_override(preset_id)
+        if override is None or not override.get("enabled", True):
+            return None
+        floors = override.get("floors", [])
+        if not isinstance(floors, list) or not floors:
+            return None
+        return [list(str(row)) for row in floors[0].get("rows", [])]
+
+    def custom_building_refresh_runtime_maps(self) -> None:
+        """Make saved map edits visible without requiring a restart."""
+        if hasattr(self, "_procedural_town_interior_cache"):
+            self._procedural_town_interior_cache = {}
+        if hasattr(self, "_procedural_town_room_lookup_cache"):
+            self._procedural_town_room_lookup_cache = {}
+        if hasattr(self, "_authored_town_residence_maps"):
+            self._authored_town_residence_maps = {}
+        refresh = getattr(self, "refresh_town_interior_maps", None)
+        if callable(refresh):
+            refresh()
+        if hasattr(self, "house_map"):
+            house_override = self.custom_building_builtin_override_grid(
+                "authored:make_house_map"
+            )
+            if house_override is not None:
+                self.house_map = house_override
+
+    def custom_building_template_validation(
+        self,
+        record: Dict[str, object],
+    ) -> Dict[str, object]:
+        template = sanitize_custom_building_template(record)
+        if template is None:
+            return {
+                "critical": ["The template data could not be validated."],
+                "advisories": [],
+                "lines": ["INVALID TEMPLATE", "", "The template data could not be validated."],
+            }
+        critical: List[str] = []
+        advisories: List[str] = []
+        # Closed room doors are traversable after opening, so readiness treats
+        # them as connective architecture rather than permanent walls.
+        passable_tiles = {".", ",", "|", "_", ":"}
+        floor_reachable: Dict[int, set] = {}
+        floors = list(template.get("floors", []) or [])
+        for floor_index, floor in enumerate(floors):
+            rows = [str(row) for row in floor.get("rows", [])]
+            all_passable = {
+                (x, y)
+                for y, row in enumerate(rows)
+                for x, tile in enumerate(row)
+                if tile in passable_tiles
+            }
+            if not all_passable:
+                critical.append(f"Floor {floor_index + 1} has no walkable space.")
+                floor_reachable[floor_index] = set()
+                continue
+            entry_symbols = {"D"} if floor_index == 0 else {">"}
+            entries = [
+                (x, y)
+                for y, row in enumerate(rows)
+                for x, tile in enumerate(row)
+                if tile in entry_symbols
+            ]
+            if not entries:
+                critical.append(
+                    f"Floor {floor_index + 1} needs an {'exterior door' if floor_index == 0 else 'arrival stair'}."
+                )
+                floor_reachable[floor_index] = set()
+                continue
+            starts = []
+            for entry_x, entry_y in entries:
+                for dx, dy in ((0, -1), (0, 1), (-1, 0), (1, 0)):
+                    point = (entry_x + dx, entry_y + dy)
+                    if point in all_passable:
+                        starts.append(point)
+            if not starts:
+                critical.append(f"Floor {floor_index + 1}'s entrance has no walkable landing.")
+                floor_reachable[floor_index] = set()
+                continue
+            reached = set()
+            pending = list(starts)
+            while pending:
+                point = pending.pop()
+                if point in reached or point not in all_passable:
+                    continue
+                reached.add(point)
+                x, y = point
+                pending.extend(((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)))
+            floor_reachable[floor_index] = reached
+            disconnected = len(all_passable - reached)
+            if disconnected:
+                advisories.append(
+                    f"Floor {floor_index + 1} has {disconnected} walkable tile{'s' if disconnected != 1 else ''} disconnected from its entrance."
+                )
+            if floor_index < len(floors) - 1 and not any("<" in row for row in rows):
+                critical.append(f"Floor {floor_index + 1} needs stairs leading up.")
+
+        zone_kinds = {
+            str(zone.get("kind", ""))
+            for zone in template.get("zones", [])
+            if isinstance(zone, dict)
+        }
+        recommended_zones = {
+            "home": {"bedroom", "kitchen"},
+            "general_store": {"shopping_counter", "stockroom"},
+            "market_stall": {"shopping_counter", "stockroom"},
+            "inn": {"bedroom", "kitchen", "dining", "shopping_counter"},
+            "clinic": {"clinic_ward", "office"},
+            "sheriff_office": {"office", "public_hall"},
+            "library": {"library_stacks", "public_hall"},
+            "carpenter": {"workshop", "storage"},
+            "workshop": {"workshop", "storage"},
+            "town_hall": {"office", "public_hall"},
+        }.get(str(template.get("building_type", "")), set())
+        missing_zones = sorted(recommended_zones - zone_kinds)
+        if missing_zones:
+            advisories.append(
+                "Recommended schedule zones missing: "
+                + ", ".join(BUILDING_TEMPLATE_ZONE_LABELS.get(kind, kind) for kind in missing_zones)
+                + "."
+            )
+        if not template.get("zones"):
+            advisories.append("No NPC schedule zones are designated.")
+        for zone_index, zone in enumerate(template.get("zones", []), start=1):
+            floor_index = int(zone.get("floor", 0) or 0)
+            rows = [str(row) for row in floors[floor_index].get("rows", [])] if 0 <= floor_index < len(floors) else []
+            has_walkable = any(
+                0 <= y < len(rows)
+                and 0 <= x < len(rows[y])
+                and rows[y][x] in passable_tiles
+                for y in range(int(zone.get("y1", 0)), int(zone.get("y2", 0)) + 1)
+                for x in range(int(zone.get("x1", 0)), int(zone.get("x2", 0)) + 1)
+            )
+            if not has_walkable:
+                advisories.append(f"Zone {zone_index} contains no walkable tile.")
+
+        if not template.get("spawns"):
+            advisories.append("No preferred NPC spawn points are designated.")
+        for spawn_index, spawn in enumerate(template.get("spawns", []), start=1):
+            floor_index = int(spawn.get("floor", 0) or 0)
+            point = (int(spawn.get("x", 0) or 0), int(spawn.get("y", 0) or 0))
+            reached = floor_reachable.get(floor_index, set())
+            near_reached = point in reached or any(
+                (point[0] + dx, point[1] + dy) in reached
+                for dx, dy in ((0, -1), (0, 1), (-1, 0), (1, 0))
+            )
+            if not near_reached:
+                advisories.append(f"NPC spawn {spawn_index} is not beside an entrance-reachable tile.")
+
+        bedroom_count = sum(
+            1
+            for zone in template.get("zones", [])
+            if isinstance(zone, dict) and str(zone.get("kind")) == "bedroom"
+        )
+        if int(template.get("max_occupancy", 0) or 0) > 0 and bedroom_count <= 0:
+            advisories.append("Occupancy is above zero, but no bedroom zone is designated.")
+
+        status = (
+            "Blocked: repair critical issues before saving."
+            if critical
+            else "Ready to save."
+            if not advisories
+            else "Ready to save with advisories."
+        )
+        lines = [
+            "TEMPLATE READINESS",
+            "",
+            (
+                f"Floors: {len(floors)} | Zones: {len(template.get('zones', []))} | "
+                f"NPC spawns: {len(template.get('spawns', []))} | "
+                f"Painted tiles: {len(template.get('colors', []))}"
+            ),
+            status,
+            "",
+            "Critical:",
+            *([f"- {message}" for message in critical] or ["- None."]),
+            "",
+            "Advisories:",
+            *([f"- {message}" for message in advisories] or ["- None."]),
+        ]
+        return {
+            "critical": critical,
+            "advisories": advisories,
+            "lines": lines,
+        }
+
+    @staticmethod
+    def custom_building_duplicate_floor_data(
+        floors: Sequence[Dict[str, object]],
+        zones: Sequence[Dict[str, object]],
+        spawns: Sequence[Dict[str, object]],
+        colors: Sequence[Dict[str, object]],
+        source_floor: int,
+    ) -> tuple:
+        copied_floors = [
+            {
+                "name": str(floor.get("name", f"Floor {index + 1}")),
+                "rows": list(floor.get("rows", [])),
+            }
+            for index, floor in enumerate(floors)
+            if isinstance(floor, dict)
+        ]
+        copied_zones = [dict(zone) for zone in zones if isinstance(zone, dict)]
+        copied_spawns = [dict(spawn) for spawn in spawns if isinstance(spawn, dict)]
+        copied_colors = [dict(color) for color in colors if isinstance(color, dict)]
+        if not (0 <= int(source_floor) < len(copied_floors)):
+            return copied_floors, copied_zones, copied_spawns, copied_colors, -1
+        source_floor = int(source_floor)
+        new_floor = len(copied_floors)
+        source_name = str(copied_floors[source_floor].get("name", f"Floor {source_floor + 1}"))
+        copy_suffix = " Copy"
+        copied_floors.append({
+            "name": f"{source_name[:max(1, 28 - len(copy_suffix))]}{copy_suffix}",
+            "rows": list(copied_floors[source_floor].get("rows", [])),
+        })
+        copied_zones.extend(
+            {
+                **dict(zone),
+                "floor": new_floor,
+            }
+            for zone in list(copied_zones)
+            if (
+                len(copied_zones) < 16
+                and int(zone.get("floor", 0) or 0) == source_floor
+            )
+        )
+        copied_zones = copied_zones[:16]
+        copied_spawns.extend(
+            {
+                **dict(spawn),
+                "floor": new_floor,
+            }
+            for spawn in list(copied_spawns)
+            if (
+                len(copied_spawns) < BUILDING_TEMPLATE_MAX_SPAWNS
+                and int(spawn.get("floor", 0) or 0) == source_floor
+            )
+        )
+        copied_spawns = copied_spawns[:BUILDING_TEMPLATE_MAX_SPAWNS]
+        copied_colors.extend(
+            {
+                **dict(color),
+                "floor": new_floor,
+            }
+            for color in list(copied_colors)
+            if (
+                len(copied_colors) < BUILDING_TEMPLATE_MAX_COLOR_MARKS
+                and int(color.get("floor", 0) or 0) == source_floor
+            )
+        )
+        copied_colors = copied_colors[:BUILDING_TEMPLATE_MAX_COLOR_MARKS]
+        return copied_floors, copied_zones, copied_spawns, copied_colors, new_floor
+
+    @staticmethod
+    def custom_building_transform_floor_data(
+        floors: Sequence[Dict[str, object]],
+        zones: Sequence[Dict[str, object]],
+        spawns: Sequence[Dict[str, object]],
+        colors: Sequence[Dict[str, object]],
+        floor_index: int,
+        transform: str,
+    ) -> tuple:
+        transformed_floors = [
+            {
+                "name": str(floor.get("name", f"Floor {index + 1}")),
+                "rows": list(floor.get("rows", [])),
+            }
+            for index, floor in enumerate(floors)
+            if isinstance(floor, dict)
+        ]
+        transformed_zones = [dict(zone) for zone in zones if isinstance(zone, dict)]
+        transformed_spawns = [dict(spawn) for spawn in spawns if isinstance(spawn, dict)]
+        transformed_colors = [dict(color) for color in colors if isinstance(color, dict)]
+        if not (0 <= int(floor_index) < len(transformed_floors)):
+            return transformed_floors, transformed_zones, transformed_spawns, transformed_colors
+        floor_index = int(floor_index)
+        rows = [
+            str(row).ljust(BUILDING_TEMPLATE_WIDTH)[:BUILDING_TEMPLATE_WIDTH]
+            for row in transformed_floors[floor_index].get("rows", [])
+        ]
+        rows = (rows + [" " * BUILDING_TEMPLATE_WIDTH] * BUILDING_TEMPLATE_HEIGHT)[:BUILDING_TEMPLATE_HEIGHT]
+
+        def point(x: int, y: int) -> tuple:
+            if transform == "horizontal":
+                return BUILDING_TEMPLATE_WIDTH - 1 - int(x), int(y)
+            if transform == "vertical":
+                return int(x), BUILDING_TEMPLATE_HEIGHT - 1 - int(y)
+            if transform == "rotate_180":
+                return (
+                    BUILDING_TEMPLATE_WIDTH - 1 - int(x),
+                    BUILDING_TEMPLATE_HEIGHT - 1 - int(y),
+                )
+            return int(x), int(y)
+
+        if transform == "horizontal":
+            transformed_floors[floor_index]["rows"] = [row[::-1] for row in rows]
+        elif transform == "vertical":
+            transformed_floors[floor_index]["rows"] = list(reversed(rows))
+        elif transform == "rotate_180":
+            transformed_floors[floor_index]["rows"] = [row[::-1] for row in reversed(rows)]
+        else:
+            return transformed_floors, transformed_zones, transformed_spawns, transformed_colors
+
+        for zone in transformed_zones:
+            if int(zone.get("floor", 0) or 0) != floor_index:
+                continue
+            corners = [
+                point(int(zone.get("x1", 0)), int(zone.get("y1", 0))),
+                point(int(zone.get("x2", 0)), int(zone.get("y2", 0))),
+            ]
+            zone.update({
+                "x1": min(x for x, _y in corners),
+                "y1": min(y for _x, y in corners),
+                "x2": max(x for x, _y in corners),
+                "y2": max(y for _x, y in corners),
+            })
+        for records in (transformed_spawns, transformed_colors):
+            for record in records:
+                if int(record.get("floor", 0) or 0) != floor_index:
+                    continue
+                x, y = point(
+                    int(record.get("x", 0) or 0),
+                    int(record.get("y", 0) or 0),
+                )
+                record.update({"x": x, "y": y})
+        return transformed_floors, transformed_zones, transformed_spawns, transformed_colors
+
+    @staticmethod
+    def custom_building_link_stair_floors(
+        floors: Sequence[Dict[str, object]],
+        lower_floor: int,
+        x: int,
+        y: int,
+    ) -> tuple:
+        linked = [
+            {
+                "name": str(floor.get("name", f"Floor {index + 1}")),
+                "rows": list(floor.get("rows", [])),
+            }
+            for index, floor in enumerate(floors)
+            if isinstance(floor, dict)
+        ]
+        lower_floor = int(lower_floor)
+        upper_floor = lower_floor + 1
+        x, y = int(x), int(y)
+        if not (
+            0 <= lower_floor < len(linked) - 1
+            and 0 <= x < BUILDING_TEMPLATE_WIDTH
+            and 0 <= y < BUILDING_TEMPLATE_HEIGHT
+        ):
+            return linked, False
+        grids = [
+            [
+                list(str(row).ljust(BUILDING_TEMPLATE_WIDTH)[:BUILDING_TEMPLATE_WIDTH])
+                for row in floor.get("rows", [])
+            ]
+            for floor in linked
+        ]
+        for grid in grids:
+            while len(grid) < BUILDING_TEMPLATE_HEIGHT:
+                grid.append([" " for _ in range(BUILDING_TEMPLATE_WIDTH)])
+        if grids[lower_floor][y][x] not in {".", ","} or grids[upper_floor][y][x] not in {".", ","}:
+            return linked, False
+        for row in grids[lower_floor]:
+            for tile_x, tile in enumerate(row):
+                if tile == "<":
+                    row[tile_x] = "."
+        for row in grids[upper_floor]:
+            for tile_x, tile in enumerate(row):
+                if tile == ">":
+                    row[tile_x] = "."
+        grids[lower_floor][y][x] = "<"
+        grids[upper_floor][y][x] = ">"
+        linked[lower_floor]["rows"] = ["".join(row) for row in grids[lower_floor]]
+        linked[upper_floor]["rows"] = ["".join(row) for row in grids[upper_floor]]
+        return linked, True
+
+    def custom_building_template_builder(
+        self,
+        existing: Optional[Dict[str, object]] = None,
+        *,
+        open_canvas: bool = False,
+    ) -> Optional[Dict[str, object]]:
         current = sanitize_custom_building_template(existing or {
             "name": "New Building",
             "building_type": "home",
             "enabled": True,
         }) or {}
-        name = text_entry_menu("Building Template", "Template name?", str(current.get("name", "New Building")), 32)
-        if name is None:
-            return None
-        description = text_entry_menu(
-            "Building Template",
-            "Short description?",
-            str(current.get("description", "A custom procedural-town building template.")),
-            220,
-        )
-        if description is None:
-            return None
-        building_type = self.custom_choice_menu(
-            "Building Type",
-            BUILDING_TEMPLATE_TYPES,
-            str(current.get("building_type", "home")),
-            labels=BUILDING_TEMPLATE_TYPE_LABELS,
-            hints={key: "joins this procedural building pool" for key in BUILDING_TEMPLATE_TYPES},
-        )
-        if building_type is None:
-            return None
-        default_occupancy = int(current.get("max_occupancy", 4 if building_type in {"home", "inn"} else 0))
-        if existing is None and building_type != str(current.get("building_type", "home")):
-            default_occupancy = 4 if building_type in {"home", "inn"} else 0
-        occupancy = self.custom_number_menu(
-            "Maximum Occupancy",
-            "Occupancy",
-            0,
-            24,
-            default_occupancy,
-        )
-        if occupancy is None:
-            return None
-        enabled = self.custom_choice_menu(
-            "Generator Use",
-            ["enabled", "disabled"],
-            "enabled" if current.get("enabled", True) else "disabled",
-            hints={
-                "enabled": "May appear in generated towns for this building type.",
-                "disabled": "Saved for editing/export but not used by generation.",
-            },
-        )
-        if enabled is None:
-            return None
+        name = str(current.get("name", "New Building"))
+        description = str(current.get("description", "A custom procedural-town building template."))
+        building_type = str(current.get("building_type", "home"))
+        occupancy = int(current.get("max_occupancy", 4 if building_type in {"home", "inn"} else 0))
+        generation_weight = int(current.get("generation_weight", 5) or 5)
+        enabled = "enabled" if current.get("enabled", True) else "disabled"
+        builtin_preset_id = str(current.get("builtin_preset_id", ""))
+        overrides_builtin = bool(current.get("overrides_builtin", False))
+        manual_layout = bool(current.get("manual_layout", False))
+
+        if existing is None:
+            name = text_entry_menu("Building Template", "Template name?", name, 32)
+            if name is None:
+                return None
+            description = text_entry_menu(
+                "Building Template",
+                "Short description?",
+                description,
+                220,
+            )
+            if description is None:
+                return None
+            chosen_type = self.custom_choice_menu(
+                "Building Type",
+                BUILDING_TEMPLATE_TYPES,
+                building_type,
+                labels=BUILDING_TEMPLATE_TYPE_LABELS,
+                hints={key: "joins this procedural building pool" for key in BUILDING_TEMPLATE_TYPES},
+            )
+            if chosen_type is None:
+                return None
+            building_type = chosen_type
+            occupancy = self.custom_number_menu(
+                "Maximum Occupancy",
+                "Occupancy",
+                0,
+                24,
+                4 if building_type in {"home", "inn"} else 0,
+            )
+            if occupancy is None:
+                return None
+            generation_weight = self.custom_number_menu(
+                "Procedural Pool Weight",
+                "Weight",
+                1,
+                10,
+                generation_weight,
+                hint_suffix="/10",
+            )
+            if generation_weight is None:
+                return None
+            chosen_enabled = self.custom_choice_menu(
+                "Generator Use",
+                ["enabled", "disabled"],
+                enabled,
+                hints={
+                    "enabled": "May appear in generated towns for this building type.",
+                    "disabled": "Saved for editing/export but not used by generation.",
+                },
+            )
+            if chosen_enabled is None:
+                return None
+            enabled = chosen_enabled
         floors = [
             {
                 "name": str(floor.get("name", "Ground Floor" if index == 0 else f"Floor {index + 1}")),
@@ -1950,13 +4405,28 @@ class CustomContentMenuMixin:
                 building_type,
                 0,
             ) or floors[0]["rows"]
+            manual_layout = True
+            open_canvas = True
+        if open_canvas:
+            floors[current_floor]["rows"] = self.custom_building_fixture_editor(
+                floors[current_floor]["rows"],
+                current_floor,
+                zones=zones,
+                spawns=spawns,
+                colors=colors,
+            )
+            manual_layout = True
         while True:
             draft = sanitize_custom_building_template({
                 "name": name,
                 "description": description,
                 "building_type": building_type,
                 "max_occupancy": occupancy,
+                "generation_weight": generation_weight,
                 "enabled": enabled == "enabled",
+                "manual_layout": manual_layout,
+                "builtin_preset_id": builtin_preset_id,
+                "overrides_builtin": overrides_builtin,
                 "floors": floors,
                 "zones": zones,
                 "spawns": spawns,
@@ -1977,27 +4447,118 @@ class CustomContentMenuMixin:
             colors = [dict(color) for color in draft.get("colors", []) if isinstance(color, dict)]
             current_floor = max(0, min(current_floor, len(floors) - 1))
             current_floor_name = str(floors[current_floor].get("name", f"Floor {current_floor + 1}"))
+            readiness = self.custom_building_template_validation(draft)
+            readiness_count = len(readiness["critical"]) + len(readiness["advisories"])
             choice = menu_select(
-                "Building Template",
+                f"Edit {name}",
                 [
+                    MenuItem(
+                        label="Open map canvas",
+                        value="fixtures",
+                        enabled=True,
+                        hint=f"F{current_floor + 1}: {current_floor_name} | draw freely",
+                    ),
+                    MenuItem(
+                        label="Template settings",
+                        value="settings",
+                        enabled=True,
+                        hint=f"{BUILDING_TEMPLATE_TYPE_LABELS.get(building_type, building_type)} | occupancy {occupancy}",
+                    ),
                     MenuItem(label="Switch floor", value="floor", enabled=len(floors) > 1, hint=f"editing F{current_floor + 1}: {current_floor_name}"),
+                    MenuItem(label="Rename current floor", value="rename_floor", enabled=True, hint=current_floor_name),
+                    MenuItem(label="Duplicate current floor", value="duplicate_floor", enabled=len(floors) < BUILDING_TEMPLATE_MAX_FLOORS, hint="copies layout, zones, spawns, and paint"),
                     MenuItem(label="Add upper floor", value="add_floor", enabled=len(floors) < BUILDING_TEMPLATE_MAX_FLOORS, hint=f"{len(floors)}/{BUILDING_TEMPLATE_MAX_FLOORS} floors"),
                     MenuItem(label="Remove current upper floor", value="remove_floor", enabled=len(floors) > 1 and current_floor > 0, hint="keeps ground floor"),
+                    MenuItem(label="Transform current floor", value="transform_floor", enabled=True, hint="mirrors layout, zones, spawns, and paint"),
+                    MenuItem(label="Align stairs between floors", value="link_stairs", enabled=len(floors) > 1, hint="places matching < and > at one coordinate"),
                     MenuItem(label="Redraw current-floor boundary", value="boundary", enabled=True, hint=f"F{current_floor + 1} cursor rectangle"),
-                    MenuItem(label="Designate functional zones", value="zones", enabled=True, hint=f"{len(zones)} zones"),
+                    MenuItem(
+                        label="Edit functional zones",
+                        value="zones",
+                        enabled=True,
+                        hint=f"{len(zones)} zones | draw, redraw, change, or delete",
+                    ),
+                    MenuItem(
+                        label="Rebuild zones from rooms",
+                        value="infer_zones",
+                        enabled=True,
+                        hint="replace zones with room-aware suggestions",
+                    ),
                     MenuItem(label="Designate NPC spawn points", value="spawns", enabled=True, hint=f"{len(spawns)} spawns"),
-                    MenuItem(label="Place fixtures and decorations", value="fixtures", enabled=True, hint=f"F{current_floor + 1} cursor paint mode"),
                     MenuItem(label="Paint tile colors", value="colors", enabled=True, hint=f"{len(colors)} painted tiles"),
+                    MenuItem(label="Review readiness", value="readiness", enabled=True, hint=f"{readiness_count} issue{'s' if readiness_count != 1 else ''}"),
                     MenuItem(label="Preview template", value="preview", enabled=True),
-                    MenuItem(label="Save template", value="save", enabled=True),
-                    MenuItem(label="Cancel", value=MENU_BACK, enabled=True),
+                    MenuItem(label="Save and exit", value="save", enabled=True),
+                    MenuItem(label="Discard changes", value=MENU_BACK, enabled=True),
                 ],
-                footer="Draw rooms, place fixtures/doors, assign zones/spawns, paint colors, then save. Stairs: < up, > down.",
-                extra_lines=[f"Editing F{current_floor + 1}: {current_floor_name}", ""] + custom_building_template_summary(draft)[:12],
+                footer="Open map canvas is the main editor. Left-click paints, right-click erases, P chooses a tile, ? shows controls.",
+                extra_lines=[
+                    f"Editing F{current_floor + 1}: {current_floor_name}",
+                    "Saved built-in edits replace that exact game layout." if overrides_builtin else "This template can be used by generated towns.",
+                    "",
+                ] + custom_building_template_summary(draft)[:10],
+                mouse_enabled=True,
             )
             if choice is None or choice.value == MENU_BACK:
                 return None
-            if choice.value == "floor":
+            if choice.value == "settings":
+                updated_name = text_entry_menu("Template Settings", "Template name?", name, 32)
+                if updated_name is None:
+                    continue
+                updated_description = text_entry_menu(
+                    "Template Settings",
+                    "Short description?",
+                    description,
+                    220,
+                )
+                if updated_description is None:
+                    continue
+                updated_type = self.custom_choice_menu(
+                    "Building Type",
+                    BUILDING_TEMPLATE_TYPES,
+                    building_type,
+                    labels=BUILDING_TEMPLATE_TYPE_LABELS,
+                    hints={key: "building role and procedural pool" for key in BUILDING_TEMPLATE_TYPES},
+                )
+                if updated_type is None:
+                    continue
+                updated_occupancy = self.custom_number_menu(
+                    "Maximum Occupancy",
+                    "Occupancy",
+                    0,
+                    24,
+                    occupancy,
+                )
+                if updated_occupancy is None:
+                    continue
+                updated_weight = self.custom_number_menu(
+                    "Procedural Pool Weight",
+                    "Weight",
+                    1,
+                    10,
+                    generation_weight,
+                    hint_suffix="/10",
+                )
+                if updated_weight is None:
+                    continue
+                updated_enabled = self.custom_choice_menu(
+                    "Generator Use",
+                    ["enabled", "disabled"],
+                    enabled,
+                    hints={
+                        "enabled": "Use this layout in the game.",
+                        "disabled": "Keep it saved without using it.",
+                    },
+                )
+                if updated_enabled is None:
+                    continue
+                name = updated_name
+                description = updated_description
+                building_type = updated_type
+                occupancy = updated_occupancy
+                generation_weight = updated_weight
+                enabled = "enabled" if overrides_builtin else updated_enabled
+            elif choice.value == "floor":
                 floor_choice = menu_select(
                     "Select Floor",
                     [
@@ -2010,9 +4571,29 @@ class CustomContentMenuMixin:
                         for index, floor in enumerate(floors)
                     ] + [MenuItem(label="Back", value=MENU_BACK, enabled=True)],
                     footer="Choose which floor the boundary, zone, and fixture tools edit.",
+                    mouse_enabled=True,
                 )
                 if floor_choice is not None and floor_choice.value != MENU_BACK:
                     current_floor = int(floor_choice.value)
+            elif choice.value == "rename_floor":
+                renamed = text_entry_menu(
+                    "Rename Floor",
+                    "Floor name?",
+                    current_floor_name,
+                    28,
+                )
+                if renamed is not None:
+                    floors[current_floor]["name"] = renamed
+            elif choice.value == "duplicate_floor":
+                floors, zones, spawns, colors, new_floor = self.custom_building_duplicate_floor_data(
+                    floors,
+                    zones,
+                    spawns,
+                    colors,
+                    current_floor,
+                )
+                if new_floor >= 0:
+                    current_floor = new_floor
             elif choice.value == "add_floor":
                 new_index = len(floors)
                 floors.append({
@@ -2051,6 +4632,56 @@ class CustomContentMenuMixin:
                     updated_colors.append(color)
                 colors = updated_colors
                 current_floor = max(0, min(removed_floor - 1, len(floors) - 1))
+            elif choice.value == "transform_floor":
+                transform_choice = menu_select(
+                    "Transform Floor",
+                    [
+                        MenuItem(label="Mirror horizontally", value="horizontal", enabled=True, hint="safe for every floor"),
+                        MenuItem(
+                            label="Mirror vertically",
+                            value="vertical",
+                            enabled=current_floor > 0,
+                            hint="ground-floor exterior doors must remain on the bottom edge",
+                        ),
+                        MenuItem(
+                            label="Rotate 180 degrees",
+                            value="rotate_180",
+                            enabled=current_floor > 0,
+                            hint="ground-floor exterior doors must remain on the bottom edge",
+                        ),
+                        MenuItem(label="Back", value=MENU_BACK, enabled=True),
+                    ],
+                    footer="The matching zones, NPC spawns, and paint marks transform with the floor.",
+                    mouse_enabled=True,
+                )
+                if transform_choice is not None and transform_choice.value != MENU_BACK:
+                    floors, zones, spawns, colors = self.custom_building_transform_floor_data(
+                        floors,
+                        zones,
+                        spawns,
+                        colors,
+                        current_floor,
+                        str(transform_choice.value),
+                    )
+            elif choice.value == "link_stairs":
+                lower_floor = current_floor if current_floor < len(floors) - 1 else current_floor - 1
+                point = self.custom_building_point_selector(
+                    f"Align Floors {lower_floor + 1} and {lower_floor + 2}",
+                    floors[lower_floor]["rows"],
+                    footer="Select a floor tile that is open at the same coordinate on both floors.",
+                )
+                if point is not None:
+                    floors, linked = self.custom_building_link_stair_floors(
+                        floors,
+                        lower_floor,
+                        int(point["x"]),
+                        int(point["y"]),
+                    )
+                    self.state.message = (
+                        f"Aligned stairs at {point['x']},{point['y']}."
+                        if linked
+                        else "That coordinate must be ordinary floor on both levels."
+                    )
             elif choice.value == "boundary":
                 floors[current_floor]["rows"] = self.custom_building_boundary_editor(
                     floors[current_floor]["rows"],
@@ -2063,6 +4694,32 @@ class CustomContentMenuMixin:
                     zones,
                     current_floor,
                 )
+            elif choice.value == "infer_zones":
+                suggested_zones = self.custom_building_preset_zones(
+                    floors,
+                    building_type,
+                )
+                confirm = menu_select(
+                    "Rebuild Functional Zones",
+                    [
+                        MenuItem(
+                            label="Replace current zones",
+                            value="replace",
+                            enabled=bool(suggested_zones),
+                            hint=f"{len(suggested_zones)} room-aware zones",
+                        ),
+                        MenuItem(label="Cancel", value=MENU_BACK, enabled=True),
+                    ],
+                    footer="This analyzes enclosed rooms and functional furniture. It does not alter the map, furniture, paint, or NPC spawns.",
+                    extra_lines=[
+                        "Existing hand-drawn zones will be replaced only if you confirm.",
+                        "You can still redraw or delete any suggestion afterward.",
+                    ],
+                    mouse_enabled=True,
+                )
+                if confirm is not None and confirm.value == "replace":
+                    zones = suggested_zones
+                    self.state.message = f"Rebuilt {len(zones)} functional zones from the room layout."
             elif choice.value == "spawns":
                 spawns = self.custom_building_spawn_menu(
                     floors[current_floor]["rows"],
@@ -2074,6 +4731,9 @@ class CustomContentMenuMixin:
                 floors[current_floor]["rows"] = self.custom_building_fixture_editor(
                     floors[current_floor]["rows"],
                     current_floor,
+                    zones=zones,
+                    spawns=spawns,
+                    colors=colors,
                 )
             elif choice.value == "colors":
                 colors = self.custom_building_color_editor(
@@ -2081,14 +4741,38 @@ class CustomContentMenuMixin:
                     colors,
                     current_floor,
                 )
+            elif choice.value == "readiness":
+                menu_select(
+                    "Template Readiness",
+                    [MenuItem(label="Back", value=MENU_BACK, enabled=True)],
+                    extra_lines=list(readiness["lines"]),
+                    mouse_enabled=True,
+                )
             elif choice.value == "preview":
                 menu_select(
                     str(draft.get("name", "Building Template")),
                     [MenuItem(label="Back", value=MENU_BACK, enabled=True)],
                     extra_lines=custom_building_template_summary(draft),
+                    mouse_enabled=True,
                 )
             elif choice.value == "save":
-                return draft
+                review = self.custom_building_template_validation(draft)
+                save_choice = menu_select(
+                    "Review and Save",
+                    [
+                        MenuItem(
+                            label="Save template",
+                            value="save",
+                            enabled=not bool(review["critical"]),
+                            hint="repair critical issues first" if review["critical"] else "write this template to the custom library",
+                        ),
+                        MenuItem(label="Return to editor", value=MENU_BACK, enabled=True),
+                    ],
+                    extra_lines=list(review["lines"]),
+                    mouse_enabled=True,
+                )
+                if save_choice is not None and save_choice.value == "save":
+                    return draft
 
     def custom_extended_record_menu(
         self,
@@ -2102,6 +4786,15 @@ class CustomContentMenuMixin:
             content = self.custom_content_data()
             records = [item for item in content.get(field_name, []) if isinstance(item, dict)]
             items = [MenuItem(label=create_label, value="create", enabled=True)]
+            if field_name == "building_templates":
+                items.append(
+                    MenuItem(
+                        label="Edit existing game maps",
+                        value="built_in_presets",
+                        enabled=True,
+                        hint="open and edit the maps used by the game",
+                    )
+                )
             items.extend(
                 MenuItem(
                     label=str(record.get("name", "Unnamed")),
@@ -2129,7 +4822,12 @@ class CustomContentMenuMixin:
                         continue
                     records.append(record)
                     content[field_name] = records
-                    _ok, self.state.message = save_custom_content(content)
+                    saved, self.state.message = save_custom_content(content)
+                    if saved and field_name == "building_templates":
+                        self.custom_building_refresh_runtime_maps()
+                continue
+            if choice.value == "built_in_presets" and field_name == "building_templates":
+                self.custom_building_builtin_preset_menu()
                 continue
             try:
                 index = int(str(choice.value).split(":", 1)[1])
@@ -2140,7 +4838,12 @@ class CustomContentMenuMixin:
                 str(record.get("name", title)),
                 [
                     MenuItem(label="Inspect", value="inspect", enabled=True),
-                    MenuItem(label="Edit", value="edit", enabled=True),
+                    MenuItem(
+                        label="Edit map" if field_name == "building_templates" else "Edit",
+                        value="edit",
+                        enabled=True,
+                        hint="opens directly on the canvas" if field_name == "building_templates" else "",
+                    ),
                     MenuItem(label="Delete", value="delete", enabled=True),
                     MenuItem(label="Back", value=MENU_BACK, enabled=True),
                 ],
@@ -2155,7 +4858,11 @@ class CustomContentMenuMixin:
                     extra_lines=summary(record),
                 )
             elif action.value == "edit":
-                updated = builder(record)
+                updated = (
+                    self.custom_building_template_builder(record, open_canvas=True)
+                    if field_name == "building_templates"
+                    else builder(record)
+                )
                 if updated is not None:
                     original_name = str(record.get("name", ""))
                     new_name = str(updated.get("name", ""))
@@ -2172,7 +4879,9 @@ class CustomContentMenuMixin:
                                     for name in arena.get("enemy_names", [])
                                 ]
                     content[field_name] = records
-                    _ok, self.state.message = save_custom_content(content)
+                    saved, self.state.message = save_custom_content(content)
+                    if saved and field_name == "building_templates":
+                        self.custom_building_refresh_runtime_maps()
             elif action.value == "delete":
                 name = str(record.get("name", ""))
                 if field_name == "enemies":
@@ -2195,7 +4904,9 @@ class CustomContentMenuMixin:
                 if confirm is not None and confirm.value == "delete":
                     del records[index]
                     content[field_name] = records
-                    _ok, self.state.message = save_custom_content(content)
+                    saved, self.state.message = save_custom_content(content)
+                    if saved and field_name == "building_templates":
+                        self.custom_building_refresh_runtime_maps()
 
     def custom_extended_name_conflict(
         self,
@@ -2273,9 +4984,29 @@ class CustomContentMenuMixin:
             "- Every template preserves a walkable center cross and safely falls back to an ordinary room.",
             "",
             "Building Templates",
-            "- Create procedural town/city interiors for homes, shops, inns, clinics, libraries, workshops, and town halls.",
-            "- The builder starts with a cursor-drawn boundary, then lets you designate room zones and paint fixtures/decor.",
+            "- Create procedural town/city interiors for every generated building type, including markets and sheriff offices.",
+            "- Choose Edit existing game maps to open any authored or procedural layout directly on the canvas.",
+            "- Saved built-in edits replace that exact game layout; Restore Original removes the override safely.",
+            "- New templates start with a cursor-drawn boundary and then open directly on the same free-drawing canvas.",
+            "- Mouse editing supports click-drag rectangles, continuous fixture/color strokes, right-drag erasing, and wheel brush selection; keyboard controls remain available.",
+            "- Fixture and color tools support undo/redo, flood fill, straight lines, filled rectangles, and eyedropper sampling.",
+            "- Rectangular fixture selections can be copied, cut, pasted, mirrored, rotated, or pasted transparently without replacing existing tiles with blank space.",
+            "- A selected fixture area can be moved in one undoable operation, and the room-kit library loads furnished bedrooms, kitchens, shops, offices, libraries, and halls into the clipboard.",
+            "- Clipboard paste and selection movement use a movable ghost preview; clean cells are highlighted separately from overwritten fixtures, and edge clipping is counted before placement.",
+            "- The kit library also provides bedroom, bunk-room, reading, living-room, dining, storage, clinic, shop, and workshop furnishing arrangements without automatically changing zones.",
+            "- Room shell drawing creates a clean walled room from one rectangle; replace-all quickly exchanges every matching fixture on a floor.",
+            "- Smart Door chooses the correct horizontal or vertical room-door glyph from surrounding floor access; ground floors can also place an explicit exterior exit.",
+            "- Optional canvas overlays show functional-zone edges, NPC spawn points, and paint colors while fixtures are edited.",
+            "- Fixture brushes are grouped by architecture, services, furniture, displays, games, and erasing instead of one oversized list.",
+            "- The furnishing catalog includes distinct beds, seating, bookcases, cabinets, shelves, chests, crates, barrels, dressers, pantry cupboards, nightstands, and display cases.",
+            "- Container furnishings remain functional in generated interiors, with contents and ownership rules suited to homes, shops, clinics, inns, libraries, workshops, and civic buildings.",
+            "- Existing zones and spawn points can be changed or moved; floors can be renamed or duplicated with their metadata.",
+            "- Whole floors can be mirrored or rotated together with their zones, spawn points, and color marks.",
+            "- The stair-link assistant places a matched up/down pair at the same walkable coordinate on neighboring floors.",
+            "- Readiness review reports disconnected rooms, unusable zones/spawns, and missing schedule designations before saving.",
+            "- Existing starting-town, farmhouse, residence, and procedural maps can be edited in place without creating copy records.",
             "- Enabled templates join the matching building-type pool; missing essentials such as doors and service counters are repaired safely.",
+            "- Procedural Pool Weight controls how often an enabled custom template is selected relative to other custom templates of its type.",
             "- Max occupancy can change how many generated residents the chosen building can house.",
             "",
             "Files",
@@ -2283,7 +5014,7 @@ class CustomContentMenuMixin:
             f"- Share/import file: {CUSTOM_CONTENT_EXPORT_PATH}",
             "- Export creates a human-readable JSON file that another player can place at the import path.",
             "- Import replaces the active custom library only after confirmation.",
-            "- Built-in content cannot be overwritten or deleted.",
+            "- Built-in source definitions remain recoverable through Restore Original even after a map is edited.",
         ]
 
     def startup_custom_content_menu(self):

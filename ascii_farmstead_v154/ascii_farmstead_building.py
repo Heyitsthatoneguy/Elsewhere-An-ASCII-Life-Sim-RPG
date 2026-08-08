@@ -19,6 +19,13 @@ from ascii_farmstead_data import (
     VIEW_HEIGHT,
     VIEW_WIDTH,
 )
+from ascii_farmstead_furniture import (
+    FURNITURE_FINISHES,
+    furniture_has_art,
+    furniture_is_rotatable,
+    normalize_furniture_finish,
+    normalize_furniture_rotation,
+)
 from ascii_farmstead_support import C, clear_screen, colorize, normalize_key, read_key
 from ascii_farmstead_ui import MenuItem
 
@@ -72,6 +79,20 @@ class BuildingMixin:
             reason = self.placed_container_store_block_reason(key, obj_name)
             if reason:
                 return reason
+        furniture_states = getattr(self.state, "furniture_states", {})
+        furniture_state = (
+            furniture_states.get(f"placed:{key}:{obj_name}", {})
+            if isinstance(furniture_states, dict) else {}
+        )
+        if isinstance(furniture_state, dict):
+            display_item = str(furniture_state.get("display_item", "") or "")
+            if display_item:
+                return f"return the displayed {display_item} to inventory first, or move it instead"
+            stocked_fish = furniture_state.get("fish", {})
+            if isinstance(stocked_fish, dict) and any(
+                int(quantity or 0) > 0 for quantity in stocked_fish.values()
+            ):
+                return "remove the aquarium's fish first, or move it instead"
         return ""
 
     def clear_placed_object_state(self, key: str, obj_name: str):
@@ -85,12 +106,26 @@ class BuildingMixin:
         self.state.farm_building_boosts.pop(key, None)
         if hasattr(self, "clear_placed_container_state"):
             self.clear_placed_container_state(key, obj_name)
+        furniture_states = getattr(self.state, "furniture_states", {})
+        if isinstance(furniture_states, dict):
+            furniture_states.pop(f"placed:{key}:{obj_name}", None)
+        if self.object_placement_layer(obj_name) == "floor":
+            self.state.placed_floor_object_rotations.pop(key, None)
+            self.state.placed_floor_object_finishes.pop(key, None)
+        else:
+            self.state.placed_object_rotations.pop(key, None)
+            self.state.placed_object_finishes.pop(key, None)
 
-    def rekey_placed_object_state(self, old_key: str, new_key: str):
+    def rekey_placed_object_state(self, old_key: str, new_key: str, obj_name: str = ""):
         """Transfer every known object-attached record to a new anchor key."""
         if old_key == new_key:
             return
         keyed_mappings = [
+            *(
+                [self.state.placed_floor_object_rotations, self.state.placed_floor_object_finishes]
+                if self.object_placement_layer(obj_name) == "floor"
+                else [self.state.placed_object_rotations, self.state.placed_object_finishes]
+            ),
             self.ensure_automation_machines(),
             self.state.artisan_processors,
             self.state.fish_ponds,
@@ -104,19 +139,25 @@ class BuildingMixin:
             if str(animal.get("building_key", "")) == old_key:
                 animal["building_key"] = new_key
         if hasattr(self, "rekey_placed_container_state"):
-            obj_name = str(self.state.placed_objects.get(new_key, "") or "")
             self.rekey_placed_container_state(old_key, new_key, obj_name)
+        furniture_states = getattr(self.state, "furniture_states", {})
+        if isinstance(furniture_states, dict):
+            old_furniture_key = f"placed:{old_key}:{obj_name}"
+            if old_furniture_key in furniture_states:
+                furniture_states[f"placed:{new_key}:{obj_name}"] = furniture_states.pop(old_furniture_key)
 
-    def place_inventory_object_at(self, obj_name: str, x: int, y: int, autosave: bool = True) -> bool:
+    def place_inventory_object_at(
+        self, obj_name: str, x: int, y: int, autosave: bool = True, rotation: int = 0,
+    ) -> bool:
         """Place one inventory object while keeping the item selected for repeats."""
         if self.state.inventory.get(obj_name, 0) <= 0:
             self.set_message(f"You do not have a {obj_name} to place.")
             return False
-        ok, reason = self.can_place_object(obj_name, x, y)
+        ok, reason = self.can_place_object(obj_name, x, y, rotation=rotation)
         if not ok:
             self.set_message(f"Cannot place {obj_name}: {reason}.")
             return False
-        self.set_placed_object(x, y, obj_name)
+        self.set_placed_object(x, y, obj_name, rotation=rotation)
         self.state.inventory[obj_name] = max(0, self.state.inventory.get(obj_name, 0) - 1)
         remaining = self.state.inventory.get(obj_name, 0)
         message = f"Placed {obj_name} at {x},{y}. {remaining} remaining."
@@ -126,9 +167,12 @@ class BuildingMixin:
             self.set_message(message)
         return True
 
-    def move_placed_object(self, old_key: str, x: int, y: int, autosave: bool = True) -> bool:
+    def move_placed_object(
+        self, old_key: str, x: int, y: int, autosave: bool = True,
+        rotation: Optional[int] = None,
+    ) -> bool:
         """Atomically move an object and all records attached to its anchor key."""
-        obj_name = self.state.placed_objects.get(old_key)
+        obj_name = self.placed_object_name_for_key(old_key)
         if not obj_name:
             self.set_message("That object is no longer there.")
             return False
@@ -136,15 +180,20 @@ class BuildingMixin:
         if not parsed or parsed[0] != self.current_object_location_key():
             self.set_message("Objects can only be moved within the current build area.")
             return False
-        ok, reason = self.can_place_object(obj_name, x, y, ignore_object_key=old_key)
+        target_rotation = self.object_rotation_for_key(old_key, obj_name) if rotation is None else int(rotation) % 4
+        ok, reason = self.can_place_object(
+            obj_name, x, y, ignore_object_key=old_key, rotation=target_rotation,
+        )
         if not ok:
             self.set_message(f"Cannot move {obj_name}: {reason}.")
             return False
         new_key = self.obj_key(x, y)
         if new_key != old_key:
-            self.state.placed_objects.pop(old_key, None)
-            self.state.placed_objects[new_key] = obj_name
-            self.rekey_placed_object_state(old_key, new_key)
+            mapping = self.placed_object_mapping(obj_name)
+            mapping.pop(old_key, None)
+            mapping[new_key] = obj_name
+            self.rekey_placed_object_state(old_key, new_key, obj_name)
+        self.set_object_rotation_for_key(new_key, obj_name, target_rotation)
         message = f"Moved {obj_name} to {x},{y}."
         if autosave:
             self.autosave_with_message(message)
@@ -163,7 +212,7 @@ class BuildingMixin:
             self.set_message(f"Cannot store {obj_name}: {reason}.")
             return False
         self.clear_placed_object_state(key, obj_name)
-        self.state.placed_objects.pop(key, None)
+        self.placed_object_mapping(obj_name).pop(key, None)
         self.state.inventory[obj_name] = self.state.inventory.get(obj_name, 0) + 1
         message = f"Stored {obj_name} in inventory."
         if autosave:
@@ -182,12 +231,13 @@ class BuildingMixin:
     def placed_objects_in_current_scope(self) -> List[Tuple[str, str]]:
         scope = self.current_object_location_key()
         objects: List[Tuple[str, str]] = []
-        for key, obj_name in self.state.placed_objects.items():
-            parsed = self.parse_object_key(str(key))
-            if parsed and parsed[0] == scope:
-                objects.append((str(key), str(obj_name)))
-            elif scope == "Farm" and parsed and ":" not in str(key) and parsed[0] == "Farm":
-                objects.append((str(key), str(obj_name)))
+        for mapping in (self.state.placed_objects, self.state.placed_floor_objects):
+            for key, obj_name in mapping.items():
+                parsed = self.parse_object_key(str(key))
+                if parsed and parsed[0] == scope:
+                    objects.append((str(key), str(obj_name)))
+                elif scope == "Farm" and parsed and ":" not in str(key) and parsed[0] == "Farm":
+                    objects.append((str(key), str(obj_name)))
         return objects
 
     def build_palette_menu(self, selected_obj: Optional[str] = None) -> Tuple[str, Optional[str]]:
@@ -206,7 +256,12 @@ class BuildingMixin:
             if category == "automation":
                 hint = f"x{qty} automation"
             elif category == "furniture":
-                hint = f"x{qty} furniture"
+                if data.get("placement_layer") == "floor":
+                    hint = f"x{qty} floor covering"
+                elif data.get("placement_surface") == "wall":
+                    hint = f"x{qty} wall-mounted"
+                else:
+                    hint = f"x{qty} furniture"
             if name == selected_obj:
                 hint += " selected"
             items.append(MenuItem(label=name, value=("select", name), enabled=True, hint=hint))
@@ -225,6 +280,35 @@ class BuildingMixin:
             return "back", selected_obj
         action, obj_name = choice.value
         return str(action), str(obj_name) if obj_name else None
+
+    def furniture_finish_menu(self, key: str, obj_name: str) -> bool:
+        if (
+            INFRASTRUCTURE_DATA.get(obj_name, {}).get("category") != "furniture"
+            or not furniture_has_art(obj_name)
+        ):
+            self.set_message(f"{obj_name} does not have customizable materials.")
+            return False
+        current = self.object_finish_for_key(key, obj_name)
+        items = [
+            MenuItem(
+                label=f"{colorize('◆', self.furniture_finish_sample_color(finish))} {finish}",
+                value=finish,
+                enabled=True,
+                hint="current" if finish == current else str(record.get("description", "")),
+            )
+            for finish, record in FURNITURE_FINISHES.items()
+        ]
+        items.append(MenuItem(label="Back", value=MENU_BACK, enabled=True))
+        choice = self.vertical_panel_select(
+            f"{obj_name} Finish", items, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT,
+            return_back=True,
+        )
+        if choice is None or choice.value == MENU_BACK:
+            return False
+        finish = normalize_furniture_finish(choice.value)
+        self.set_object_finish_for_key(key, obj_name, finish)
+        self.autosave_with_message(f"Finished {obj_name} in {finish.lower()} style.")
+        return True
 
     def show_place_item_menu(self):
         return self.build_mode(open_palette=True)
@@ -247,7 +331,9 @@ class BuildingMixin:
             return MENU_BACK
 
         selected_obj = initial_obj if initial_obj and self.state.inventory.get(initial_obj, 0) > 0 else None
+        selected_rotation = 0
         moving_key: Optional[str] = None
+        moving_rotation = 0
         cursor_x, cursor_y = self.target_tile_pos()
         if not self.in_active_bounds(cursor_x, cursor_y):
             cursor_x, cursor_y = self.state.player_x, self.state.player_y
@@ -269,25 +355,33 @@ class BuildingMixin:
                     return "closed"
                 if action == "select" and palette_obj:
                     selected_obj = palette_obj
+                    selected_rotation = 0
                     moving_key = None
+                    moving_rotation = 0
                     self.set_message(f"Selected {selected_obj}. Place repeatedly with Z/Enter.")
                 elif action == "move":
                     selected_obj = None
+                    selected_rotation = 0
                     moving_key = None
+                    moving_rotation = 0
                     self.set_message("Move mode selected. Put the cursor on an object and press Z/Enter.")
                 elif action == "back" and opening_palette and initial_obj is None:
                     self.set_message("Build Mode cancelled.")
                     return MENU_BACK
                 opening_palette = False
 
-            self.draw_build_workspace(cursor_x, cursor_y, selected_obj, moving_key)
+            self.draw_build_workspace(
+                cursor_x, cursor_y, selected_obj, moving_key,
+                selected_rotation=selected_rotation,
+                moving_rotation=moving_rotation,
+            )
             key = normalize_key(read_key())
             if len(key) == 1 and key.isalpha():
                 key = key.lower()
 
             if key in ["\t", "\x1b", "q", "b"]:
                 if moving_key:
-                    obj_name = self.state.placed_objects.get(moving_key, "object")
+                    obj_name = self.placed_object_name_for_key(moving_key) or "object"
                     self.set_message(f"Cancelled moving {obj_name}; it remains in its original position.")
                 else:
                     self.set_message("Build Mode closed. Camera recentered on you.")
@@ -312,10 +406,42 @@ class BuildingMixin:
                 palette_pending = True
                 continue
 
+            if key == "r":
+                rotating_obj = self.placed_object_name_for_key(moving_key) if moving_key else selected_obj
+                if rotating_obj and furniture_is_rotatable(rotating_obj):
+                    if moving_key:
+                        moving_rotation = (moving_rotation + 1) % 4
+                        rotation = moving_rotation
+                    else:
+                        selected_rotation = (selected_rotation + 1) % 4
+                        rotation = selected_rotation
+                    width, height = self.object_footprint_size(rotating_obj, rotation)
+                    self.set_message(
+                        f"Rotated {rotating_obj} clockwise. Footprint: {width}x{height}."
+                    )
+                elif rotating_obj:
+                    self.set_message(f"{rotating_obj} does not need rotating.")
+                else:
+                    self.set_message("Select or pick up a furniture piece before rotating it.")
+                continue
+
+            if key == "f":
+                finish_key = moving_key
+                finish_obj = self.placed_object_name_for_key(moving_key) if moving_key else ""
+                if not finish_key:
+                    finish_key, finish_obj, _ax, _ay = self.placed_object_at(cursor_x, cursor_y)
+                if finish_key and finish_obj:
+                    self.furniture_finish_menu(finish_key, finish_obj)
+                    self.invalidate_draw_cache()
+                else:
+                    self.set_message("Put the cursor on placed furniture before choosing a finish.")
+                continue
+
             if key == "c":
                 if moving_key:
-                    obj_name = self.state.placed_objects.get(moving_key, "object")
+                    obj_name = self.placed_object_name_for_key(moving_key) or "object"
                     moving_key = None
+                    moving_rotation = 0
                     self.set_message(f"Cancelled moving {obj_name}; the original was never removed.")
                 elif selected_obj:
                     self.set_message(f"Cleared {selected_obj} selection. Cursor is ready to move existing objects.")
@@ -346,12 +472,17 @@ class BuildingMixin:
 
             if key in MENU_CONFIRM_KEYS:
                 if moving_key:
-                    if self.move_placed_object(moving_key, cursor_x, cursor_y):
+                    if self.move_placed_object(
+                        moving_key, cursor_x, cursor_y, rotation=moving_rotation,
+                    ):
                         moving_key = None
+                        moving_rotation = 0
                     continue
 
                 if selected_obj:
-                    if self.place_inventory_object_at(selected_obj, cursor_x, cursor_y):
+                    if self.place_inventory_object_at(
+                        selected_obj, cursor_x, cursor_y, rotation=selected_rotation,
+                    ):
                         if self.state.inventory.get(selected_obj, 0) <= 0:
                             self.set_message(f"Placed your last {selected_obj}. Press P to choose another item.")
                             selected_obj = None
@@ -360,12 +491,15 @@ class BuildingMixin:
                 target_key, target_obj, _ax, _ay = self.placed_object_at(cursor_x, cursor_y)
                 if target_key and target_obj:
                     moving_key = target_key
-                    self.set_message(f"Moving {target_obj}. Choose a destination and press Z/Enter; C cancels.")
+                    moving_rotation = self.object_rotation_for_key(target_key, target_obj)
+                    self.set_message(
+                        f"Moving {target_obj}. Choose a destination; R rotates and C cancels."
+                    )
                 else:
                     palette_pending = True
                 continue
 
-            self.set_message("Build Mode: move cursor, Z act, P palette, X store, I inspect, C cancel.")
+            self.set_message("Build Mode: move cursor, Z act, R rotate, F finish, P palette, X store, I inspect, C cancel.")
 
     def draw_build_workspace(
         self,
@@ -373,26 +507,38 @@ class BuildingMixin:
         cursor_y: int,
         selected_obj: Optional[str] = None,
         moving_key: Optional[str] = None,
+        selected_rotation: int = 0,
+        moving_rotation: int = 0,
     ):
         self.invalidate_draw_cache()
         clear_screen()
         for line in self.header_lines():
             print(line)
 
-        moving_obj = self.state.placed_objects.get(moving_key, "") if moving_key else ""
+        moving_obj = self.placed_object_name_for_key(moving_key) if moving_key else ""
         preview_obj = moving_obj or selected_obj or ""
+        preview_rotation = normalize_furniture_rotation(
+            moving_rotation if moving_obj else selected_rotation
+        )
         ignore_key = moving_key if moving_obj else None
         ok, reason = (
-            self.can_place_object(preview_obj, cursor_x, cursor_y, ignore_key)
+            self.can_place_object(
+                preview_obj, cursor_x, cursor_y, ignore_key, rotation=preview_rotation,
+            )
             if preview_obj
             else (False, "no item selected")
         )
         target_key, target_obj, target_ax, target_ay = self.placed_object_at(cursor_x, cursor_y)
         if preview_obj:
-            highlight = set(self.object_footprint_tiles(preview_obj, cursor_x, cursor_y))
+            highlight = set(self.object_footprint_tiles(
+                preview_obj, cursor_x, cursor_y, preview_rotation,
+            ))
             anchor = (cursor_x, cursor_y)
         elif target_obj and target_ax is not None and target_ay is not None:
-            highlight = set(self.object_footprint_tiles(target_obj, target_ax, target_ay))
+            highlight = set(self.object_footprint_tiles(
+                target_obj, target_ax, target_ay,
+                self.object_rotation_for_key(target_key, target_obj),
+            ))
             anchor = (target_ax, target_ay)
         else:
             highlight = {(cursor_x, cursor_y)}
@@ -412,9 +558,18 @@ class BuildingMixin:
                 if world_x >= map_w or world_y >= map_h:
                     line.append(" ")
                 elif (world_x, world_y) in highlight:
-                    marker = "X" if (world_x, world_y) == anchor else "x"
                     valid_highlight = ok if preview_obj else bool(target_obj)
-                    line.append(colorize(marker, C.PLACEMENT if valid_highlight else C.PLACEMENT_BAD))
+                    if preview_obj:
+                        line.append(self.render_held_object_preview(
+                            preview_obj, world_x, world_y,
+                            anchor[0], anchor[1], valid_highlight,
+                            rotation=preview_rotation,
+                        ))
+                    else:
+                        marker = "X" if (world_x, world_y) == anchor else "x"
+                        line.append(colorize(
+                            marker, C.PLACEMENT if valid_highlight else C.PLACEMENT_BAD,
+                        ))
                 elif world_x == self.state.player_x and world_y == self.state.player_y:
                     line.append(self.render_player())
                 elif self.on_farm() and self.farm_animal_at(world_x, world_y):
@@ -436,21 +591,25 @@ class BuildingMixin:
 
         if moving_obj:
             print(
-                f"Moving: {moving_obj} ({self.footprint_label(moving_obj)}) | "
+                f"Moving: {moving_obj} ({self.footprint_label(moving_obj, preview_rotation)}) | "
                 f"Destination: {cursor_x},{cursor_y} | {'OK' if ok else 'Blocked: ' + reason}"
             )
         elif selected_obj:
             qty = self.state.inventory.get(selected_obj, 0)
             print(
-                f"Building: {selected_obj} x{qty} ({self.footprint_label(selected_obj)}) | "
+                f"Building: {selected_obj} x{qty} ({self.footprint_label(selected_obj, preview_rotation)}) | "
                 f"Anchor: {cursor_x},{cursor_y} | {'OK' if ok else 'Blocked: ' + reason}"
             )
         elif target_obj:
             state_note = " | attached state" if target_key and self.object_has_attached_state(target_key, target_obj) else ""
-            print(f"Cursor: {cursor_x},{cursor_y} | {target_obj} ({self.footprint_label(target_obj)}){state_note}")
+            target_rotation = self.object_rotation_for_key(target_key, target_obj)
+            print(
+                f"Cursor: {cursor_x},{cursor_y} | {target_obj} "
+                f"({self.footprint_label(target_obj, target_rotation)}){state_note}"
+            )
         else:
             print(f"Cursor: {cursor_x},{cursor_y} | Empty build tile | Press P for the palette")
-        print("WASD/Arrows move cursor | Z/Enter place/pick/move | P palette | X store")
+        print("WASD/Arrows move cursor | Z/Enter place/pick/move | R rotate | F finish | P palette | X store")
         print("I inspect | C cancel/clear selection | B/Q/Esc/Tab exit")
 
     def draw_with_pickup_cursor(self):

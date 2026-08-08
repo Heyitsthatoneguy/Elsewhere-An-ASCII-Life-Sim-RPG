@@ -24,6 +24,12 @@ Point = Tuple[int, int]
 Move = Dict[str, object]
 CHECKERS_EMPTY = "."
 CHECKERS_PIECES = {"r", "R", "b", "B"}
+CHECKERS_UNICODE_PIECES = {
+    "r": "⛀",  # white draughts man, colorized as the player's piece
+    "R": "⛁",  # white draughts king
+    "b": "⛂",  # black draughts man
+    "B": "⛃",  # black draughts king
+}
 CHECKERS_STATS_DEFAULTS = {
     "games_played": 0,
     "wins": 0,
@@ -51,6 +57,18 @@ def new_checkers_board() -> Board:
 
 def copy_checkers_board(board: Board) -> Board:
     return [list(row) for row in board]
+
+
+def checkers_piece_glyph(piece: str) -> str:
+    """Return the display glyph without changing the compact saved board state."""
+    return CHECKERS_UNICODE_PIECES.get(str(piece), ".")
+
+
+def checkers_piece_name(piece: str) -> str:
+    return {
+        "r": "your man", "R": "your King",
+        "b": "opponent man", "B": "opponent King",
+    }.get(str(piece), "empty")
 
 
 def checkers_owner(piece: str) -> str:
@@ -239,7 +257,7 @@ class CheckersMixin:
             "ai_captures": 0,
             "player_kings": 0,
             "ai_kings": 0,
-            "note": "Your red pieces move toward the top of the board.",
+            "note": "Your ⛀ pieces move toward the top of the board; crowned pieces become ⛁.",
         }
         self.state.tavern_checkers_match = match
         return match
@@ -290,7 +308,8 @@ class CheckersMixin:
         return [
             "TAVERN CHECKERS",
             "",
-            "- You control the red pieces and move diagonally toward the top of the board.",
+            "- You control ⛀ (men) and ⛁ (Kings), moving toward the top of the board.",
+            "- The opponent uses ⛂ (men) and ⛃ (Kings). Piece color still distinguishes each side.",
             "- Ordinary pieces move one dark square forward. Kings move forward or backward.",
             "- Jump an opposing piece into an empty square to capture it.",
             "- Captures are mandatory. If another jump is available after landing, the same piece must continue.",
@@ -299,13 +318,12 @@ class CheckersMixin:
             "- Eighty quiet moves without a capture or crowning produce a draw.",
             "- Move with WASD, arrows, or numpad. N jumps to the next movable piece; Z/Enter selects and moves.",
             "- The board uses white and dark-grey tiles; brackets mark the cursor, angles mark selection, and parentheses mark destinations.",
-            "- X/Escape clears a selection; press it again to pause and save the match.",
+            "- B/X/Escape/Q/Tab clears a selection; press again to pause and save the match.",
             "- Friendly, Practiced, and Expert opponents use increasingly careful move selection.",
         ]
 
     def _checkers_piece_glyph(self, piece: str) -> str:
-        glyphs = {"r": "r", "R": "R", "b": "b", "B": "B", CHECKERS_EMPTY: "."}
-        return glyphs.get(piece, ".")
+        return checkers_piece_glyph(piece)
 
     def _draw_checkers_board(
         self,
@@ -322,7 +340,7 @@ class CheckersMixin:
             f"Moves: {match.get('move_count', 0)} | "
             f"Captured: {match.get('player_captures', 0)}-{match.get('ai_captures', 0)}",
         )
-        minigame_section("Board", "Red: you | Pale: opponent | uppercase: King")
+        minigame_section("Board", "⛀/⛁: you | ⛂/⛃: opponent | crowned symbol: King")
         print("    0  1  2  3  4  5  6  7")
         board = match["board"]
         destinations = set(legal_destinations)
@@ -353,7 +371,10 @@ class CheckersMixin:
         cursor_piece = board[cursor[1]][cursor[0]]
         square_detail = (
             f"Square {cursor[0]},{cursor[1]} | "
-            + (f"Piece {cursor_piece}" if cursor_piece != CHECKERS_EMPTY else "Empty square")
+            + (
+                f"{checkers_piece_glyph(cursor_piece)} {checkers_piece_name(cursor_piece)}"
+                if cursor_piece != CHECKERS_EMPTY else "Empty square"
+            )
             + f" | {len(destinations)} destination(s)"
         )
         minigame_notice(square_detail, prefix="CURSOR")
@@ -363,7 +384,7 @@ class CheckersMixin:
             "N: next movable piece",
             "Z/Enter/Space: select/move",
             "H: rules",
-            "X/Esc/Q: clear/pause",
+            "B/X/Esc/Q/Tab: clear/pause",
         )
 
     def _checkers_complete_turn(
@@ -508,7 +529,7 @@ class CheckersMixin:
                         selected = None
                     match["note"] = "Moved to the next piece with a legal move."
                 continue
-            if key in {"x", "\x1b", "q"}:
+            if key in {"b", "x", "\x1b", "q", "\t"}:
                 if selected is not None and not forced_point:
                     selected = None
                     match["note"] = "Selection cleared."
@@ -527,7 +548,7 @@ class CheckersMixin:
                     match["note"] = (
                         "A capture is mandatory; choose a piece that can jump."
                         if any(move.get("capture") for move in all_moves)
-                        else "Choose one of your red pieces with a legal move."
+                        else "Choose one of your ⛀/⛁ pieces with a legal move."
                     )
                 continue
 

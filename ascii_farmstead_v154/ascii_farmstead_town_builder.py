@@ -14,7 +14,7 @@ from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 
 Position = Tuple[int, int]
-SETTLEMENT_PLAN_VERSION = 1
+SETTLEMENT_PLAN_VERSION = 3
 SETTLEMENT_STYLES = ("Crossroads", "Main Street", "Market Ring")
 SETTLEMENT_ZONES = ("Civic", "Commercial", "Residential", "Industrial", "Green")
 SETTLEMENT_PHASES = ("Planned", "Foundation", "Frame", "Complete")
@@ -405,6 +405,34 @@ def sanitize_wilderness_settlements(value: object) -> Dict[str, Dict[str, object
             door_y = max(y, min(y + height_value - 1, int(raw_building.get("door_y", y + height_value - 1))))
             access_x = max(1, min(width - 2, int(raw_building.get("access_x", door_x))))
             access_y = max(1, min(height - 2, int(raw_building.get("access_y", door_y + 1))))
+            room_conversions = {}
+            for raw_room_id, raw_role in (
+                raw_building.get("room_conversions", {}).items()
+                if isinstance(raw_building.get("room_conversions"), dict)
+                else []
+            ):
+                room_id = str(raw_room_id or "").strip()
+                role = str(raw_role or "").strip().lower()
+                parts = room_id.split(":", 2)
+                if (
+                    len(parts) == 3
+                    and parts[0] == "floor"
+                    and parts[1].isdigit()
+                    and 0 <= int(parts[1]) <= 3
+                    and parts[2]
+                    and role in {"bedroom", "nursery"}
+                ):
+                    room_conversions[f"floor:{int(parts[1])}:{parts[2]}"] = role
+            try:
+                floor_count = max(1, min(4, int(raw_building.get("floor_count", 1) or 1)))
+            except Exception:
+                floor_count = 1
+            try:
+                room_program_variant = int(raw_building.get("room_program_variant", -1))
+            except Exception:
+                room_program_variant = -1
+            if room_program_variant not in {0, 1, 2}:
+                room_program_variant = -1
             buildings[building_id] = {
                 "id": building_id,
                 "type_id": type_id,
@@ -424,6 +452,9 @@ def sanitize_wilderness_settlements(value: object) -> Dict[str, Dict[str, object
                 "money_contributed": money_contributed,
                 "labor_done": labor_done,
                 "priority": max(0, int(raw_building.get("priority", len(buildings)))),
+                "floor_count": floor_count,
+                "room_program_variant": room_program_variant,
+                "room_conversions": room_conversions,
             }
             lots[lot_id]["building_id"] = building_id
 

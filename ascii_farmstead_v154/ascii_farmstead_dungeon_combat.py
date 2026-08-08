@@ -1488,6 +1488,16 @@ class DungeonRoguelikeCombatMixin:
         _amount, level_lines = grant_combat_exp(self.state, exp_gain)
         self.state.mine_combat_victories += 1
         self.state.mine_enemies_defeated += 1
+        if hasattr(self, "record_quest_event"):
+            tags = ["enemy", "wilderness", kind]
+            if boss:
+                tags.append("boss")
+            self.record_quest_event(
+                "defeat", target_name=species, target_id=str(enemy.get("id", species)),
+                target_names=[species], target_tags=tags, amount=1,
+                location=str(getattr(self.state, "location", "")),
+                note=f"Defeated {species} in the wilderness.",
+            )
         self.dungeon_combat_note(
             f"{attacker} defeated {species}; its loot remains on the ground (+{exp_gain} EXP)."
         )
@@ -1537,6 +1547,16 @@ class DungeonRoguelikeCombatMixin:
         _amount, level_lines = grant_combat_exp(self.state, exp_gain)
         self.state.mine_combat_victories += 1
         self.state.mine_enemies_defeated += 1
+        if hasattr(self, "record_quest_event"):
+            tags = ["enemy", "dungeon"]
+            if boss:
+                tags.append("boss")
+            self.record_quest_event(
+                "defeat", target_name=species, target_id=str(enemy.get("id", species)),
+                target_names=[species], target_tags=tags, amount=1,
+                location=str(getattr(self.state, "location", "")),
+                note=f"Defeated {species} on dungeon floor {floor}.",
+            )
         self.dungeon_combat_note(f"{attacker} defeated {species}; its loot remains on the floor (+{exp_gain} EXP).")
         for line in level_lines:
             self.dungeon_combat_note(line)
@@ -2155,7 +2175,7 @@ class DungeonRoguelikeCombatMixin:
         )
         while True:
             self.set_message(
-                f"Aim {label}: move cursor within {max_range} tiles; Z/Enter fire; B/X/Esc/Q/F cancel."
+                f"Aim {label}: move cursor within {max_range} tiles; Z/Enter fire; B/X/Esc/Q/Tab/F cancel."
             )
             self.draw_with_look_cursor(cursor_x, cursor_y)
             key = normalize_key(read_key())
@@ -2231,7 +2251,7 @@ class DungeonRoguelikeCombatMixin:
         cursor_x, cursor_y = self.target_tile_pos()
         while True:
             self.set_message(
-                f"Throw Stone: move cursor within {max_range} tiles; Z/Enter throw; B/X/Esc/Q cancel."
+                f"Throw Stone: move cursor within {max_range} tiles; Z/Enter throw; B/X/Esc/Q/Tab cancel."
             )
             self.draw_with_look_cursor(cursor_x, cursor_y)
             key = normalize_key(read_key())
@@ -2434,7 +2454,7 @@ class DungeonRoguelikeCombatMixin:
                 f"range {skill.range_max}"
                 f"{'; ' + self.dungeon_skill_special_label(skill) if self.dungeon_skill_special_label(skill) else ''}; "
                 f"{target_count} target{'s' if target_count != 1 else ''}. "
-                "Move cursor; Z/Enter cast; B/X/Esc/Q/F cancel."
+                "Move cursor; Z/Enter cast; B/X/Esc/Q/Tab/F cancel."
             )
             self.draw_with_look_cursor(cursor_x, cursor_y)
             key = normalize_key(read_key())

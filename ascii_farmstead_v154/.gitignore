@@ -17,6 +17,7 @@ ascii_farmstead_crash_report.txt
 ascii_farmstead_error.log
 ascii_farmstead_save.json
 ascii_farmstead_slot_*.json
+custom_content.json
 *.broken.json
 *.broken-*.json
 *.backup*.json

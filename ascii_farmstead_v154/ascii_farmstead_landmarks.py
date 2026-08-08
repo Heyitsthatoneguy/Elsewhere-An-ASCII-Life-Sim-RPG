@@ -317,6 +317,28 @@ class WildernessLandmarkMixin:
         record["work_week"] = week
         self.add_wilderness_region_vitality(self.state.wilderness_chunk_x, self.state.wilderness_chunk_y, 1, message.lower())
         reward = f": {format_drops(drops)}" if drops else "."
+        if hasattr(self, "play_world_event_scene"):
+            title = {
+                "old_quarry": "Working the Old Quarry",
+                "spring_garden": "Restoring the Spring Garden",
+                "fungal_garden": "Tending the Fungal Garden",
+                "waystone": "Aligning the Waystones",
+            }.get(kind, "Landmark Fieldwork")
+            consequence = (
+                f"The useful material remains in your pack: {format_drops(drops)}. Regional vitality rises as the landmark returns to practical use."
+                if drops else
+                "The aligned stones reveal nearby geography and make this crossroads useful to future travelers. Regional vitality rises."
+            )
+            self.play_world_event_scene(
+                f"landmark_work:{self.state.wilderness_chunk_x}:{self.state.wilderness_chunk_y}:{x}:{y}:{kind}:{week}",
+                title,
+                [
+                    {"type": "narration", "text": f"You work directly within the {kind.replace('_', ' ')} while its paths, walls, and surrounding terrain remain visible."},
+                    {"type": "narration", "text": f"{message} over {minutes} minutes. Tool use and stamina determine the work instead of a flavor-text result."},
+                    {"type": "narration", "text": consequence},
+                ],
+                f"{message}{reward}",
+            )
         self.autosave_with_message(f"{message}{reward}")
         return True
 
@@ -346,9 +368,11 @@ class WildernessLandmarkMixin:
             items,
             48, 18, return_back=True,
         )
-        if choice and choice.value == "work":
+        if not choice or choice.value == MENU_BACK:
+            return
+        if choice.value == "work":
             self.work_wilderness_minor_landmark(x, y, kind)
-        elif choice and choice.value == "fossils":
+        elif choice.value == "fossils":
             self.launch_excavation_minigame("paleontology", x, y, "old_quarry")
 
     def excavate_wilderness_ruin(self, x: int, y: int) -> bool:
@@ -376,6 +400,17 @@ class WildernessLandmarkMixin:
         for yy in range(max(1, y - 4), min(len(grid) - 1, y + 5)):
             for xx in range(max(1, x - 7), min(len(grid[0]) - 1, x + 8)):
                 if grid[yy][xx] == "J": grid[yy][xx] = "#"
+        if hasattr(self, "play_world_event_scene"):
+            self.play_world_event_scene(
+                f"ruin_restored:{self.state.wilderness_chunk_x}:{self.state.wilderness_chunk_y}:{x}:{y}",
+                "The Old Route Reopens",
+                [
+                    {"type": "narration", "text": "Loose stone becomes a stable courtyard again. New timber braces the route marker without disguising the age of the ruin."},
+                    {"type": "narration", "text": "The blocked route glyphs physically change into a usable stone path, making the restoration visible after the scene ends."},
+                    {"type": "dialogue", "speaker": "Traveler's Inscription", "text": "A road survives when the next person can understand where it leads."},
+                ],
+                "Restored the ruin's courtyard and reopened its route marker.",
+            )
         self.autosave_with_message("Restored the ruin's courtyard and reopened its old route marker.")
         return True
 
@@ -393,6 +428,16 @@ class WildernessLandmarkMixin:
         elif choice.value == "route":
             added = self.map_nearby_wilderness_chunks(2)
             self.advance_time(20)
+            if hasattr(self, "play_world_event_scene"):
+                self.play_world_event_scene(
+                    f"restored_route_chart:{self.state.wilderness_chunk_x}:{self.state.wilderness_chunk_y}:{x}:{y}:{self.errand_day_key()}",
+                    "Reading the Restored Route",
+                    [
+                        {"type": "narration", "text": "From the reopened courtyard, the old marker's sight lines finally make sense. Worn arrows correspond to ridges, watercourses, and surviving trail cuts."},
+                        {"type": "narration", "text": f"You transfer the route into your own map and chart {added} nearby area(s). The restored ruin now functions as navigation infrastructure rather than a solitary relic."},
+                    ],
+                    f"Charted {added} nearby area(s) from the restored route marker.",
+                )
             self.autosave_with_message(f"Used the restored route marker to chart {added} nearby area(s).")
 
     def open_wilderness_overlook_site(self, x: int, y: int) -> None:
@@ -415,6 +460,16 @@ class WildernessLandmarkMixin:
             added = self.map_current_wilderness_region()
             self.advance_time(35)
             record["survey_week"] = week
+            if hasattr(self, "play_world_event_scene"):
+                self.play_world_event_scene(
+                    f"overlook_survey:{self.state.wilderness_chunk_x}:{self.state.wilderness_chunk_y}:{x}:{y}:{week}",
+                    "Survey from the Overlook",
+                    [
+                        {"type": "narration", "text": "You climb the overlook platform and match distant ridgelines, waterways, roads, and settlement roofs to the terrain below."},
+                        {"type": "narration", "text": f"By the time the survey is complete, {added} regional area(s) have been added to your map. The platform remains behind as a useful landmark for future travelers."},
+                    ],
+                    f"Surveyed the overlook and charted {added} regional area(s).",
+                )
             self.autosave_with_message(f"Surveyed from the overlook and charted {added} regional area(s).")
         elif choice.value == "watch":
             day = self.errand_day_key()
@@ -424,6 +479,16 @@ class WildernessLandmarkMixin:
             self.advance_time(25)
             record["watch_day"] = day
             self.add_wilderness_region_vitality(self.state.wilderness_chunk_x, self.state.wilderness_chunk_y, 1, "overlook wildlife watch")
+            if hasattr(self, "play_world_event_scene"):
+                self.play_world_event_scene(
+                    f"overlook_watch:{self.state.wilderness_chunk_x}:{self.state.wilderness_chunk_y}:{x}:{y}:{day}",
+                    "Wildlife on the Move",
+                    [
+                        {"type": "narration", "text": "From the overlook, scattered tracks become a pattern: feeding grounds, sheltered crossings, and the route animals use to avoid the busiest roads."},
+                        {"type": "narration", "text": "You mark the vulnerable crossings for local rangers. Regional vitality rises by 1 as future work can protect movement instead of disturbing it."},
+                    ],
+                    "Completed the overlook wildlife watch. Regional vitality +1.",
+                )
             self.autosave_with_message("Completed a wildlife watch from the overlook. Regional vitality increased.")
 
     def explore_wilderness_landscape_route(self) -> bool:
@@ -442,20 +507,45 @@ class WildernessLandmarkMixin:
             "ravine": {"Stone": 2, "Wild Herbs": 1}, "hot_springs": {"Wild Herbs": 2},
             "waterfall": {"Stone": 1, "Marsh Reed": 1}, "desert_dunes": {"Clay": 2},
             "tundra_plain": {"Winter Root": 2}, "archipelago": {"Marsh Reed": 2, "Fiber": 1},
+            "tropical_isles": {"Wildflower": 1, "Marsh Reed": 2},
+            "desert_isles": {"Clay": 2, "Stone": 1},
         }.get(kind, {"Fiber": 1})
         add_inventory_items(self.state.inventory, drops)
         self.advance_time(45)
         record["route_day"] = day
-        self.autosave_with_message(f"Completed the marked route through {record.get('name', 'the landmark')} and gathered {format_drops(drops)}.")
+        record["route_completions"] = int(record.get("route_completions", 0)) + 1
+        milestone = ""
+        if int(record["route_completions"]) in {3, 8}:
+            bonus = {"Field Snack": 1, "Mixed Seeds": 1}
+            add_inventory_items(self.state.inventory, bonus)
+            milestone = f" Route milestone reward: {format_drops(bonus)}."
+        if hasattr(self, "play_world_event_scene"):
+            completion = int(record["route_completions"])
+            steps = [
+                {"type": "narration", "text": f"You follow the complete marked circuit through {record.get('name', 'the landmark')}, reading its terrain as a connected place instead of a single map symbol."},
+                {"type": "narration", "text": f"The route takes 45 minutes and yields {format_drops(drops)}. This is your {completion}{'st' if completion == 1 else 'nd' if completion == 2 else 'rd' if completion == 3 else 'th'} completed circuit here."},
+            ]
+            if milestone:
+                steps.append({"type": "narration", "text": f"Repeated familiarity reveals a useful route cache: {format_drops(bonus)}."})
+            self.play_world_event_scene(
+                f"landscape_route:{self.state.wilderness_chunk_x}:{self.state.wilderness_chunk_y}:{day}",
+                f"Route through {record.get('name', 'the Landmark')}",
+                steps,
+                f"Completed the landmark route and gathered {format_drops(drops)}.{milestone}",
+            )
+        self.autosave_with_message(
+            f"Completed the marked route through {record.get('name', 'the landmark')} and gathered {format_drops(drops)}.{milestone}"
+        )
         return True
 
     def open_wilderness_landscape_site(self) -> None:
         record = self.wilderness_landscape_record()
+        work = self.WILDERNESS_LANDSCAPE_WORK.get(str(record.get("type_id", "")), {})
         choice = self.vertical_panel_select(
             str(record.get("name", "Major Landmark")),
             [
-                self._wilderness_menu_item("route", "Explore the marked landmark route", "Daily traversal with terrain materials."),
-                self._wilderness_menu_item("special", "Complete landmark specialty work", "Weekly observation, or a restorative soak."),
+                self._wilderness_menu_item("route", str(work.get("route", "Explore the marked landmark route")), "A daily physical circuit with terrain materials and route milestones."),
+                self._wilderness_menu_item("special", str(work.get("special", "Complete landmark specialty work")), "Weekly paid fieldwork with place-specific materials and regional vitality."),
                 self._wilderness_menu_item("map", "Chart from the landmark station", "Reveal nearby wilderness coordinates."),
             ],
             50, 19, return_back=True,
@@ -466,6 +556,16 @@ class WildernessLandmarkMixin:
         elif choice.value == "map":
             added = self.map_nearby_wilderness_chunks(1)
             self.advance_time(20)
+            if hasattr(self, "play_world_event_scene"):
+                self.play_world_event_scene(
+                    f"landscape_chart:{self.state.wilderness_chunk_x}:{self.state.wilderness_chunk_y}:{self.errand_day_key()}",
+                    f"Charting from {record.get('name', 'the Landmark')}",
+                    [
+                        {"type": "narration", "text": f"The landmark station gives you a stable reference point for roads, water, elevation, and the boundaries of nearby terrain."},
+                        {"type": "narration", "text": f"You chart {added} nearby area(s), turning what you can physically see from the station into usable travel knowledge."},
+                    ],
+                    f"Charted {added} nearby area(s) from the landmark station.",
+                )
             self.autosave_with_message(f"Charted {added} nearby area(s) from the landmark station.")
 
     def update_ranger_camp_map(self, x: int, y: int) -> bool:
@@ -477,6 +577,16 @@ class WildernessLandmarkMixin:
         added = self.map_nearby_wilderness_chunks(2)
         self.advance_time(20)
         record["map_week"] = week
+        if hasattr(self, "play_world_event_scene"):
+            self.play_world_event_scene(
+                f"ranger_route_map:{self.state.wilderness_chunk_x}:{self.state.wilderness_chunk_y}:{x}:{y}:{week}",
+                "Updating the Ranger Route Map",
+                [
+                    {"type": "narration", "text": "At the camp table, old pencil routes are checked against trail conditions, water access, and recent traveler reports."},
+                    {"type": "narration", "text": f"The corrected route map charts {added} nearby area(s) and remains posted for rangers and passing travelers."},
+                ],
+                f"Updated the ranger route map and charted {added} nearby area(s).",
+            )
         self.autosave_with_message(f"Updated the ranger route map and charted {added} nearby area(s).")
         return True
 
@@ -495,6 +605,16 @@ class WildernessLandmarkMixin:
         record["maintenance_week"], record["maintained"] = week, True
         self.advance_time(35)
         self.add_wilderness_region_vitality(self.state.wilderness_chunk_x, self.state.wilderness_chunk_y, 2, "maintained public trail shelter")
+        if hasattr(self, "play_world_event_scene"):
+            self.play_world_event_scene(
+                f"trail_shelter_maintenance:{self.state.wilderness_chunk_x}:{self.state.wilderness_chunk_y}:{x}:{y}:{week}",
+                "A Shelter Made Ready",
+                [
+                    {"type": "narration", "text": "You replace weak roof slats, brace the bunks, and sort the public shelf so exhausted travelers can find supplies without emptying every crate."},
+                    {"type": "narration", "text": "The repaired shelter is visibly useful again. Regional vitality rises by 2 because this route now has a dependable refuge."},
+                ],
+                "Repaired the public trail shelter. Regional vitality +2.",
+            )
         self.autosave_with_message("Repaired the bunks, roof, and public supply shelf at the trail shelter.")
         return True
 

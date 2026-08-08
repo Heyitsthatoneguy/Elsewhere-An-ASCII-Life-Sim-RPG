@@ -296,7 +296,7 @@ class HeartsMixin:
             "- A match ends after a round raises any total to 100 or more. Lowest score wins.",
             "- Hearts and Diamonds are red; Clubs and Spades are white. Numbered markers identify your hand.",
             "- Choose with A/D, W/S, arrows, or number keys 1-9. Confirm plays or toggles; P passes three selected cards.",
-            "- X/Escape/Q pauses safely during passing or card selection.",
+            "- B/X/Escape/Q/Tab pauses safely during passing or card selection.",
         ]
 
     def hearts_stats_lines(self) -> List[str]:
@@ -372,7 +372,7 @@ class HeartsMixin:
             "1-9: jump to card",
             "Z/Enter/Space: toggle" if passing else "Z/Enter/Space: play",
             "P: pass three" if passing else "",
-            "X/Esc/Q: pause",
+            "B/X/Esc/Q/Tab: pause",
         )
 
     def _hearts_player_pass(self, match: Dict[str, object]) -> bool:
@@ -383,7 +383,7 @@ class HeartsMixin:
             cursor = min(cursor, len(hand) - 1)
             self._draw_hearts_hand(match, cursor, selected, True)
             key = normalize_key(read_key())
-            if key in {"x", "\x1b", "q"}:
+            if key in {"b", "x", "\x1b", "q", "\t"}:
                 match["selected_pass"] = selected
                 self.pause_hearts_match()
                 return False
@@ -416,7 +416,7 @@ class HeartsMixin:
                 cursor = legal_indices[0]
             self._draw_hearts_hand(match, cursor, [], False)
             key = normalize_key(read_key())
-            if key in {"x", "\x1b", "q"}:
+            if key in {"b", "x", "\x1b", "q", "\t"}:
                 self.pause_hearts_match()
                 return False
             if key in {"w", "a", "UP", "LEFT"}:

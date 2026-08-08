@@ -509,6 +509,8 @@ class NpcFamilyLifeMixin:
                     parent.setdefault("dependent_ids", []).append(child["id"])
                 kind, verb = ("Adoption", "adopted") if adopted else ("Birth", "welcomed")
                 messages.append(self._npc_family_log(kind, f"{female['name']} and {male['name']} {verb} {child['name']} into their family in {settlement}.", [female["id"], male["id"], child["id"]], str(population.get("id", ""))))
+        if isinstance(plan, dict):
+            builder.assign_household_rooms(plan, population)
         population["family_last_processed_day"] = today
         return messages
 

@@ -14,7 +14,7 @@ Controls:
     Tab                Inventory / settings
     B                  Reopen shop menu while already standing in shop
     N                  Sleep when inside the farmhouse
-    Menus              Arrow keys/WASD/numpad move, Z/Enter select, X/Esc/Q cancel
+    Menus              Arrow keys/WASD/numpad move, Z/Enter select, B/X/Esc/Q/Tab cancel
     G                  Write debug report file
     H                  Help
     C                  Toggle color
@@ -85,6 +85,24 @@ from ascii_farmstead_visuals import (
     wilderness_landmark_style,
     wilderness_display_glyph,
     wilderness_tile_color,
+)
+from ascii_farmstead_furniture import (
+    FURNITURE_FINISHES,
+    furniture_art_cell,
+    furniture_component_at,
+    furniture_display_cell,
+    furniture_display_glyph,
+    furniture_display_material_role,
+    furniture_has_art,
+    furniture_is_rotatable,
+    furniture_orient_display_glyph,
+    furniture_walkable_kind,
+    normalize_furniture_finish,
+    normalize_furniture_rotation,
+)
+from ascii_farmstead_furniture_actions import (
+    furniture_action_id,
+    furniture_action_label,
 )
 
 # Compatibility imports: the legacy single-file game still expects these
@@ -213,7 +231,12 @@ from ascii_farmstead_ui import (
     wrap_status_chips,
 )
 from ascii_farmstead_containers import ContainerSystemMixin
+from ascii_farmstead_authored_interiors import (
+    build_authored_interior,
+    build_authored_residence,
+)
 from ascii_farmstead_home_world import SeamlessHomeWorldMixin
+from ascii_farmstead_quests import QuestSystemMixin
 from ascii_farmstead_saves import SaveLoadMixin
 from ascii_farmstead_npcs import NpcMixin
 from ascii_farmstead_npc_adventures import NpcAdventureMixin
@@ -250,6 +273,7 @@ from ascii_farmstead_npc_builder import (
     sanitize_procedural_job_profile,
 )
 from ascii_farmstead_npc_dialogue import ProceduralNpcDialogueMixin
+from ascii_farmstead_dialogue import DialogueFlowMixin
 from ascii_farmstead_procedural_towns import (
     PROCEDURAL_TOWN_DOOR_SYMBOL,
     PROCEDURAL_TOWN_INTERIOR_LOCATION,
@@ -269,6 +293,12 @@ from ascii_farmstead_victory import (
     VictoryRunMixin,
 )
 from ascii_farmstead_custom_menus import CustomContentMenuMixin
+from ascii_farmstead_custom_extended import (
+    BUILDING_TEMPLATE_FURNISHING_DATA,
+    BUILDING_TEMPLATE_GENERIC_FIXTURE_DATA,
+    building_template_functional_furniture_name,
+    building_template_fixture_catalog,
+)
 from ascii_farmstead_dungeon_combat import DungeonRoguelikeCombatMixin
 from ascii_farmstead_world_magic import WorldMagicMixin
 from ascii_battle_prototype.combat.classes import class_defs as tactical_class_defs
@@ -651,6 +681,8 @@ class FarmGame(
     VictoryRunMixin,
     DynastyMixin,
     CivicEconomyMixin,
+    QuestSystemMixin,
+    DialogueFlowMixin,
     ProceduralTownRuntimeMixin,
     ProceduralNpcDialogueMixin,
     ProceduralNpcBuilderMixin,
@@ -716,7 +748,10 @@ class FarmGame(
         self.wilderness_dungeon_maps: Dict[str, List[List[str]]] = {}
         self.wilderness_dungeon_enemies: Dict[str, List[Dict[str, object]]] = {}
         self.wilderness_stronghold_enemies: Dict[str, List[Dict[str, object]]] = {}
-        self.house_map = self.make_house_map()
+        self.house_map = (
+            self.custom_building_builtin_override_grid("authored:make_house_map")
+            or self.make_house_map()
+        )
         self.general_store_map = self.make_general_store_map()
         self.blacksmith_interior_map = self.make_blacksmith_interior_map()
         self.library_interior_map = self.make_library_interior_map()
@@ -911,7 +946,13 @@ class FarmGame(
         self.refresh_seamless_town_layer()
 
     def refresh_town_interior_maps(self):
-        """Regenerate fixed town interiors so older saves cannot restore stale layouts."""
+        """Regenerate modular public interiors from their live room programs.
+
+        Legacy built-in blueprint overrides are intentionally no longer
+        applied here. They predate room graphs and catalog furniture and would
+        silently remove the systems that NPC routing and inspection now use.
+        """
+        self._starting_town_catalog_furniture_cache = {}
         for map_attr, factory_name in self.TOWN_INTERIOR_MAP_SPECS:
             setattr(self, map_attr, getattr(self, factory_name)())
 
@@ -2014,6 +2055,13 @@ class FarmGame(
             self.mark_bounty_target_defeated(bounty)
             self.state.mine_combat_victories += 1
             self.state.mine_enemies_defeated += max(1, len(defeated))
+            if hasattr(self, "record_quest_event"):
+                for defeated_name in (defeated or [species]):
+                    self.record_quest_event(
+                        "defeat", target_name=str(defeated_name), target_id=str(defeated_name),
+                        target_tags=["enemy", "mine", "boss" if enemy.get("boss") else "standard"],
+                        amount=1, location="Mine", note=f"Defeated {defeated_name} in the mine.",
+                    )
             minutes = self.apply_combat_time_cost(result, "mine")
             profile = farmstead_combat_profile(self.state)
             progress_lines = list(level_lines)
@@ -3539,6 +3587,14 @@ class FarmGame(
             clear_lines = self.clear_mine_floor_if_empty(floor)
             self.state.mine_combat_victories += 1
             self.state.mine_enemies_defeated += max(1, len(defeated))
+            if hasattr(self, "record_quest_event"):
+                for defeated_name in (defeated or [species]):
+                    self.record_quest_event(
+                        "defeat", target_name=str(defeated_name), target_id=str(defeated_name),
+                        target_tags=["enemy", "dungeon", "boss" if enemy.get("boss") else "standard"],
+                        amount=1, location=str(getattr(self.state, "location", "")),
+                        note=f"Defeated {defeated_name} in a wilderness dungeon.",
+                    )
             minutes = self.apply_combat_time_cost(result, "mine")
             profile = farmstead_combat_profile(self.state)
             progress_lines = list(level_lines)
@@ -3879,7 +3935,10 @@ class FarmGame(
                     placed = self.get_placed_object(world_x, world_y)
                     if placed and grid[world_y][world_x] in self.house_floor_tiles():
                         key, obj_name, ax, ay = self.placed_object_at(world_x, world_y)
-                        line.append(self.render_placed_object(obj_name or placed, world_x, world_y, ax, ay))
+                        line.append(self.render_placed_object(
+                            obj_name or placed, world_x, world_y, ax, ay,
+                            rotation=self.object_rotation_for_key(key, obj_name or placed),
+                        ))
                     else:
                         tile = grid[world_y][world_x]
                         line.append(colorize(tile, colors.get(tile, C.WOOD)))
@@ -3889,7 +3948,7 @@ class FarmGame(
         symbol = brush if brush != " " else "space"
         print(f"House Layout Editor | Cursor {cursor_x},{cursor_y} | Brush: {symbol}")
         print("WASD/Arrows move | Z paint | P palette | I inspect | R reset preview")
-        print("Q/Esc/Tab save and exit | C cancel without saving")
+        print("B/Q/Esc/Tab save and exit | C cancel without saving")
 
     def house_layout_tile_label(self, tile: str) -> str:
         return {
@@ -4020,7 +4079,7 @@ class FarmGame(
             "Bed": (min_x + 2, min_y + 1),
             "Nightstand": (min_x + 5, min_y + 1),
             "Dresser": (min_x + 7, min_y + 1),
-            "Wall Calendar": (min_x + 11, min_y),
+            "Wall Calendar": (min_x + 11, min_y - 1),
             "Bookshelf": (min_x + 2, max_y - 4),
             "Writing Desk": (min_x + 4, max_y - 4),
             "Wooden Table": (center_x - 1, min_y + 6),
@@ -4042,7 +4101,7 @@ class FarmGame(
 
         if "Bedroom Expansion" in self.state.house_upgrades or "Deluxe Farmhouse" in self.state.house_upgrades:
             layout["Wardrobe"] = (min_x + 10, min_y + 1)
-            layout["Wall Mirror"] = (min_x + 13, min_y + 1)
+            layout["Wall Mirror"] = (min_x + 13, min_y - 1)
             layout["Fireplace"] = (center_x - 1, min_y + 2)
             layout["Armchair"] = (center_x + 4, min_y + 3)
 
@@ -4050,12 +4109,12 @@ class FarmGame(
             layout["Room Divider"] = (min_x + 14, min_y + 5)
             layout["Couch"] = (center_x - 2, max_y - 6)
             layout["Large Rug"] = (center_x - 8, max_y - 4)
-            layout["Wall Art"] = (center_x + 7, min_y)
+            layout["Wall Art"] = (center_x + 7, min_y - 1)
 
         if getattr(self.state, "spouse_moved_to_farm", False):
             layout["Couch"] = (center_x - 3, max(min_y + 4, max_y - 5))
             layout["Tea Table"] = (center_x + 1, max(min_y + 4, max_y - 5))
-            layout["Wall Art"] = (min(max_x - 7, center_x + 7), min_y)
+            layout["Wall Art"] = (min(max_x - 7, center_x + 7), min_y - 1)
             layout["Family Table"] = (center_x - 1, min(max_y - 2, min_y + 8))
             layout["Keepsake Chest"] = (max_x - 5, max_y - 2)
 
@@ -4283,7 +4342,7 @@ class FarmGame(
 
         Unlike the old spoke template, this starts with empty space, draws only
         the rooms each building actually needs, then adds sparse functional
-        fixtures. Decorative furniture remains passive.
+        fixtures. Every deliberate furnishing is routed to a functional action.
         """
         grid = [[" " for _ in range(WIDTH)] for _ in range(HEIGHT)]
         floor_cells: set = set()
@@ -4369,6 +4428,7 @@ class FarmGame(
 
     def make_authored_town_residence_map(self, residence_id: str) -> List[List[str]]:
         """Build one of six deliberately different starting-town homes."""
+        return build_authored_residence(str(residence_id), WIDTH, HEIGHT)
         specs = {
             "meadow_cottage": {
                 "rooms": [
@@ -4461,7 +4521,13 @@ class FarmGame(
             cache = {}
             self._authored_town_residence_maps = cache
         if residence_id not in cache:
-            cache[residence_id] = self.make_authored_town_residence_map(residence_id)
+            generated = self.make_authored_town_residence_map(residence_id)
+            cache[residence_id] = (
+                self.custom_building_builtin_override_grid(
+                    f"residence:{residence_id}"
+                )
+                or generated
+            )
         return cache[residence_id]
 
     def town_interior_tile_catalog(self, location: Optional[str] = None) -> Dict[str, Dict[str, str]]:
@@ -4485,16 +4551,17 @@ class FarmGame(
             "MuseumInterior": "Museum",
             "TownResidenceInterior": str(residence.get("label", "Town Residence")),
         }.get(location, "Building")
-        common = {
-            ".": {"desc": f"{room} floor", "hint": f"Z/Enter: inspect {room.lower()}"},
-            ":": {"desc": f"{room} walking aisle", "hint": f"Z/Enter: inspect {room.lower()}"},
-            ",": {"desc": f"{room} accent flooring", "hint": f"Z/Enter: inspect {room.lower()}"},
-            "#": {"desc": f"{room} wall", "hint": "Z/Enter: nothing"},
-            " ": {"desc": f"Outside the {room.lower()} room", "hint": "Z/Enter: nothing"},
+        common = building_template_fixture_catalog(room)
+        common.update({
+            ".": {"desc": f"{room} floor", "hint": "I: inspect floor"},
+            ":": {"desc": f"{room} walking aisle", "hint": "I: inspect aisle"},
+            ",": {"desc": f"{room} accent flooring", "hint": "I: inspect flooring"},
+            "#": {"desc": f"{room} wall", "hint": "I: inspect wall"},
+            " ": {"desc": f"Outside the {room.lower()} room", "hint": "I: inspect room boundary"},
             "D": {"desc": f"{room} exit", "hint": f"Walk into door: leave {room.lower()}"},
             "|": {"desc": f"Open room door in {room}.", "hint": "Z/Enter: close door"},
             "_": {"desc": f"Closed room door in {room}.", "hint": "Z/Enter: open door"},
-            "-": {"desc": f"{room} counter edge", "hint": "Z/Enter: nothing"},
+            "-": {"desc": f"{room} counter edge", "hint": "Z/Enter: inspect counter"},
             "B": {"desc": f"Private bed in the {room.lower()} living quarters.", "hint": "Z/Enter: inspect bedroom"},
             "u": {"desc": f"Dresser and personal storage for someone who lives above or behind the {room.lower()}.", "hint": "Z/Enter: inspect dresser"},
             "c": {"desc": f"Small chair in the {room.lower()} living space.", "hint": "Z/Enter: inspect chair"},
@@ -4504,7 +4571,7 @@ class FarmGame(
             "r": {"desc": f"Woven rug defining the shared room in {room}.", "hint": "Z/Enter: inspect sitting room"},
             "s": {"desc": f"Household storage shelf in {room}.", "hint": "Z/Enter: inspect shelf"},
             "l": {"desc": f"Bookcase holding the household's shared books and notes.", "hint": "Z/Enter: inspect bookcase"},
-        }
+        })
         room_tiles = {
             "GeneralStoreInterior": {
                 "$": {"desc": "Checkout counter with seed ledgers, price cards, and twine.", "hint": "Z/Enter: inspect counter"},
@@ -4568,7 +4635,6 @@ class FarmGame(
                 "T": {"desc": "Table display with a clean showroom place setting.", "hint": "Z/Enter: inspect furniture display"},
                 "L": {"desc": "Bookshelf display with sample storage labels.", "hint": "Z/Enter: inspect furniture display"},
                 "f": {"desc": "House plant display.", "hint": "Z/Enter: inspect furniture display"},
-                "-": {"desc": "Rug display with layered color samples.", "hint": "Z/Enter: inspect furniture display"},
                 "U": {"desc": "Dresser and wardrobe display.", "hint": "Z/Enter: inspect furniture display"},
                 "!": {"desc": "Standing lamp display.", "hint": "Z/Enter: inspect furniture display"},
                 "m": {"desc": "Mirror display. A farmhouse mirror can change your color.", "hint": "Z/Enter: inspect furniture display"},
@@ -4651,33 +4717,149 @@ class FarmGame(
     def town_interior_tile_description(self, x: int, y: int) -> Optional[str]:
         if not self.on_town_interior() or not self.in_active_bounds(x, y):
             return None
+        catalog_furniture = self.starting_town_catalog_furniture_at(x, y)
+        if isinstance(catalog_furniture, dict):
+            name = str(catalog_furniture.get("name", "Furniture"))
+            detail = str(
+                INFRASTRUCTURE_DATA.get(name, {}).get(
+                    "description", "Purpose-built furniture."
+                )
+            )
+            room_name = str(catalog_furniture.get("room_role", "room")).replace("_", " ")
+            action = furniture_action_label(name, INFRASTRUCTURE_DATA.get(name, {}))
+            status = self.furniture_status_text(name, x, y, catalog_furniture)
+            return f"{name} in the {room_name}. {detail} Use it to {action}.{status}"
         tile = self.active_map()[y][x]
         record = self.town_interior_tile_catalog().get(tile)
-        if tile not in self.town_interior_interactable_tiles() and tile not in {".", ":", ",", "#", " ", "D"}:
-            return "Nothing here needs your attention."
-        return record.get("desc") if record else f"{self.location_label()} tile '{tile}'"
+        return (
+            record.get("desc")
+            if record
+            else f"Uncatalogued fixture '{tile}' in {self.location_label()}."
+        )
 
     def town_interior_tile_hint(self, x: int, y: int) -> str:
         if not self.on_town_interior() or not self.in_active_bounds(x, y):
             return "Z/Enter: nothing"
+        catalog_furniture = self.starting_town_catalog_furniture_at(x, y)
+        if isinstance(catalog_furniture, dict):
+            return self.catalog_furniture_action_hint(catalog_furniture).replace("Z:", "Z/Enter:")
         tile = self.active_map()[y][x]
+        if self.on_authored_town_residence():
+            furnishing = BUILDING_TEMPLATE_FURNISHING_DATA.get(str(tile))
+            if not isinstance(furnishing, dict):
+                furnishing = BUILDING_TEMPLATE_GENERIC_FIXTURE_DATA.get(str(tile))
+            if isinstance(furnishing, dict):
+                name = building_template_functional_furniture_name(furnishing)
+                return self.furniture_action_hint_for(name).replace("Z:", "Z/Enter:")
+        semantic_name = self.town_semantic_furniture_name(str(tile))
+        if semantic_name:
+            return self.furniture_action_hint_for(semantic_name).replace("Z:", "Z/Enter:")
         record = self.town_interior_tile_catalog().get(tile)
-        if tile not in self.town_interior_interactable_tiles() and tile != "D":
-            return "Z/Enter: nothing"
-        return record.get("hint", "Z/Enter: inspect building") if record else "Z/Enter: inspect building"
+        if record:
+            return str(record.get("hint", "Z/Enter: inspect fixture"))
+        return "Z/Enter: inspect uncatalogued fixture" if tile.strip() else "I: inspect room boundary"
 
     def town_interior_interactable_tiles(self) -> set:
-        location = str(self.state.location)
-        base = {"D", "&", "P", "_", "|"}
-        special = {
-            "LibraryInterior": {"A"},
-            "MayorHouseInterior": {"F"},
-            "MuseumInterior": {"C", "F", "G", "M", "A", "E", "S", "d"},
-        }
-        return base | special.get(location, set())
+        # Floor, rugs, walls, and exterior void remain inspect-only. Every
+        # deliberate fixture can be used for either its full mechanic or a
+        # contextual inspection, so no visible furniture becomes dead ASCII.
+        return set(self.town_interior_tile_catalog()) - {".", ":", ",", "#", " "}
 
     def town_interior_blocking_tiles(self) -> set:
         return set(self.town_interior_tile_catalog()) - {".", ":", ",", "D", "|"}
+
+    def town_semantic_furniture_name(self, tile: str) -> str:
+        names = {
+            ("GeneralStoreInterior", "t"): "Tea Table",
+            ("GeneralStoreInterior", "P"): "Records Board",
+            ("BlacksmithInterior", "a"): "Tool Rack",
+            ("BlacksmithInterior", "f"): "Hearth",
+            ("BlacksmithInterior", "w"): "Workbench",
+            ("BlacksmithInterior", "x"): "Materials Bench",
+            ("BlacksmithInterior", "q"): "Forge Fixture",
+            ("BlacksmithInterior", "t"): "Tool Rack",
+            ("BlacksmithInterior", "P"): "Records Board",
+            ("LibraryInterior", "c"): "Wooden Chair",
+            ("LibraryInterior", "t"): "Study Table",
+            ("LibraryInterior", "A"): "Records Board",
+            ("LibraryInterior", "P"): "Records Board",
+            ("MayorHouseInterior", "F"): "Fireplace",
+            ("MayorHouseInterior", "d"): "Writing Desk",
+            ("MayorHouseInterior", "c"): "Armchair",
+            ("MayorHouseInterior", "r"): "Decorative Rug",
+            ("MayorHouseInterior", "P"): "Records Board",
+            ("InnInterior", "B"): "Bed",
+            ("InnInterior", "k"): "Kitchen Counter",
+            ("InnInterior", "c"): "Wooden Chair",
+            ("InnInterior", "t"): "Family Table",
+            ("InnInterior", "P"): "Records Board",
+            ("FurnitureStoreInterior", "h"): "Wooden Chair",
+            ("FurnitureStoreInterior", "c"): "Armchair",
+            ("FurnitureStoreInterior", "C"): "Couch",
+            ("FurnitureStoreInterior", "T"): "Family Table",
+            ("FurnitureStoreInterior", "t"): "Tea Table",
+            ("FurnitureStoreInterior", "f"): "House Plant",
+            ("FurnitureStoreInterior", "p"): "House Plant",
+            ("FurnitureStoreInterior", "!"): "Standing Lamp",
+            ("FurnitureStoreInterior", "m"): "Wall Mirror",
+            ("FurnitureStoreInterior", "A"): "Wall Art",
+            ("FurnitureStoreInterior", "r"): "Decorative Rug",
+            ("FurnitureStoreInterior", "P"): "Records Board",
+            ("CarpenterStoreInterior", "w"): "Workbench",
+            ("CarpenterStoreInterior", "t"): "Writing Desk",
+            ("CarpenterStoreInterior", "P"): "Records Board",
+            ("AnimalStoreInterior", "c"): "Wooden Chair",
+            ("AnimalStoreInterior", "p"): "House Plant",
+            ("AnimalStoreInterior", "h"): "Animal Fixture",
+            ("AnimalStoreInterior", "P"): "Records Board",
+            ("ClinicInterior", "e"): "Examination Fixture",
+            ("ClinicInterior", "b"): "Bed",
+            ("ClinicInterior", "P"): "Records Board",
+            ("TownHallInterior", "c"): "Wooden Chair",
+            ("TownHallInterior", "p"): "Records Board",
+            ("TownHallInterior", "r"): "Records Board",
+            ("TownHallInterior", "m"): "Map Table",
+            ("TownHallInterior", "n"): "Notice",
+            ("TownHallInterior", "P"): "Records Board",
+            ("MarketRowInterior", "m"): "Stock Display",
+            ("MarketRowInterior", "t"): "Tea Table",
+            ("MarketRowInterior", "P"): "Records Board",
+        }
+        return names.get((str(self.state.location), str(tile)), "")
+
+    def inspect_town_interior_fixture(self, x: int, y: int) -> bool:
+        tile = self.active_map()[y][x] if self.in_active_bounds(x, y) else " "
+        semantic_furniture = self.town_semantic_furniture_name(str(tile))
+        if semantic_furniture and self.use_functional_furniture(
+            semantic_furniture, x, y,
+        ):
+            return True
+        furnishing = BUILDING_TEMPLATE_FURNISHING_DATA.get(str(tile))
+        if isinstance(furnishing, dict):
+            if self.use_functional_furniture(
+                building_template_functional_furniture_name(furnishing), x, y,
+            ):
+                return True
+        generic_fixture = BUILDING_TEMPLATE_GENERIC_FIXTURE_DATA.get(str(tile))
+        if isinstance(generic_fixture, dict) and self.use_functional_furniture(
+            building_template_functional_furniture_name(generic_fixture), x, y,
+        ):
+            return True
+        description = self.town_interior_tile_description(x, y)
+        if not description:
+            return False
+        self.set_message(description)
+        return True
+
+    def use_town_interior_game_table_action(self, x: int, y: int) -> bool:
+        """Open any editor-placed game table in any authored interior."""
+        if not self.on_town_interior() or not self.in_active_bounds(x, y):
+            return False
+        game_id = self.game_table_fixture_id(self.active_map()[y][x])
+        if not game_id:
+            return False
+        self.open_physical_game_table(game_id, self.location_label())
+        return True
 
     def use_town_room_door_action(self, x: int, y: int) -> bool:
         if not self.on_town_interior() or not self.in_active_bounds(x, y):
@@ -4700,8 +4882,56 @@ class FarmGame(
             return True
         return False
 
+    def build_starting_town_modular_interior(
+        self,
+        layout_id: str,
+        location: str,
+    ) -> List[List[str]]:
+        """Build and index one catalog-furnished starting-town interior."""
+        placements = []
+        grid = build_authored_interior(
+            layout_id,
+            WIDTH,
+            HEIGHT,
+            furniture_placements=placements,
+        )
+        cache = getattr(self, "_starting_town_catalog_furniture_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._starting_town_catalog_furniture_cache = cache
+        lookup = {}
+        for placement in placements:
+            if not isinstance(placement, dict):
+                continue
+            common = {
+                key: placement.get(key)
+                for key in (
+                    "name", "collection", "form", "room_id", "room_role",
+                    "rotation", "width", "height",
+                )
+            }
+            for cell in placement.get("cells", ()) or ():
+                if not isinstance(cell, dict):
+                    continue
+                record = dict(common)
+                record.update(cell)
+                lookup[(int(cell.get("x", 0)), int(cell.get("y", 0)))] = record
+        cache[str(location)] = lookup
+        return grid
+
+    def starting_town_catalog_furniture_at(
+        self, x: int, y: int
+    ) -> Optional[Dict[str, object]]:
+        if not self.on_town_interior():
+            return None
+        cache = getattr(self, "_starting_town_catalog_furniture_cache", {})
+        if not isinstance(cache, dict):
+            return None
+        return cache.get(str(self.state.location), {}).get((int(x), int(y)))
+
     def make_general_store_map(self) -> List[List[str]]:
         """Create the General Store interior."""
+        return self.build_starting_town_modular_interior("general_store", "GeneralStoreInterior")
         return self.make_practical_town_interior(
             rooms=[
                 (18, 13, 36, 18, [(27, 18), (27, 13), (18, 15), (36, 14)]),
@@ -4737,6 +4967,7 @@ class FarmGame(
 
     def make_blacksmith_interior_map(self) -> List[List[str]]:
         """Create the Blacksmith interior."""
+        return self.build_starting_town_modular_interior("blacksmith", "BlacksmithInterior")
         return self.make_practical_town_interior(
             rooms=[
                 (18, 14, 36, 18, [(27, 18), (18, 16), (36, 16), (27, 14)]),
@@ -4773,6 +5004,7 @@ class FarmGame(
 
     def make_library_interior_map(self) -> List[List[str]]:
         """Create the Library interior."""
+        return self.build_starting_town_modular_interior("library", "LibraryInterior")
         return self.make_practical_town_interior(
             rooms=[
                 (17, 13, 37, 18, [(27, 18), (17, 15), (37, 15), (27, 13)]),
@@ -4811,6 +5043,7 @@ class FarmGame(
 
     def make_museum_interior_map(self) -> List[List[str]]:
         """Create the Museum interior."""
+        return self.build_starting_town_modular_interior("museum", "MuseumInterior")
         return self.make_practical_town_interior(
             rooms=[
                 (17, 14, 37, 18, [(27, 18), (17, 16), (37, 16), (27, 14)]),
@@ -4859,6 +5092,7 @@ class FarmGame(
 
     def make_mayor_house_map(self) -> List[List[str]]:
         """Create the Mayor's House interior."""
+        return self.build_starting_town_modular_interior("mayor_house", "MayorHouseInterior")
         return self.make_practical_town_interior(
             rooms=[
                 (18, 13, 36, 18, [(27, 18), (18, 15), (36, 15), (27, 13)]),
@@ -4894,6 +5128,7 @@ class FarmGame(
 
     def make_inn_interior_map(self) -> List[List[str]]:
         """Create the Inn interior."""
+        return self.build_starting_town_modular_interior("inn", "InnInterior")
         return self.make_practical_town_interior(
             rooms=[
                 (16, 13, 38, 18, [(27, 18), (16, 15), (38, 15), (27, 13)]),
@@ -4935,6 +5170,7 @@ class FarmGame(
 
     def make_furniture_store_map(self) -> List[List[str]]:
         """Create the Furniture Store interior."""
+        return self.build_starting_town_modular_interior("furniture_store", "FurnitureStoreInterior")
         return self.make_practical_town_interior(
             rooms=[
                 (18, 13, 36, 18, [(27, 18), (18, 15), (36, 15), (27, 13)]),
@@ -4973,6 +5209,7 @@ class FarmGame(
 
     def make_carpenter_store_map(self) -> List[List[str]]:
         """Create the Carpenter's Store interior."""
+        return self.build_starting_town_modular_interior("carpenter", "CarpenterStoreInterior")
         return self.make_practical_town_interior(
             rooms=[
                 (19, 14, 37, 18, [(27, 18), (19, 16), (37, 16), (27, 14)]),
@@ -5710,6 +5947,7 @@ class FarmGame(
                     grid[y][x] = rng.choice(["T", "%", ";"])
     def make_animal_store_map(self) -> List[List[str]]:
         """Create the Animal Store interior."""
+        return self.build_starting_town_modular_interior("animal_store", "AnimalStoreInterior")
         return self.make_practical_town_interior(
             rooms=[
                 (18, 13, 36, 18, [(27, 18), (18, 15), (36, 15), (27, 13)]),
@@ -5746,6 +5984,7 @@ class FarmGame(
 
     def make_clinic_map(self) -> List[List[str]]:
         """Create the Clinic interior."""
+        return self.build_starting_town_modular_interior("clinic", "ClinicInterior")
         return self.make_practical_town_interior(
             rooms=[
                 (18, 13, 36, 18, [(27, 18), (18, 15), (36, 15), (27, 13)]),
@@ -5782,6 +6021,7 @@ class FarmGame(
 
     def make_town_hall_map(self) -> List[List[str]]:
         """Create the Town Hall interior."""
+        return self.build_starting_town_modular_interior("town_hall", "TownHallInterior")
         return self.make_practical_town_interior(
             rooms=[
                 (16, 13, 38, 18, [(27, 18), (16, 15), (38, 15), (27, 13)]),
@@ -5819,6 +6059,7 @@ class FarmGame(
 
     def make_market_row_map(self) -> List[List[str]]:
         """Create the Market Row interior."""
+        return self.build_starting_town_modular_interior("market_row", "MarketRowInterior")
         return self.make_practical_town_interior(
             rooms=[
                 (14, 13, 40, 18, [(27, 18), (14, 15), (40, 15), (27, 13)]),
@@ -7678,7 +7919,15 @@ class FarmGame(
                 return True
         return False
 
-    def wilderness_stream_actor_passable(self, chunk_x: int, chunk_y: int, x: int, y: int) -> bool:
+    def wilderness_stream_actor_passable(
+        self,
+        chunk_x: int,
+        chunk_y: int,
+        x: int,
+        y: int,
+        event_lookup: Optional[Dict[Tuple[int, int], Dict[str, object]]] = None,
+        seasonal_lookup: Optional[Dict[Tuple[int, int], Dict[str, object]]] = None,
+    ) -> bool:
         grid = self.wilderness_stream_map(chunk_x, chunk_y)
         if not grid or not (0 <= int(y) < len(grid) and 0 <= int(x) < len(grid[0])):
             return False
@@ -7690,8 +7939,16 @@ class FarmGame(
         }
         tile = str(grid[int(y)][int(x)])
         position = (int(x), int(y))
-        event = self.wilderness_event_visual_lookup(chunk_x, chunk_y, grid).get(position, {})
-        seasonal = self.wilderness_seasonal_surface_lookup(chunk_x, chunk_y, grid).get(position, {})
+        event = (
+            event_lookup.get(position, {})
+            if isinstance(event_lookup, dict)
+            else self.wilderness_event_visual_lookup(chunk_x, chunk_y, grid).get(position, {})
+        )
+        seasonal = (
+            seasonal_lookup.get(position, {})
+            if isinstance(seasonal_lookup, dict)
+            else self.wilderness_seasonal_surface_lookup(chunk_x, chunk_y, grid).get(position, {})
+        )
         if not event and seasonal.get("blocking"):
             return False
         if tile == "~" and self.wilderness_water_is_frozen_at(x, y, chunk_x, chunk_y):
@@ -10854,6 +11111,14 @@ class FarmGame(
 
             self.state.mine_combat_victories += 1
             self.state.mine_enemies_defeated += max(1, len(defeated))
+            if hasattr(self, "record_quest_event"):
+                for defeated_name in (defeated or [species]):
+                    self.record_quest_event(
+                        "defeat", target_name=str(defeated_name), target_id=str(defeated_name),
+                        target_tags=["enemy", "stronghold", "boss" if enemy.get("boss") else "standard"],
+                        amount=1, location=str(getattr(self.state, "location", "")),
+                        note=f"Defeated {defeated_name} at a wilderness stronghold.",
+                    )
             minutes = self.apply_combat_time_cost(result, "mine")
             profile = farmstead_combat_profile(self.state)
             progress_lines = list(level_lines)
@@ -11257,7 +11522,7 @@ class FarmGame(
         self.state.overworld_cursor_chunk_x = self.state.wilderness_chunk_x
         self.state.overworld_cursor_chunk_y = self.state.wilderness_chunk_y
         self.state.location = "WildernessOverworld"
-        self.set_message("Overworld travel: WASD/numpad move chunks, U/Z/Enter enter chunk, Esc cancel, R return to town.")
+        self.set_message("Overworld travel: WASD/numpad move chunks, U/Z/Enter enter, B/X/Esc/C/Q/Tab close, R town.")
 
     def cancel_wilderness_overworld(self):
         self.state.location = "Wilderness"
@@ -11677,8 +11942,10 @@ class FarmGame(
         lines.append(fit_text(region_key, VIEW_WIDTH))
         lines.append(fit_text(legend_one, VIEW_WIDTH))
         lines.append(fit_text(legend_two, VIEW_WIDTH))
-        controls = "WASD/Numpad Move | Enter Travel | Esc Close | R Town"
+        controls = "Move WASD/Num | Enter travel | R return to town"
+        close_controls = "Close B/X/Esc/Q/Tab"
         lines.append(colorize(fit_text(controls, VIEW_WIDTH).center(VIEW_WIDTH), C.UI_MUTED))
+        lines.append(colorize(fit_text(close_controls, VIEW_WIDTH).center(VIEW_WIDTH), C.UI_MUTED))
         while len(lines) < VIEW_HEIGHT:
             lines.append("")
         return [pad_visual(line, VIEW_WIDTH) for line in lines[:VIEW_HEIGHT]]
@@ -11692,10 +11959,10 @@ class FarmGame(
             self.overworld_enter_selected_chunk()
         elif key == "r":
             self.return_from_wilderness_to_town(emergency=True)
-        elif key in ["\x1b", "c", "q", "\t"]:
+        elif key in ["\x1b", "b", "c", "q", "x", "\t"]:
             self.cancel_wilderness_overworld()
         else:
-            self.set_message("Overworld map: WASD/numpad move cursor, U/Z/Enter enter, Esc/C/Q/Tab cancel, R return to town.")
+            self.set_message("Overworld map: WASD/numpad move, U/Z/Enter travel, B/X/Esc/C/Q/Tab close, R return to town.")
 
     def active_map(self) -> List[List[str]]:
         if self.state.location == "Town":
@@ -11765,8 +12032,9 @@ class FarmGame(
         return len(self.base_map)
 
     def camera_origin(self) -> Tuple[int, int]:
-        if not (self.on_farm() or self.on_town() or self.on_wilderness() or self.on_wilderness_cave() or self.on_wilderness_dungeon() or self.on_procedural_town_interior()):
-            return 0, 0
+        # Camera behavior is a property of map size, not location identity.
+        # This keeps authored, generated, custom, and future large interiors
+        # visible without every new location needing to join an allow-list.
         max_x = max(0, self.active_map_width() - VIEW_WIDTH)
         max_y = max(0, self.active_map_height() - VIEW_HEIGHT)
         cam_x = max(0, min(max_x, self.state.player_x - VIEW_WIDTH // 2))
@@ -11962,8 +12230,7 @@ class FarmGame(
 
     def transition_to_house(self):
         self.state.location = "HouseInterior"
-        self.state.player_x = 27
-        self.state.player_y = 14
+        self.state.player_x, self.state.player_y = self.authored_interior_entry_tile()
         self.state.facing = "UP"
         self.set_message("You entered your farmhouse.")
 
@@ -11982,6 +12249,34 @@ class FarmGame(
                         return nx, ny
         return max(1, min(self.active_map_width() - 2, x)), max(1, min(self.active_map_height() - 2, y))
 
+    def authored_interior_entry_tile(self) -> Tuple[int, int]:
+        """Spawn beside the exit door even when a map editor moved that door."""
+        grid = self.active_map()
+        walkable = {".", ",", ":", "|", "_"}
+        doors = [
+            (x, y)
+            for y, row in enumerate(grid)
+            for x, tile in enumerate(row)
+            if tile == "D"
+        ]
+        # A conventional south-edge door wins, but any valid edited doorway is
+        # accepted so authors may build entrances on another side.
+        for door_x, door_y in sorted(doors, key=lambda point: point[1], reverse=True):
+            candidates = (
+                (door_x, door_y - 1),
+                (door_x, door_y + 1),
+                (door_x - 1, door_y),
+                (door_x + 1, door_y),
+            )
+            for candidate_x, candidate_y in candidates:
+                if (
+                    0 <= candidate_y < len(grid)
+                    and 0 <= candidate_x < len(grid[candidate_y])
+                    and grid[candidate_y][candidate_x] in walkable
+                ):
+                    return candidate_x, candidate_y
+        return self.nearest_active_passable_tile(27, 18)
+
     def enter_authored_town_residence(self, residence_id: str) -> bool:
         residence_id = str(residence_id)
         residence = AUTHORED_TOWN_RESIDENCE_DATA.get(residence_id)
@@ -11990,7 +12285,7 @@ class FarmGame(
             return False
         self.state.current_authored_residence_id = residence_id
         self.state.location = "TownResidenceInterior"
-        self.state.player_x, self.state.player_y = self.nearest_active_passable_tile(27, 18)
+        self.state.player_x, self.state.player_y = self.authored_interior_entry_tile()
         self.state.facing = "UP"
         self.update_town_npcs(force_reanchor=True)
         self.set_message(f"You entered {residence.get('label', 'the residence')}.")
@@ -12009,8 +12304,16 @@ class FarmGame(
         if tile == "D":
             self.exit_authored_town_residence()
             return
+        furnishing = BUILDING_TEMPLATE_FURNISHING_DATA.get(str(tile))
+        if not isinstance(furnishing, dict):
+            furnishing = BUILDING_TEMPLATE_GENERIC_FIXTURE_DATA.get(str(tile))
+        if isinstance(furnishing, dict):
+            if self.use_functional_furniture(
+                building_template_functional_furniture_name(furnishing), x, y,
+            ):
+                return
         description = self.town_interior_tile_description(x, y)
-        self.set_message(description or "Nothing here needs your attention.")
+        self.set_message(description or "Uncatalogued residence fixture.")
 
     def enter_town_interior(self, location: str, message: str) -> bool:
         building_id = town_building_id_for_location(location)
@@ -12018,7 +12321,7 @@ class FarmGame(
             self.set_message(self.locked_town_building_message(building_id))
             return False
         self.state.location = location
-        self.state.player_x, self.state.player_y = self.nearest_active_passable_tile(27, 18)
+        self.state.player_x, self.state.player_y = self.authored_interior_entry_tile()
         self.state.facing = "UP"
         self.set_message(message)
         return True
@@ -12151,6 +12454,36 @@ class FarmGame(
     def house_object_key(self, x: int, y: int) -> str:
         return f"HouseInterior:{x},{y}"
 
+    def nearest_valid_house_object_position(
+        self, obj_name: str, preferred_x: int, preferred_y: int, rotation: int = 0,
+    ) -> Optional[Tuple[int, int]]:
+        """Find the closest legal farmhouse position for a displaced furnishing."""
+        surface = str(INFRASTRUCTURE_DATA.get(obj_name, {}).get("placement_surface", "floor"))
+        candidates = []
+        for y, row in enumerate(self.house_map):
+            for x, tile in enumerate(row):
+                if surface == "wall" and tile != "#":
+                    continue
+                if surface != "wall" and tile not in self.house_floor_tiles():
+                    continue
+                candidates.append((abs(x - preferred_x) + abs(y - preferred_y), y, x))
+        for _distance, y, x in sorted(candidates):
+            if self.can_place_object(obj_name, x, y, rotation=rotation)[0]:
+                return x, y
+        return None
+
+    def place_default_house_object(self, obj_name: str, x: int, y: int) -> bool:
+        """Place default furniture, relocating wall pieces for custom shells when needed."""
+        destination = (x, y)
+        if not self.can_place_object(obj_name, x, y)[0]:
+            if INFRASTRUCTURE_DATA.get(obj_name, {}).get("placement_surface") != "wall":
+                return False
+            destination = self.nearest_valid_house_object_position(obj_name, x, y) or ()
+        if not destination:
+            return False
+        self.set_placed_object(int(destination[0]), int(destination[1]), obj_name)
+        return True
+
     def ensure_default_house_furniture(self, preserve_existing: bool = True):
         """Place essential/default furniture as movable placed objects."""
         previous_location = self.state.location
@@ -12158,19 +12491,28 @@ class FarmGame(
         try:
             self.clear_builtin_house_furniture_tiles()
             existing_house_objects = {
-                key for key in self.state.placed_objects
+                key
+                for mapping in (self.state.placed_objects, self.state.placed_floor_objects)
+                for key in mapping
                 if isinstance(key, str) and key.startswith("HouseInterior:")
             }
 
             if not preserve_existing:
                 for key in list(existing_house_objects):
                     self.state.placed_objects.pop(key, None)
+                    self.state.placed_floor_objects.pop(key, None)
+                    self.state.placed_object_rotations.pop(key, None)
+                    self.state.placed_object_finishes.pop(key, None)
+                    self.state.placed_floor_object_rotations.pop(key, None)
+                    self.state.placed_floor_object_finishes.pop(key, None)
                 existing_house_objects = set()
 
             if preserve_existing and existing_house_objects:
                 # Make sure essential/upgrade furniture exists somewhere.
                 existing_names = {
-                    value for key, value in self.state.placed_objects.items()
+                    value
+                    for mapping in (self.state.placed_objects, self.state.placed_floor_objects)
+                    for key, value in mapping.items()
                     if isinstance(key, str) and key.startswith("HouseInterior:")
                 }
                 layout = self.default_house_furniture_layout()
@@ -12184,14 +12526,12 @@ class FarmGame(
                 for required_name in required_names:
                     if required_name not in existing_names and required_name in layout:
                         x, y = layout[required_name]
-                        if self.can_place_object(required_name, x, y)[0]:
-                            self.state.placed_objects[self.house_object_key(x, y)] = required_name
+                        if self.place_default_house_object(required_name, x, y):
                             existing_names.add(required_name)
                 return
 
             for name, (x, y) in self.default_house_furniture_layout().items():
-                if self.can_place_object(name, x, y)[0]:
-                    self.state.placed_objects[self.house_object_key(x, y)] = name
+                self.place_default_house_object(name, x, y)
         finally:
             self.state.location = previous_location
 
@@ -12201,29 +12541,77 @@ class FarmGame(
         previous_location = self.state.location
         self.state.location = "HouseInterior"
         try:
-            old_objects = {
-                key: value for key, value in self.state.placed_objects.items()
-                if isinstance(key, str) and key.startswith("HouseInterior:")
-            }
+            old_objects = []
+            for mapping in (self.state.placed_floor_objects, self.state.placed_objects):
+                for key, value in mapping.items():
+                    if isinstance(key, str) and key.startswith("HouseInterior:"):
+                        old_objects.append({
+                            "key": key,
+                            "name": value,
+                            "rotation": self.object_rotation_for_key(key, value),
+                            "finish": self.object_finish_for_key(key, value),
+                        })
             non_house = {
                 key: value for key, value in self.state.placed_objects.items()
                 if not (isinstance(key, str) and key.startswith("HouseInterior:"))
             }
+            non_house_floor = {
+                key: value for key, value in self.state.placed_floor_objects.items()
+                if not (isinstance(key, str) and key.startswith("HouseInterior:"))
+            }
 
-            self.house_map = self.make_house_map()
+            self.house_map = (
+                self.custom_building_builtin_override_grid("authored:make_house_map")
+                or self.make_house_map()
+            )
             self.clear_builtin_house_furniture_tiles()
             self.state.placed_objects = dict(non_house)
+            self.state.placed_floor_objects = dict(non_house_floor)
+            self.state.placed_object_rotations = {
+                key: normalize_furniture_rotation(rotation)
+                for key, rotation in self.state.placed_object_rotations.items()
+                if key in non_house and normalize_furniture_rotation(rotation)
+            }
+            self.state.placed_object_finishes = {
+                key: normalize_furniture_finish(finish)
+                for key, finish in self.state.placed_object_finishes.items()
+                if key in non_house and normalize_furniture_finish(finish) != "Natural"
+            }
+            self.state.placed_floor_object_rotations = {
+                key: normalize_furniture_rotation(rotation)
+                for key, rotation in self.state.placed_floor_object_rotations.items()
+                if key in non_house_floor and normalize_furniture_rotation(rotation)
+            }
+            self.state.placed_floor_object_finishes = {
+                key: normalize_furniture_finish(finish)
+                for key, finish in self.state.placed_floor_object_finishes.items()
+                if key in non_house_floor and normalize_furniture_finish(finish) != "Natural"
+            }
 
             if preserve_existing and old_objects:
-                for key, value in old_objects.items():
+                for record in old_objects:
+                    key = str(record["key"])
+                    value = str(record["name"])
                     try:
                         _, coords = key.split(":", 1)
                         x_str, y_str = coords.split(",", 1)
                         x, y = int(x_str), int(y_str)
                     except Exception:
                         continue
-                    if self.can_place_object(value, x, y)[0]:
-                        self.state.placed_objects[key] = value
+                    rotation = int(record.get("rotation", 0))
+                    destination = (x, y)
+                    if not self.can_place_object(value, x, y, rotation=rotation)[0]:
+                        if INFRASTRUCTURE_DATA.get(value, {}).get("placement_surface") == "wall":
+                            destination = self.nearest_valid_house_object_position(
+                                value, x, y, rotation,
+                            ) or ()
+                        else:
+                            destination = ()
+                    if destination:
+                        self.set_placed_object(
+                            int(destination[0]), int(destination[1]), value, rotation=rotation,
+                            finish=str(record.get("finish", "Natural")),
+                        )
 
             self.ensure_default_house_furniture(preserve_existing=True)
         finally:
@@ -12536,6 +12924,7 @@ class FarmGame(
                 "name": str(obj_name),
                 "x": int(x),
                 "y": int(y),
+                "rotation": self.object_rotation_for_key(str(key)),
                 "data": data,
                 "automation": automation,
                 "kind": str(automation.get("kind", "")),
@@ -12546,7 +12935,9 @@ class FarmGame(
         for obj in self.placed_objects_for_scope(scope, automation_only=False):
             obj_name = str(obj["name"])
             ax, ay = int(obj["x"]), int(obj["y"])
-            if (x, y) in self.object_footprint_tiles(obj_name, ax, ay):
+            if (x, y) in self.object_footprint_tiles(
+                obj_name, ax, ay, int(obj.get("rotation", 0)),
+            ):
                 return obj_name
         return None
 
@@ -13223,7 +13614,10 @@ class FarmGame(
 
         # Ensure house interior exists and built-in furniture has been converted to movable placed objects.
         if not hasattr(self, "house_map") or not isinstance(self.house_map, list):
-            self.house_map = self.make_house_map()
+            self.house_map = (
+                self.custom_building_builtin_override_grid("authored:make_house_map")
+                or self.make_house_map()
+            )
         if not hasattr(self.state, "house_upgrades") or self.state.house_upgrades is None:
             self.state.house_upgrades = []
         try:
@@ -13252,7 +13646,10 @@ class FarmGame(
                         self.state.placed_objects[key] = fixture_name
                 self.rebuild_house_for_current_upgrades(preserve_existing=True)
         except Exception:
-            self.house_map = self.make_house_map()
+            self.house_map = (
+                self.custom_building_builtin_override_grid("authored:make_house_map")
+                or self.make_house_map()
+            )
             self.ensure_default_house_furniture(preserve_existing=False)
 
         # Fixed town interiors are code-defined. Always regenerate them so older
@@ -13351,19 +13748,167 @@ class FarmGame(
         storage_x, storage_y = self.object_storage_position(x, y)
         return f"{self.current_object_location_key()}:{storage_x},{storage_y}"
 
-    def object_footprint_size(self, obj_name: str) -> Tuple[int, int]:
+    def object_placement_layer(self, obj_name: str) -> str:
+        return (
+            "floor"
+            if INFRASTRUCTURE_DATA.get(str(obj_name), {}).get("placement_layer") == "floor"
+            else "solid"
+        )
+
+    def placed_object_mapping(self, obj_name: str) -> Dict[str, str]:
+        if self.object_placement_layer(obj_name) == "floor":
+            return self.state.placed_floor_objects
+        return self.state.placed_objects
+
+    def placed_object_name_for_key(self, key: Optional[str]) -> str:
+        if not key:
+            return ""
+        key = str(key)
+        return str(
+            self.state.placed_objects.get(key)
+            or self.state.placed_floor_objects.get(key)
+            or ""
+        )
+
+    def object_rotation_for_key(self, key: Optional[str], obj_name: str = "") -> int:
+        if not key:
+            return 0
+        rotations = (
+            self.state.placed_floor_object_rotations
+            if self.object_placement_layer(obj_name or self.placed_object_name_for_key(key)) == "floor"
+            else self.state.placed_object_rotations
+        )
+        return normalize_furniture_rotation(
+            rotations.get(str(key), 0)
+        )
+
+    def set_object_rotation_for_key(self, key: str, obj_name: str, rotation: int) -> None:
+        rotations = (
+            self.state.placed_floor_object_rotations
+            if self.object_placement_layer(obj_name) == "floor"
+            else self.state.placed_object_rotations
+        )
+        normalized = normalize_furniture_rotation(rotation)
+        if furniture_is_rotatable(obj_name) and normalized:
+            rotations[str(key)] = normalized
+        else:
+            rotations.pop(str(key), None)
+
+    def object_finish_for_key(self, key: Optional[str], obj_name: str = "") -> str:
+        if not key:
+            return "Natural"
+        finishes = (
+            self.state.placed_floor_object_finishes
+            if self.object_placement_layer(obj_name or self.placed_object_name_for_key(key)) == "floor"
+            else self.state.placed_object_finishes
+        )
+        return normalize_furniture_finish(
+            finishes.get(str(key), "Natural")
+        )
+
+    def set_object_finish_for_key(self, key: str, obj_name: str, finish: str) -> None:
+        normalized = normalize_furniture_finish(finish)
+        finishes = (
+            self.state.placed_floor_object_finishes
+            if self.object_placement_layer(obj_name) == "floor"
+            else self.state.placed_object_finishes
+        )
+        if (
+            INFRASTRUCTURE_DATA.get(obj_name, {}).get("category") == "furniture"
+            and furniture_has_art(obj_name)
+            and normalized != "Natural"
+        ):
+            finishes[str(key)] = normalized
+        else:
+            finishes.pop(str(key), None)
+
+    def furniture_finish_color(self, finish: str, role: str) -> str:
+        palettes = {
+            "Whitewashed": {"wood": C.SNOW, "fabric": C.FLOOR_WARM, "linen": C.LIT, "paper": C.SNOW, "water": C.LIT, "accent": C.LAMP},
+            "Walnut": {"wood": C.SOIL_DRY, "fabric": C.PATH, "linen": C.FLOOR_WARM, "paper": C.FLOOR_WARM, "water": C.PATH, "accent": C.ROOF_COPPER},
+            "Cherry": {"wood": C.ROOF_RED, "fabric": C.RUG, "linen": C.FLOOR_WARM, "paper": C.FLOOR_WARM, "water": C.ROOF_RED, "accent": C.CROP_READY},
+            "Forest": {"wood": C.ROOF_GREEN, "fabric": C.FOREST, "linen": C.LIT, "paper": C.LIT, "water": C.FOREST, "accent": C.CROP_READY},
+            "Ocean": {"wood": C.ROOF_BLUE, "fabric": C.COAST, "linen": C.LIT, "paper": C.LIT, "water": C.COAST, "accent": C.WATER},
+            "Royal": {"wood": C.ROOF_PURPLE, "fabric": C.LANDMARK_RESEARCH, "linen": C.LIT, "paper": C.LIT, "water": C.ROOF_PURPLE, "accent": C.LAMP},
+        }
+        return palettes.get(normalize_furniture_finish(finish), {}).get(str(role), "")
+
+    def furniture_finish_sample_color(self, finish: str) -> str:
+        normalized = normalize_furniture_finish(finish)
+        return self.furniture_finish_color(normalized, "fabric") or C.WOOD
+
+    def object_footprint_size(self, obj_name: str, rotation: int = 0) -> Tuple[int, int]:
         data = INFRASTRUCTURE_DATA.get(obj_name, {})
         footprint = data.get("footprint", [1, 1])
         try:
             w = max(1, int(footprint[0]))
             h = max(1, int(footprint[1]))
-            return w, h
+            return (h, w) if normalize_furniture_rotation(rotation) % 2 else (w, h)
         except Exception:
             return 1, 1
 
-    def object_footprint_tiles(self, obj_name: str, x: int, y: int) -> List[Tuple[int, int]]:
-        w, h = self.object_footprint_size(obj_name)
+    def object_footprint_tiles(
+        self, obj_name: str, x: int, y: int, rotation: int = 0,
+    ) -> List[Tuple[int, int]]:
+        w, h = self.object_footprint_size(obj_name, rotation)
         return [(x + dx, y + dy) for dy in range(h) for dx in range(w)]
+
+    def object_cell_walkable(
+        self, obj_name: str, x: int, y: int, anchor_x: int, anchor_y: int,
+        rotation: int = 0,
+    ) -> bool:
+        if INFRASTRUCTURE_DATA.get(obj_name, {}).get("walkable", False):
+            return True
+        return bool(furniture_walkable_kind(
+            obj_name, int(x) - int(anchor_x), int(y) - int(anchor_y), rotation,
+        ))
+
+    def rotated_furniture_use_edges(self, obj_name: str, rotation: int = 0) -> Tuple[str, ...]:
+        edges = INFRASTRUCTURE_DATA.get(obj_name, {}).get("use_edges", [])
+        if not isinstance(edges, (list, tuple, set)):
+            return ()
+        order = ("north", "east", "south", "west")
+        aliases = {
+            "top": "north", "right": "east", "bottom": "south", "left": "west",
+        }
+        turns = normalize_furniture_rotation(rotation)
+        result = []
+        for edge in edges:
+            normalized = str(edge).strip().lower()
+            normalized = aliases.get(normalized, normalized)
+            if normalized in order:
+                result.append(order[(order.index(normalized) + turns) % 4])
+        return tuple(dict.fromkeys(result))
+
+    def furniture_accessible_from_player(
+        self, key: Optional[str], obj_name: str, target_x: int, target_y: int,
+    ) -> Tuple[bool, str]:
+        if (int(self.state.player_x), int(self.state.player_y)) == (int(target_x), int(target_y)):
+            _found_key, _found_name, anchor_x, anchor_y = self.placed_object_at(target_x, target_y)
+            rotation = self.object_rotation_for_key(key, obj_name)
+            if (
+                anchor_x is not None and anchor_y is not None
+                and furniture_walkable_kind(
+                    obj_name, int(target_x) - int(anchor_x), int(target_y) - int(anchor_y), rotation,
+                ) == "seat"
+            ):
+                return True, ""
+        allowed = self.rotated_furniture_use_edges(
+            obj_name, self.object_rotation_for_key(key, obj_name),
+        )
+        if not allowed:
+            return True, ""
+        dx = int(self.state.player_x) - int(target_x)
+        dy = int(self.state.player_y) - int(target_y)
+        approach = {
+            (0, -1): "north",
+            (1, 0): "east",
+            (0, 1): "south",
+            (-1, 0): "west",
+        }.get((dx, dy), "")
+        if approach in allowed:
+            return True, ""
+        return False, "/".join(edge.title() for edge in allowed)
 
     def parse_object_key(self, key: str) -> Optional[Tuple[str, int, int]]:
         try:
@@ -13376,18 +13921,28 @@ class FarmGame(
         except Exception:
             return None
 
-    def placed_object_at(self, x: int, y: int) -> Tuple[Optional[str], Optional[str], Optional[int], Optional[int]]:
+    def placed_object_at(
+        self, x: int, y: int, layer: Optional[str] = None,
+    ) -> Tuple[Optional[str], Optional[str], Optional[int], Optional[int]]:
         """Return anchor key, object name, anchor x, anchor y for the object covering this tile."""
         frame_lookup = getattr(self, "_frame_placed_object_lookup", None)
-        if isinstance(frame_lookup, dict):
+        if layer is None and isinstance(frame_lookup, dict):
             return frame_lookup.get((int(x), int(y)), (None, None, None, None))
+        mappings = []
+        if layer in (None, "solid"):
+            mappings.append(self.state.placed_objects)
+        if layer in (None, "floor"):
+            mappings.append(self.state.placed_floor_objects)
         storage_x, storage_y = self.object_storage_position(x, y)
         direct_key = self.obj_key(x, y)
-        if direct_key in self.state.placed_objects:
-            return direct_key, self.state.placed_objects[direct_key], x, y
+        for mapping in mappings:
+            if direct_key in mapping:
+                return direct_key, mapping[direct_key], x, y
         legacy_key = f"{storage_x},{storage_y}"
-        if (self.on_farm() or self.in_seamless_farm_district(x, y)) and legacy_key in self.state.placed_objects:
-            return legacy_key, self.state.placed_objects[legacy_key], x, y
+        if self.on_farm() or self.in_seamless_farm_district(x, y):
+            for mapping in mappings:
+                if legacy_key in mapping:
+                    return legacy_key, mapping[legacy_key], x, y
 
         current_location = self.current_object_location_key()
         residence_building = (
@@ -13396,37 +13951,40 @@ class FarmGame(
             and self.on_player_owned_procedural_residence()
             else None
         )
-        for key, obj_name in list(self.state.placed_objects.items()):
-            parsed = self.parse_object_key(key)
-            if not parsed:
-                continue
-            location, ax, ay = parsed
-            if location != current_location:
-                continue
-            footprint = self.object_footprint_tiles(obj_name, ax, ay)
-            if residence_building:
-                source_w, source_h = self.procedural_town_interior_source_dimensions(residence_building)
-                side = self.procedural_town_building_door_side(residence_building)
-                display_footprint = {
-                    self.procedural_town_orient_position(px, py, source_w, source_h, side)
-                    for px, py in footprint
-                }
-                if (x, y) in display_footprint:
-                    display_ax, display_ay = self.procedural_town_orient_position(ax, ay, source_w, source_h, side)
-                    return key, obj_name, display_ax, display_ay
-            elif current_location == "Farm" and self.on_wilderness():
-                if (storage_x, storage_y) in footprint:
-                    anchor_world_x, anchor_world_y = self.home_world_world_for_farm_position(ax, ay)
-                    anchor_chunk_x, anchor_chunk_y, display_ax, display_ay = self.home_world_chunk_from_world(
-                        anchor_world_x, anchor_world_y,
-                    )
-                    if (
-                        anchor_chunk_x == int(self.state.wilderness_chunk_x)
-                        and anchor_chunk_y == int(self.state.wilderness_chunk_y)
-                    ):
+        for mapping in mappings:
+            for key, obj_name in list(mapping.items()):
+                parsed = self.parse_object_key(key)
+                if not parsed:
+                    continue
+                location, ax, ay = parsed
+                if location != current_location:
+                    continue
+                footprint = self.object_footprint_tiles(
+                    obj_name, ax, ay, self.object_rotation_for_key(key, obj_name),
+                )
+                if residence_building:
+                    source_w, source_h = self.procedural_town_interior_source_dimensions(residence_building)
+                    side = self.procedural_town_building_door_side(residence_building)
+                    display_footprint = {
+                        self.procedural_town_orient_position(px, py, source_w, source_h, side)
+                        for px, py in footprint
+                    }
+                    if (x, y) in display_footprint:
+                        display_ax, display_ay = self.procedural_town_orient_position(ax, ay, source_w, source_h, side)
                         return key, obj_name, display_ax, display_ay
-            elif (x, y) in footprint:
-                return key, obj_name, ax, ay
+                elif current_location == "Farm" and self.on_wilderness():
+                    if (storage_x, storage_y) in footprint:
+                        anchor_world_x, anchor_world_y = self.home_world_world_for_farm_position(ax, ay)
+                        anchor_chunk_x, anchor_chunk_y, display_ax, display_ay = self.home_world_chunk_from_world(
+                            anchor_world_x, anchor_world_y,
+                        )
+                        if (
+                            anchor_chunk_x == int(self.state.wilderness_chunk_x)
+                            and anchor_chunk_y == int(self.state.wilderness_chunk_y)
+                        ):
+                            return key, obj_name, display_ax, display_ay
+                elif (x, y) in footprint:
+                    return key, obj_name, ax, ay
         return None, None, None, None
 
     def build_frame_placed_object_lookup(self) -> Dict[Tuple[int, int], Tuple[str, str, int, int]]:
@@ -13439,59 +13997,88 @@ class FarmGame(
             and self.on_player_owned_procedural_residence()
             else None
         )
-        for key, obj_name in list(self.state.placed_objects.items()):
-            parsed = self.parse_object_key(key)
-            if not parsed:
-                continue
-            location, ax, ay = parsed
-            if location != current_location:
-                continue
-            footprint = self.object_footprint_tiles(obj_name, ax, ay)
-            if residence_building:
-                source_w, source_h = self.procedural_town_interior_source_dimensions(residence_building)
-                side = self.procedural_town_building_door_side(residence_building)
-                display_ax, display_ay = self.procedural_town_orient_position(ax, ay, source_w, source_h, side)
-                positions = [
-                    self.procedural_town_orient_position(px, py, source_w, source_h, side)
-                    for px, py in footprint
-                ]
-            elif current_location == "Farm" and self.on_wilderness():
-                positions = []
-                display_ax = display_ay = -1
-                for px, py in footprint:
-                    world_x, world_y = self.home_world_world_for_farm_position(px, py)
-                    chunk_x, chunk_y, local_x, local_y = self.home_world_chunk_from_world(world_x, world_y)
-                    if (
-                        chunk_x == int(self.state.wilderness_chunk_x)
-                        and chunk_y == int(self.state.wilderness_chunk_y)
-                    ):
-                        positions.append((local_x, local_y))
-                    if (px, py) == (ax, ay):
-                        display_ax, display_ay = local_x, local_y
-            else:
-                display_ax, display_ay = int(ax), int(ay)
-                positions = [(int(px), int(py)) for px, py in footprint]
-            for position in positions:
-                lookup.setdefault(position, (str(key), str(obj_name), display_ax, display_ay))
+        layered_objects = (
+            list(self.state.placed_floor_objects.items()),
+            list(self.state.placed_objects.items()),
+        )
+        for layer_index, objects in enumerate(layered_objects):
+            for key, obj_name in objects:
+                parsed = self.parse_object_key(key)
+                if not parsed:
+                    continue
+                location, ax, ay = parsed
+                if location != current_location:
+                    continue
+                footprint = self.object_footprint_tiles(
+                    obj_name, ax, ay, self.object_rotation_for_key(key, obj_name),
+                )
+                if residence_building:
+                    source_w, source_h = self.procedural_town_interior_source_dimensions(residence_building)
+                    side = self.procedural_town_building_door_side(residence_building)
+                    display_ax, display_ay = self.procedural_town_orient_position(ax, ay, source_w, source_h, side)
+                    positions = [
+                        self.procedural_town_orient_position(px, py, source_w, source_h, side)
+                        for px, py in footprint
+                    ]
+                elif current_location == "Farm" and self.on_wilderness():
+                    positions = []
+                    display_ax = display_ay = -1
+                    for px, py in footprint:
+                        world_x, world_y = self.home_world_world_for_farm_position(px, py)
+                        chunk_x, chunk_y, local_x, local_y = self.home_world_chunk_from_world(world_x, world_y)
+                        if (
+                            chunk_x == int(self.state.wilderness_chunk_x)
+                            and chunk_y == int(self.state.wilderness_chunk_y)
+                        ):
+                            positions.append((local_x, local_y))
+                        if (px, py) == (ax, ay):
+                            display_ax, display_ay = local_x, local_y
+                else:
+                    display_ax, display_ay = int(ax), int(ay)
+                    positions = [(int(px), int(py)) for px, py in footprint]
+                for position in positions:
+                    # Floor coverings are indexed first; solid furnishings replace
+                    # them visually anywhere the two layers overlap.
+                    if layer_index == 0:
+                        lookup.setdefault(position, (str(key), str(obj_name), display_ax, display_ay))
+                    else:
+                        lookup[position] = (str(key), str(obj_name), display_ax, display_ay)
         return lookup
 
     def get_placed_object(self, x: int, y: int) -> Optional[str]:
         _key, obj_name, _ax, _ay = self.placed_object_at(x, y)
         return obj_name
 
-    def set_placed_object(self, x: int, y: int, obj_name: str):
+    def set_placed_object(
+        self, x: int, y: int, obj_name: str, rotation: int = 0,
+        finish: str = "Natural",
+    ):
         # Only the anchor tile is stored. The footprint is resolved dynamically.
-        self.state.placed_objects[self.obj_key(x, y)] = obj_name
+        key = self.obj_key(x, y)
+        self.placed_object_mapping(obj_name)[key] = obj_name
+        self.set_object_rotation_for_key(key, obj_name, rotation)
+        self.set_object_finish_for_key(key, obj_name, finish)
 
     def remove_placed_object(self, x: int, y: int):
         key, obj_name, _ax, _ay = self.placed_object_at(x, y)
         if key:
             self.clear_placed_object_state(key, obj_name or "")
-            self.state.placed_objects.pop(key, None)
+            self.placed_object_mapping(obj_name or "").pop(key, None)
             return
-        self.state.placed_objects.pop(self.obj_key(x, y), None)
+        direct_key = self.obj_key(x, y)
+        self.state.placed_objects.pop(direct_key, None)
+        self.state.placed_floor_objects.pop(direct_key, None)
+        self.state.placed_object_rotations.pop(direct_key, None)
+        self.state.placed_object_finishes.pop(direct_key, None)
+        self.state.placed_floor_object_rotations.pop(direct_key, None)
+        self.state.placed_floor_object_finishes.pop(direct_key, None)
         if self.on_farm():
             self.state.placed_objects.pop(f"{x},{y}", None)
+            self.state.placed_floor_objects.pop(f"{x},{y}", None)
+            self.state.placed_object_rotations.pop(f"{x},{y}", None)
+            self.state.placed_object_finishes.pop(f"{x},{y}", None)
+            self.state.placed_floor_object_rotations.pop(f"{x},{y}", None)
+            self.state.placed_floor_object_finishes.pop(f"{x},{y}", None)
 
     def can_hold_objects_here(self) -> bool:
         return (
@@ -13523,9 +14110,18 @@ class FarmGame(
             self.set_message(f"{obj_name} has attached state. Use Tab > Farm & Home > Build Mode to move it safely.")
             return False
 
+        rotation = self.object_rotation_for_key(key, obj_name)
+        finish = self.object_finish_for_key(key, obj_name)
         self.remove_placed_object(x, y)
         self.state.held_object = obj_name
-        self.autosave_with_message(f"Picked up {obj_name}. Press Z/Enter to place it, or X to store it.")
+        self.state.held_object_rotation = rotation
+        self.state.held_object_finish = finish
+        rotate_hint = " R rotates it." if furniture_is_rotatable(obj_name) else ""
+        finish_hint = " C changes its finish." if furniture_has_art(obj_name) else ""
+        self.autosave_with_message(
+            f"Picked up {finish.lower()} {obj_name}. Press Z/Enter to place it, or X to store it."
+            f"{rotate_hint}{finish_hint}"
+        )
         return True
 
     def store_held_object(self):
@@ -13535,6 +14131,8 @@ class FarmGame(
             return False
         self.state.inventory[obj_name] = self.state.inventory.get(obj_name, 0) + 1
         self.state.held_object = None
+        self.state.held_object_rotation = 0
+        self.state.held_object_finish = "Natural"
         self.autosave_with_message(f"Stored {obj_name} in inventory.")
         return True
 
@@ -13548,14 +14146,51 @@ class FarmGame(
             return False
 
         x, y = self.front_tile_pos()
-        ok, reason = self.can_place_object(obj_name, x, y)
+        rotation = normalize_furniture_rotation(self.state.held_object_rotation)
+        finish = normalize_furniture_finish(self.state.held_object_finish)
+        ok, reason = self.can_place_object(obj_name, x, y, rotation=rotation)
         if not ok:
             self.set_message(f"Cannot place {obj_name}: {reason}.")
             return False
 
-        self.set_placed_object(x, y, obj_name)
+        self.set_placed_object(x, y, obj_name, rotation=rotation, finish=finish)
         self.state.held_object = None
+        self.state.held_object_rotation = 0
+        self.state.held_object_finish = "Natural"
         self.autosave_with_message(f"Placed {obj_name}.")
+        return True
+
+    def rotate_held_object(self) -> bool:
+        obj_name = self.state.held_object
+        if not obj_name:
+            return False
+        if not furniture_has_art(obj_name):
+            self.set_message(f"{obj_name} does not have customizable materials.")
+            return False
+        if not furniture_is_rotatable(obj_name):
+            self.set_message(f"{obj_name} does not need rotating.")
+            return False
+        self.state.held_object_rotation = (int(self.state.held_object_rotation) + 1) % 4
+        width, height = self.object_footprint_size(obj_name, self.state.held_object_rotation)
+        self.set_message(f"Rotated {obj_name} clockwise. Footprint: {width}x{height}.")
+        self.invalidate_draw_cache()
+        return True
+
+    def cycle_held_object_finish(self) -> bool:
+        obj_name = self.state.held_object
+        if not obj_name:
+            return False
+        if not furniture_has_art(obj_name):
+            self.set_message(f"{obj_name} does not have customizable materials.")
+            return False
+        finishes = tuple(FURNITURE_FINISHES)
+        current = normalize_furniture_finish(self.state.held_object_finish)
+        index = finishes.index(current) if current in finishes else 0
+        self.state.held_object_finish = finishes[(index + 1) % len(finishes)]
+        self.set_message(
+            f"{obj_name} finish: {self.state.held_object_finish}. Press C to cycle again."
+        )
+        self.invalidate_draw_cache()
         return True
 
     def handle_x_object_key(self):
@@ -13572,6 +14207,7 @@ class FarmGame(
         ay: Optional[int] = None,
         *,
         storage_coordinates: bool = False,
+        rotation: Optional[int] = None,
     ) -> str:
         data = INFRASTRUCTURE_DATA.get(obj_name, {})
         symbol = data.get("symbol", "*")
@@ -13633,43 +14269,47 @@ class FarmGame(
         if category != "furniture":
             return colorize(symbol, C.INFRA)
 
-        patterns = {
-            "Bed": ["ooo", "==="],
-            "Wooden Table": ["[]"],
-            "Bookshelf": ["L", "L"],
-            "Decorative Rug": ["/-\\", "\\-/"],
-            "Dresser": ["[]"],
-            "Kitchen Counter": ["[==]"],
-            "Couch": ["[=]"],
-            "Large Rug": ["/---\\", "|...|", "\\---/"],
-            "Wash Basin": ["()"],
-            "Pantry": ["[]"],
-            "Fireplace": ["[F]"],
-            "Writing Desk": ["[_"],
-            "Wardrobe": ["[]"],
-            "Room Divider": ["|", "|"],
-            "Crib": ["[]"],
-            "Child Bed": ["=="],
-            "Toy Shelf": ["*"],
-            "Study Desk": ["[_"],
-            "Family Table": ["[+]"],
-            "Keepsake Chest": ["[]"],
-            "Blackjack Table": ["[1]"],
-            "Hold'em Table": ["[2]"],
-            "Hearts Table": ["[3]"],
-            "Solitaire Table": ["[4]"],
-            "Checkers Table": ["[5]"],
-            "Chess Table": ["[6]"],
-            "Mancala Board": ["[7]"],
-            "Royal Game of Ur Board": ["[8]"],
-        }
+        art_role = ""
+        object_key: Optional[str] = None
         if x is not None and y is not None and ax is not None and ay is not None:
-            pattern = patterns.get(obj_name)
-            if pattern:
-                ox = int(x) - int(ax)
-                oy = int(y) - int(ay)
-                if 0 <= oy < len(pattern) and 0 <= ox < len(pattern[oy]):
-                    symbol = pattern[oy][ox]
+            object_key = (
+                f"Farm:{int(ax)},{int(ay)}"
+                if storage_coordinates
+                else self.placed_object_at(int(x), int(y))[0]
+            )
+            if rotation is None:
+                rotation = self.object_rotation_for_key(object_key, obj_name)
+            art_cell = furniture_art_cell(
+                obj_name,
+                int(x) - int(ax),
+                int(y) - int(ay),
+                bool(getattr(self.state, "detailed_glyphs_enabled", True)),
+                normalize_furniture_rotation(rotation),
+            )
+            if art_cell:
+                symbol, art_role = art_cell
+
+        source_art_symbol = str(symbol)[:1]
+        is_catalog_furniture = bool(data.get("catalog_item"))
+        if is_catalog_furniture:
+            detailed_furniture = bool(
+                getattr(self.state, "detailed_glyphs_enabled", True)
+            )
+            visual_cell = None
+            if x is not None and y is not None and ax is not None and ay is not None:
+                visual_cell = furniture_display_cell(
+                    obj_name,
+                    int(x) - int(ax),
+                    int(y) - int(ay),
+                    detailed_furniture,
+                    normalize_furniture_rotation(rotation),
+                )
+            symbol = visual_cell or furniture_display_glyph(
+                source_art_symbol, art_role, detailed_furniture,
+            )
+            art_role = furniture_display_material_role(
+                obj_name, source_art_symbol, art_role,
+            )
 
         color = {
             "Bed": C.PLAYER,
@@ -13713,10 +14353,103 @@ class FarmGame(
             "Mancala Board": C.WOOD,
             "Royal Game of Ur Board": C.LAMP,
         }.get(obj_name, C.INFRA)
+        art_colors = {
+            "wood": C.WOOD,
+            "linen": C.SNOW,
+            "fabric": C.HOUSE,
+            "paper": C.SNOW,
+            "accent": C.CROP_READY,
+            "stone": C.STONE,
+            "water": C.WATER,
+            "fire": C.LAMP,
+            "shop": C.SHOP,
+        }
+        if art_role in art_colors:
+            color = art_colors[art_role]
+        if is_catalog_furniture:
+            color = self.catalog_furniture_color({
+                "name": obj_name,
+                "glyph": source_art_symbol,
+                "material_role": art_role,
+                "collection": data.get("catalog_collection", "Hearthwood"),
+            })
+        finish_color = self.furniture_finish_color(
+            self.object_finish_for_key(object_key, obj_name), art_role,
+        )
+        if finish_color:
+            color = finish_color
+        if obj_name == "Television" and object_key:
+            television_state = getattr(self.state, "furniture_states", {}).get(
+                f"placed:{object_key}:Television", {}
+            )
+            if not isinstance(television_state, dict) or not bool(
+                television_state.get("powered_on", False)
+            ):
+                color = C.FLOOR_SHADOW
+            else:
+                color = {
+                    "weather": C.WATER,
+                    "news": C.SNOW,
+                    "cooking": C.LAMP,
+                    "adventure": C.GRASS,
+                    "family": C.ROOF_RED,
+                    "entertainment": C.ROOF_PURPLE,
+                }.get(str(television_state.get("channel", "weather")), C.WATER)
+        if furniture_action_id(obj_name, data) == "light" and object_key:
+            light_state = getattr(self.state, "furniture_states", {}).get(
+                f"placed:{object_key}:{obj_name}", {}
+            )
+            if isinstance(light_state, dict) and not bool(light_state.get("light_on", True)):
+                color = C.FLOOR_SHADOW
+        if furniture_action_id(obj_name, data) == "privacy" and object_key:
+            divider_state = getattr(self.state, "furniture_states", {}).get(
+                f"placed:{object_key}:{obj_name}", {}
+            )
+            if isinstance(divider_state, dict) and bool(divider_state.get("open", False)):
+                symbol = "╱"
+                color = C.FLOOR_SHADOW
+        if bool(getattr(self.state, "high_contrast_enabled", False)) and art_role:
+            color = C.SERVICE
         return colorize(symbol, color)
 
-    def footprint_label(self, obj_name: str) -> str:
-        w, h = self.object_footprint_size(obj_name)
+    def render_held_object_preview(
+        self,
+        obj_name: str,
+        x: int,
+        y: int,
+        anchor_x: int,
+        anchor_y: int,
+        valid: bool,
+        rotation: Optional[int] = None,
+    ) -> str:
+        if rotation is None:
+            rotation = normalize_furniture_rotation(self.state.held_object_rotation)
+        art_cell = furniture_art_cell(
+            obj_name,
+            int(x) - int(anchor_x),
+            int(y) - int(anchor_y),
+            bool(getattr(self.state, "detailed_glyphs_enabled", True)),
+            normalize_furniture_rotation(rotation),
+        )
+        if art_cell:
+            glyph = art_cell[0]
+            if INFRASTRUCTURE_DATA.get(obj_name, {}).get("catalog_item"):
+                glyph = furniture_display_cell(
+                    obj_name,
+                    int(x) - int(anchor_x),
+                    int(y) - int(anchor_y),
+                    bool(getattr(self.state, "detailed_glyphs_enabled", True)),
+                    normalize_furniture_rotation(rotation),
+                ) or furniture_display_glyph(
+                    glyph, art_cell[1],
+                    bool(getattr(self.state, "detailed_glyphs_enabled", True)),
+                )
+        else:
+            glyph = "X" if (int(x), int(y)) == (int(anchor_x), int(anchor_y)) else "x"
+        return colorize(glyph, C.PLACEMENT if valid else C.PLACEMENT_BAD)
+
+    def footprint_label(self, obj_name: str, rotation: int = 0) -> str:
+        w, h = self.object_footprint_size(obj_name, rotation)
         return f"{w}x{h}" if (w, h) != (1, 1) else "1 tile"
 
     def can_place_object(
@@ -13725,14 +14458,17 @@ class FarmGame(
         x: int,
         y: int,
         ignore_object_key: Optional[str] = None,
+        rotation: int = 0,
     ) -> Tuple[bool, str]:
         if not self.in_active_bounds(x, y):
             return False, "out of bounds"
 
         data = INFRASTRUCTURE_DATA.get(obj_name, {})
         category = data.get("category", "infrastructure")
+        placement_layer = self.object_placement_layer(obj_name)
+        placement_surface = str(data.get("placement_surface", "floor"))
         place_locations = data.get("place_locations")
-        footprint_tiles = self.object_footprint_tiles(obj_name, x, y)
+        footprint_tiles = self.object_footprint_tiles(obj_name, x, y, rotation)
         owned_town_home = (
             hasattr(self, "on_player_owned_procedural_residence")
             and self.on_player_owned_procedural_residence()
@@ -13751,21 +14487,45 @@ class FarmGame(
         if category == "furniture" or (category == "storage" and (self.on_house() or owned_town_home)):
             if not (self.on_house() or owned_town_home):
                 return False, "furniture goes inside a home you own"
+            opposite_mapping = (
+                self.state.placed_objects
+                if placement_layer == "floor"
+                else self.state.placed_floor_objects
+            )
+            if self.obj_key(x, y) in opposite_mapping:
+                return False, "move the anchor one tile so both layers can be edited"
             floor_map = self.house_map if self.on_house() else self.active_map()
             for tx, ty in footprint_tiles:
                 if not self.in_active_bounds(tx, ty):
                     return False, "footprint out of bounds"
-                placed_key, _placed_name, _placed_x, _placed_y = self.placed_object_at(tx, ty)
+                placed_key, _placed_name, _placed_x, _placed_y = self.placed_object_at(
+                    tx, ty, layer=placement_layer,
+                )
                 if placed_key and placed_key != ignore_object_key:
                     return False, "something is already placed there"
                 tile = floor_map[ty][tx]
+                if placement_surface == "wall":
+                    if tile != "#":
+                        return False, "mount it on a wall"
+                    has_room_side = any(
+                        0 <= ny < len(floor_map)
+                        and 0 <= nx < len(floor_map[ny])
+                        and floor_map[ny][nx] in self.house_floor_tiles()
+                        for nx, ny in (
+                            (tx, ty - 1), (tx + 1, ty),
+                            (tx, ty + 1), (tx - 1, ty),
+                        )
+                    )
+                    if not has_room_side:
+                        return False, "choose a wall facing usable room space"
+                    continue
                 if tile not in self.house_floor_tiles():
                     return False, "place it on open floor"
-                if self.travel_follower_at(tx, ty):
+                if placement_layer != "floor" and self.travel_follower_at(tx, ty):
                     return False, "your follower is standing there"
-                if owned_town_home and self.procedural_town_resident_at(tx, ty):
+                if placement_layer != "floor" and owned_town_home and self.procedural_town_resident_at(tx, ty):
                     return False, "someone is standing there"
-                if tx == self.state.player_x and ty == self.state.player_y:
+                if placement_layer != "floor" and tx == self.state.player_x and ty == self.state.player_y:
                     return False, "you are standing there"
             return True, "ok"
 
@@ -14017,6 +14777,83 @@ class FarmGame(
             ambient,
             high_contrast,
         )
+        fixture = BUILDING_TEMPLATE_FURNISHING_DATA.get(tile)
+        if not isinstance(fixture, dict):
+            fixture = BUILDING_TEMPLATE_GENERIC_FIXTURE_DATA.get(tile)
+        if isinstance(fixture, dict):
+            fixture_name = self.town_semantic_furniture_name(tile) if self.on_town_interior() else ""
+            if not fixture_name:
+                fixture_name = building_template_functional_furniture_name(fixture)
+            fixture_action = furniture_action_id(
+                fixture_name, INFRASTRUCTURE_DATA.get(fixture_name, {}),
+            )
+            if bool(getattr(self.state, "detailed_glyphs_enabled", True)):
+                single_cell_visual = furniture_display_cell(fixture_name, 0, 0, True, 0)
+                if (
+                    single_cell_visual
+                    and furniture_display_cell(fixture_name, 1, 0, True, 0) is None
+                    and furniture_display_cell(fixture_name, 0, 1, True, 0) is None
+                ):
+                    display_tile = single_cell_visual
+                else:
+                    display_tile = {
+                    "sleep": "○",
+                    "seat": "▰",
+                    "cook": "♨",
+                    "work": "⚒",
+                    "read": "▥",
+                    "storage": "▦",
+                    "bath": "◉",
+                    "mirror": "◉",
+                    "hearth": "♨",
+                    "table": "◆",
+                    "light": "✦",
+                    "plant": "♣",
+                    "art": "◇",
+                    "rug": "◇",
+                    "calendar": "▧",
+                    "forecast": "▣",
+                    "family": "○",
+                    "keepsake": "◆",
+                    "outfit": "▥",
+                    "game": "◆",
+                    "records": "▧",
+                    "service": "●",
+                    "animal_care": "♣",
+                    }.get(fixture_action, display_tile)
+            if not override_color:
+                color = {
+                    "sleep": C.PLAYER,
+                    "seat": C.HOUSE,
+                    "cook": C.LAMP,
+                    "work": C.WOOD,
+                    "read": C.SNOW,
+                    "storage": C.WOOD,
+                    "bath": C.WATER,
+                    "mirror": C.WATER,
+                    "hearth": C.LAMP,
+                    "table": C.WOOD,
+                    "light": C.LAMP,
+                    "plant": C.GRASS,
+                    "art": C.PLACEMENT,
+                    "rug": C.RUG,
+                    "calendar": C.SNOW,
+                    "forecast": C.WATER,
+                    "family": C.PLAYER,
+                    "keepsake": C.CROP_READY,
+                    "outfit": C.WOOD,
+                    "game": C.CROP_READY,
+                    "records": C.SNOW,
+                    "service": C.SERVICE,
+                    "animal_care": C.CROP_READY,
+                }.get(fixture_action, color)
+            if high_contrast:
+                color = C.SERVICE
+            if fixture_action == "light":
+                fixture_key = self.furniture_state_key(fixture_name, x, y)
+                fixture_state = getattr(self.state, "furniture_states", {}).get(fixture_key, {})
+                light_on = not isinstance(fixture_state, dict) or bool(fixture_state.get("light_on", True))
+                color = C.SERVICE if high_contrast else (C.LAMP if light_on else C.FLOOR_SHADOW)
         hour = int(getattr(self.state, "hour", 12)) % 24
         if ambient and not high_contrast and tile in {".", ":", ","} and not (7 <= hour < 19):
             light_cache = getattr(self, "_interior_light_position_cache", None)
@@ -14028,7 +14865,188 @@ class FarmGame(
                 light_cache[cache_key] = interior_light_positions(tile_map, 4)
             if (int(x), int(y)) in light_cache[cache_key]:
                 color = C.LIT
+        if ambient and not high_contrast and tile in {".", ":", ","}:
+            if any(
+                abs(int(x) - light_x) <= 4 and abs(int(y) - light_y) <= 4
+                for light_x, light_y in self.active_furniture_light_positions()
+            ):
+                color = C.LIT
         return colorize(display_tile, color)
+
+    def active_furniture_light_positions(self) -> Tuple[Tuple[int, int], ...]:
+        cached = getattr(self, "_frame_active_furniture_lights", None)
+        if isinstance(cached, tuple):
+            return cached
+        positions = set()
+        if self.on_procedural_town_interior():
+            plan = self.current_procedural_town_plan() or {}
+            building = self.current_procedural_town_building() or {}
+            floor = int(getattr(self.state, "current_procedural_building_floor", 0) or 0)
+            lookup = getattr(self, "_procedural_town_catalog_furniture_cache", {}).get(
+                (str(plan.get("id", "")), str(building.get("id", "")), floor), {}
+            )
+        else:
+            lookup = getattr(self, "_starting_town_catalog_furniture_cache", {}).get(
+                str(self.state.location), {}
+            )
+        seen_keys = set()
+        for (cell_x, cell_y), record in dict(lookup or {}).items():
+            if not isinstance(record, dict):
+                continue
+            name = str(record.get("name", "Furniture"))
+            if furniture_action_id(name, INFRASTRUCTURE_DATA.get(name, {})) != "light":
+                continue
+            key = self.furniture_state_key(name, cell_x, cell_y, record)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            state_record = getattr(self.state, "furniture_states", {}).get(key, {})
+            if not isinstance(state_record, dict) or bool(state_record.get("light_on", True)):
+                positions.add((int(cell_x), int(cell_y)))
+        tile_map = self.active_map()
+        for fixture_y, row in enumerate(tile_map):
+            for fixture_x, tile in enumerate(row):
+                fixture = BUILDING_TEMPLATE_FURNISHING_DATA.get(str(tile))
+                if not isinstance(fixture, dict):
+                    fixture = BUILDING_TEMPLATE_GENERIC_FIXTURE_DATA.get(str(tile))
+                if not isinstance(fixture, dict):
+                    continue
+                name = self.town_semantic_furniture_name(str(tile)) if self.on_town_interior() else ""
+                if not name:
+                    name = building_template_functional_furniture_name(fixture)
+                if furniture_action_id(name, INFRASTRUCTURE_DATA.get(name, {})) != "light":
+                    continue
+                key = self.furniture_state_key(name, fixture_x, fixture_y)
+                state_record = getattr(self.state, "furniture_states", {}).get(key, {})
+                if not isinstance(state_record, dict) or bool(state_record.get("light_on", True)):
+                    positions.add((fixture_x, fixture_y))
+        if self.on_house() or (
+            hasattr(self, "on_player_owned_procedural_residence")
+            and self.on_player_owned_procedural_residence()
+        ):
+            for mapping in (self.state.placed_objects, self.state.placed_floor_objects):
+                for object_key, name in mapping.items():
+                    if furniture_action_id(name, INFRASTRUCTURE_DATA.get(name, {})) != "light":
+                        continue
+                    parsed = self.parse_object_key(str(object_key))
+                    if not parsed or parsed[0] != self.current_object_location_key():
+                        continue
+                    _scope, light_x, light_y = parsed
+                    key = f"placed:{object_key}:{name}"
+                    state_record = getattr(self.state, "furniture_states", {}).get(key, {})
+                    if not isinstance(state_record, dict) or bool(state_record.get("light_on", True)):
+                        positions.add((int(light_x), int(light_y)))
+        cached = tuple(sorted(positions))
+        self._frame_active_furniture_lights = cached
+        return cached
+
+    def catalog_furniture_color(
+        self, catalog_furniture: Dict[str, object]
+    ) -> str:
+        name = str(catalog_furniture.get("name", "Furniture"))
+        source_glyph = str(catalog_furniture.get("glyph", " "))[:1]
+        material_role = furniture_display_material_role(
+            name,
+            source_glyph,
+            catalog_furniture.get("material_role", "wood"),
+        )
+        collection = str(catalog_furniture.get("collection", "Hearthwood"))
+        palettes = {
+            "Hearthwood": {
+                "wood": C.WOOD,
+                "paper": C.FLOOR_WARM,
+                "linen": C.SNOW,
+                "fabric": C.RUG,
+                "water": C.WATER,
+                "stone": C.STONE,
+                "fire": C.HOSTILE,
+                "accent": C.LAMP,
+                "plant": C.GRASS,
+            },
+            "Coastal": {
+                "wood": C.ROOF_CREAM,
+                "paper": C.SNOW,
+                "linen": C.PLAYER,
+                "fabric": C.COAST,
+                "water": C.WATER,
+                "stone": C.FLOOR_SHADOW,
+                "fire": C.HOSTILE,
+                "accent": C.COAST,
+                "plant": C.GRASS,
+            },
+            "Manor": {
+                "wood": C.ROOF_PURPLE,
+                "paper": C.FLOOR_WARM,
+                "linen": C.SNOW,
+                "fabric": C.ROOF_RED,
+                "water": C.WATER,
+                "stone": C.DUNGEON_FLOOR,
+                "fire": C.HOSTILE,
+                "accent": C.LAMP,
+                "plant": C.GRASS,
+            },
+        }
+        palette = palettes.get(collection, palettes["Hearthwood"])
+        furniture_color = palette.get(material_role, palette["wood"])
+        if source_glyph == "f":
+            furniture_color = C.GRASS
+        if bool(getattr(self.state, "high_contrast_enabled", False)):
+            furniture_color = C.SERVICE
+        return furniture_color
+
+    def render_catalog_furniture_visual(
+        self, catalog_furniture: Dict[str, object]
+    ) -> str:
+        source_glyph = str(catalog_furniture.get("glyph", " "))[:1]
+        material_role = str(catalog_furniture.get("material_role", "wood"))
+        furniture_color = self.catalog_furniture_color(catalog_furniture)
+        name = str(catalog_furniture.get("name", "Furniture"))
+        if furniture_action_id(name, INFRASTRUCTURE_DATA.get(name, {})) == "light":
+            state_key = self.furniture_state_key(
+                name,
+                int(catalog_furniture.get("x", 0) or 0),
+                int(catalog_furniture.get("y", 0) or 0),
+                catalog_furniture,
+            )
+            state_record = getattr(self.state, "furniture_states", {}).get(state_key, {})
+            if (
+                not bool(getattr(self.state, "high_contrast_enabled", False))
+                and isinstance(state_record, dict)
+                and not bool(state_record.get("light_on", True))
+            ):
+                furniture_color = C.FLOOR_SHADOW
+        if furniture_action_id(name, INFRASTRUCTURE_DATA.get(name, {})) == "privacy":
+            state_key = self.furniture_state_key(
+                name,
+                int(catalog_furniture.get("x", 0) or 0),
+                int(catalog_furniture.get("y", 0) or 0),
+                catalog_furniture,
+            )
+            divider_state = getattr(self.state, "furniture_states", {}).get(state_key, {})
+            if isinstance(divider_state, dict) and bool(divider_state.get("open", False)):
+                source_glyph = "/"
+                furniture_color = C.FLOOR_SHADOW
+        detailed_furniture = bool(
+            getattr(self.state, "detailed_glyphs_enabled", True)
+        )
+        if source_glyph == "/" and furniture_action_id(
+            name, INFRASTRUCTURE_DATA.get(name, {})
+        ) == "privacy":
+            glyph = "╱" if detailed_furniture else "/"
+        else:
+            glyph = furniture_display_cell(
+                name,
+                int(catalog_furniture.get("offset_x", 0) or 0),
+                int(catalog_furniture.get("offset_y", 0) or 0),
+                detailed_furniture,
+                normalize_furniture_rotation(catalog_furniture.get("rotation", 0)),
+            ) or furniture_display_glyph(
+                source_glyph, material_role, detailed_furniture,
+            )
+        glyph = furniture_orient_display_glyph(
+            glyph, catalog_furniture.get("building_side", "south")
+        )
+        return colorize(glyph, furniture_color)
 
     def render_tile(
         self,
@@ -14065,9 +15083,12 @@ class FarmGame(
                 and self.on_player_owned_procedural_residence()
             )
         if self.on_farm_work_land() or self.on_house() or player_owned_residence:
-            _key, placed, ax, ay = self.placed_object_at(x, y)
+            object_key, placed, ax, ay = self.placed_object_at(x, y)
             if placed:
-                return self.render_placed_object(placed, x, y, ax, ay)
+                return self.render_placed_object(
+                    placed, x, y, ax, ay,
+                    rotation=self.object_rotation_for_key(object_key, placed),
+                )
         if self.dropped_pack_at(x, y):
             return colorize("*", C.CROP_READY)
 
@@ -14235,6 +15256,9 @@ class FarmGame(
                 tile == "~" and self.wilderness_water_is_frozen_at(x, y),
             )
         if self.on_procedural_town_interior():
+            catalog_furniture = self.procedural_town_catalog_furniture_at(x, y)
+            if isinstance(catalog_furniture, dict):
+                return self.render_catalog_furniture_visual(catalog_furniture)
             custom_color_key = (
                 procedural_town_color_lookup.get((int(x), int(y)), "")
                 if procedural_town_color_lookup is not None
@@ -14261,10 +15285,16 @@ class FarmGame(
         if self.on_wilderness_outpost():
             return self.render_interior_visual_tile(tile_map, x, y, "outpost")
         if self.on_wilderness_structure():
+            catalog_furniture = self.wilderness_structure_catalog_furniture_at(x, y)
+            if isinstance(catalog_furniture, dict):
+                return self.render_catalog_furniture_visual(catalog_furniture)
             return self.render_interior_visual_tile(tile_map, x, y, "structure")
         if self.on_house():
             return self.render_interior_visual_tile(tile_map, x, y, "home")
         if self.on_town_interior():
+            catalog_furniture = self.starting_town_catalog_furniture_at(x, y)
+            if isinstance(catalog_furniture, dict):
+                return self.render_catalog_furniture_visual(catalog_furniture)
             return self.render_interior_visual_tile(tile_map, x, y, "public")
         if self.on_town():
             building_surface = town_building_surface(
@@ -14713,9 +15743,24 @@ class FarmGame(
             hasattr(self, "on_player_owned_procedural_residence")
             and self.on_player_owned_procedural_residence()
         )
-        if (self.on_farm_work_land() or self.on_house() or owned_town_home) and self.get_placed_object(x, y):
-            obj = self.get_placed_object(x, y)
-            if not INFRASTRUCTURE_DATA.get(obj, {}).get("walkable", False):
+        if self.on_farm_work_land() or self.on_house() or owned_town_home:
+            object_key, obj, anchor_x, anchor_y = self.placed_object_at(x, y)
+            privacy_open = bool(
+                obj
+                and object_key
+                and furniture_action_id(obj, INFRASTRUCTURE_DATA.get(obj, {})) == "privacy"
+                and getattr(self.state, "furniture_states", {}).get(
+                    f"placed:{object_key}:{obj}", {}
+                ).get("open", False)
+            )
+            if (
+                obj and anchor_x is not None and anchor_y is not None
+                and not privacy_open
+                and not self.object_cell_walkable(
+                    obj, x, y, anchor_x, anchor_y,
+                    self.object_rotation_for_key(object_key, obj),
+                )
+            ):
                 return False
         tile = self.active_map()[y][x]
         magic_passable = self.world_magic_passability_override(x, y)
@@ -14724,6 +15769,16 @@ class FarmGame(
                 return False
             return magic_passable
         if self.on_procedural_town_interior():
+            catalog_furniture = self.procedural_town_catalog_furniture_at(x, y)
+            if isinstance(catalog_furniture, dict):
+                name = str(catalog_furniture.get("name", "Furniture"))
+                key = self.furniture_state_key(name, x, y, catalog_furniture)
+                if (
+                    furniture_action_id(name, INFRASTRUCTURE_DATA.get(name, {})) == "privacy"
+                    and bool(getattr(self.state, "furniture_states", {}).get(key, {}).get("open", False))
+                ):
+                    return True
+                return bool(catalog_furniture.get("walkable_kind"))
             return self.procedural_town_interior_tile_passable(tile)
         if self.on_town():
             return tile not in ["#", "~", "G", "C", "X", "L", "M", "I", "Y", "A", "H", "R", "P", "U", "Q", "F", "T", "b", "B", "N", "m", "$", "h"]
@@ -14799,7 +15854,10 @@ class FarmGame(
         if self.on_wilderness_outpost():
             return tile not in ["#", " ", "-", "&", "b", "t", "c", "f", "s", "P", "l", "w", "a", "p"]
         if self.on_wilderness_structure():
-            return tile not in ["#", " ", "-", "&", "b", "t", "c", "f", "s", "P", "d", "+"]
+            catalog_furniture = self.wilderness_structure_catalog_furniture_at(x, y)
+            if isinstance(catalog_furniture, dict):
+                return bool(catalog_furniture.get("walkable_kind"))
+            return tile not in self.town_interior_blocking_tiles()
         if self.on_wilderness_cave():
             return tile not in ["#", " ", "o", "q", "m", "c", "i", "g", "A", "C", "h", "b", "d"]
         if self.on_wilderness_dungeon():
@@ -14809,6 +15867,16 @@ class FarmGame(
                 return False
             return tile not in ["#", " ", "$", "l", "s", "u", "P"]
         if self.on_town_interior():
+            catalog_furniture = self.starting_town_catalog_furniture_at(x, y)
+            if isinstance(catalog_furniture, dict):
+                name = str(catalog_furniture.get("name", "Furniture"))
+                key = self.furniture_state_key(name, x, y, catalog_furniture)
+                if (
+                    furniture_action_id(name, INFRASTRUCTURE_DATA.get(name, {})) == "privacy"
+                    and bool(getattr(self.state, "furniture_states", {}).get(key, {}).get("open", False))
+                ):
+                    return True
+                return bool(catalog_furniture.get("walkable_kind"))
             return tile not in self.town_interior_blocking_tiles()
         if self.on_house():
             return tile not in ["#", " "]
@@ -15044,6 +16112,14 @@ class FarmGame(
                 }.get(tile, f"Farm tile '{tile}'")
             if home_kind == "mine":
                 return "The permanent mine building" if not self.home_world_is_mine_door(x, y) else "Mine entrance: use Z/Enter or walk into it"
+        temporary_participant = self.temporary_participant_at(x, y)
+        if temporary_participant:
+            actor = self.temporary_participant_actor(temporary_participant)
+            return (
+                f"@ {actor.get('name', 'companion')} is here for "
+                f"{temporary_participant.get('purpose', 'your plans')}. "
+                "Use Z/Enter to talk"
+            )
         travel_follower_id = self.travel_follower_at(x, y)
         if travel_follower_id:
             return self.travel_follower_description(travel_follower_id) + " Use Z/Enter to interact."
@@ -15121,32 +16197,7 @@ class FarmGame(
                 staff = self.procedural_town_building_service_staff(building)
                 if staff:
                     return f"{building.get('name', 'Building')} service counter, staffed by {staff[0].get('name', 'the attendant')}"
-            return {
-                "#": "Interior wall",
-                "-": "Interior partition",
-                "|": "Open room door or vertical partition",
-                "_": "Closed room door",
-                ".": "Wooden floor",
-                "D": "Exit to the wilderness town",
-                "U": "Stairs up to another floor",
-                ">": "Stairs down to a lower floor",
-                "&": f"{building.get('name', 'Building')} service counter" if building else "Service counter",
-                "b": "Bed",
-                "t": "Table",
-                "c": "Chair",
-                "s": "Storage shelf",
-                "l": "Bookcase",
-                "$": "Store shelf",
-                "w": "Workbench",
-                "a": "Tool rack",
-                "x": "Materials bench",
-                "+": "Clinic supplies",
-                "P": "Public records",
-                "d": "Writing desk",
-                "f": "Hearth",
-                "p": "Local planter and household decoration",
-                ",": "Woven local rug",
-            }.get(tile, "Settlement building interior")
+            return self.procedural_town_interior_tile_description(tile, building, x, y)
         if self.on_wilderness_outpost():
             tile = self.active_map()[y][x]
             if tile == "@":
@@ -15164,6 +16215,13 @@ class FarmGame(
             tile = self.active_map()[y][x]
             record = self.wilderness_structure_record()
             repaired = bool(record.get("repaired"))
+            catalog_furniture = self.wilderness_structure_catalog_furniture_at(x, y)
+            if isinstance(catalog_furniture, dict):
+                name = str(catalog_furniture.get("name", "Furniture"))
+                detail = str(INFRASTRUCTURE_DATA.get(name, {}).get("description", "Purpose-built furniture."))
+                action = furniture_action_label(name, INFRASTRUCTURE_DATA.get(name, {}))
+                status = self.furniture_status_text(name, x, y, catalog_furniture)
+                return f"{name}. {detail} Use it to {action}.{status}"
             game_id = self.game_table_fixture_id(tile)
             if game_id and str(record.get("type_id", "")) in {"roadside_inn", "desert_caravanserai", "tundra_wayhouse"}:
                 return (
@@ -15171,7 +16229,14 @@ class FarmGame(
                     if repaired
                     else "Dust-covered game table; restore this structure to staff it"
                 )
-            return {".": f"Floor of {record.get('name', 'the wilderness structure')}", "#": "Exterior wall", "D": "Door back to the wilderness", "-": "Interior partition", "|": "Open doorway", "&": "Service counter: weekly support is available after restoration", "@": "Resident caretaker: use Z/Enter to speak", "b": "Bunk: rest here once per day", "t": "Plain table", "c": "Chair", "f": "Hearth", "s": "Regional supply storage", "P": "Structure records and restoration plaque", "d": "Field observation desk", "+": "Wayside shrine", " ": "Solid wall"}.get(tile, f"{'Restored' if repaired else 'Abandoned'} wilderness structure interior")
+            fixture = BUILDING_TEMPLATE_FURNISHING_DATA.get(str(tile))
+            if not isinstance(fixture, dict):
+                fixture = BUILDING_TEMPLATE_GENERIC_FIXTURE_DATA.get(str(tile))
+            if isinstance(fixture, dict):
+                name = building_template_functional_furniture_name(fixture)
+                action = furniture_action_label(name, INFRASTRUCTURE_DATA.get(name, {}))
+                return f"{name}: use it to {action}."
+            return {".": f"Floor of {record.get('name', 'the wilderness structure')}", ",": "Woven interior runner", "#": "Exterior wall", "D": "Door back to the wilderness", "-": "Interior partition", "_": "Closed room door", "|": "Open doorway", "&": "Service counter: weekly support is available after restoration", "@": "Resident caretaker: use Z/Enter to speak", "b": "Public bunk: rest here once per day", "s": "Regional supply storage", "P": "Working records board: restoration, jobs, and services", "+": "Wayside shrine", " ": "Space beyond the finished rooms"}.get(tile, f"{'Restored' if repaired else 'Abandoned'} wilderness structure interior")
         if self.on_town_interior():
             interior_desc = self.town_interior_tile_description(x, y)
             if interior_desc:
@@ -15795,8 +16860,48 @@ class FarmGame(
             and self.on_player_owned_procedural_residence()
         )
         if self.on_house() or owned_town_home:
-            placed = self.get_placed_object(x, y)
+            object_key, placed, anchor_x, anchor_y = self.placed_object_at(x, y)
             if placed:
+                component = furniture_component_at(
+                    placed,
+                    int(x) - int(anchor_x), int(y) - int(anchor_y),
+                    self.object_rotation_for_key(object_key, placed),
+                ) if anchor_x is not None and anchor_y is not None else ""
+                component_hints = {
+                    "cook": "Z: use stove | I: inspect",
+                    "prepare": "Z: prepare food | I: inspect",
+                    "wash": "Z: use sink | I: inspect",
+                    "craft": "Z: use tools | I: inspect",
+                    "gear": "Z: manage equipment | I: inspect",
+                    "rest": "Z: sit and rest | I: inspect",
+                    "family_meal": "Z: gather for a meal | I: inspect",
+                    "social": "Z: gather and talk | I: inspect",
+                    "bookshelf": "Z: books or storage | I: inspect",
+                    "storage": "Z: open storage | I: inspect",
+                }
+                if component in component_hints:
+                    return component_hints[component]
+                if INFRASTRUCTURE_DATA.get(placed, {}).get("category") == "furniture":
+                    return self.furniture_action_hint_for(placed)
+                furniture_function = str(
+                    INFRASTRUCTURE_DATA.get(placed, {}).get("furniture_function", "")
+                )
+                function_hints = {
+                    "sleep": "Z: sleep | I: inspect",
+                    "cook": "Z: cook | I: inspect",
+                    "craft": "Z: craft | I: inspect",
+                    "bookshelf": "Z: books and storage | I: inspect",
+                    "rest": "Z: rest | I: inspect",
+                    "bathe": "Z: bathe and recover | I: inspect",
+                    "mirror": "Z: use mirror | I: inspect",
+                    "hearth": "Z: warm up and rest | I: inspect",
+                    "dining": "Z: use dining table | I: inspect",
+                    "family_meal": "Z: household meal | I: inspect",
+                    "display_storage": "Z: display storage | I: inspect",
+                    "storage": "Z: household storage | I: inspect",
+                }
+                if furniture_function in function_hints:
+                    return function_hints[furniture_function]
                 if placed == "Bed":
                     return "Z: sleep | I: inspect"
                 if placed == "Wall Calendar":
@@ -16242,13 +17347,42 @@ class FarmGame(
         key, obj_name, ax, ay = self.placed_object_at(x, y)
         if obj_name:
             data = INFRASTRUCTURE_DATA.get(obj_name, {})
+            rotation = self.object_rotation_for_key(key, obj_name)
             lines.extend([
                 "",
                 "Placed object:",
                 f"{obj_name} at anchor {ax},{ay}",
-                f"Footprint: {self.footprint_label(obj_name)}",
+                f"Footprint: {self.footprint_label(obj_name, rotation)}",
                 str(data.get("description", "Placed object.")),
             ])
+            if data.get("category") == "furniture":
+                placement_label = (
+                    "Wall-mounted"
+                    if data.get("placement_surface") == "wall"
+                    else "Walkable floor covering"
+                    if data.get("placement_layer") == "floor"
+                    else "Floor furnishing"
+                )
+                lines.append(f"Placement: {placement_label}")
+                component = furniture_component_at(
+                    obj_name,
+                    int(x) - int(ax), int(y) - int(ay), rotation,
+                ) if ax is not None and ay is not None else ""
+                walkable_kind = furniture_walkable_kind(
+                    obj_name,
+                    int(x) - int(ax), int(y) - int(ay), rotation,
+                ) if ax is not None and ay is not None else ""
+                lines.extend([
+                    f"Finish: {self.object_finish_for_key(key, obj_name)}",
+                    f"Orientation: {rotation * 90} degrees clockwise",
+                ])
+                if component:
+                    lines.append(f"Furniture section: {component.replace('_', ' ').title()}")
+                if walkable_kind:
+                    lines.append(
+                        "Furniture cell: "
+                        + ("Seat (walkable)" if walkable_kind == "seat" else "Open arrangement space")
+                    )
             if key:
                 lines.append(f"Object key: {key}")
 
@@ -16260,7 +17394,7 @@ class FarmGame(
             return
         self.sync_travel_followers()
         lines: List[str] = []
-        lines.extend(self.header_lines())
+        map_rows: List[str] = []
 
         tile_map = self.active_map()
         map_h = len(tile_map)
@@ -16337,11 +17471,17 @@ class FarmGame(
                                 procedural_town_active,
                             )
                         )
-            lines.append("".join(line))
+            map_rows.append("".join(line))
 
-        lines.extend(self.footer_lines())
-        lines.append(f"Look cursor: ({cursor_x},{cursor_y}) {self.describe_tile(cursor_x, cursor_y)}")
-        lines.append("WASD/Arrows/Numpad move cursor | Z/Enter details | I details | X/L/Esc/Q/Tab exit")
+        if self.hud_sidebar_active():
+            lines.extend(self.header_lines())
+            lines.extend(self.combine_map_and_sidebar(map_rows, (cursor_x, cursor_y), False, "Look"))
+            lines.extend(self.footer_lines("LOOK: WASD/Arrows/Num move | Z/Enter/I details | B/X/L/Esc/Q/Tab exit"))
+        else:
+            lines.extend(self.header_lines())
+            lines.extend(map_rows)
+            lines.extend(self.footer_lines("LOOK: WASD/Arrows/Num move | Z/Enter/I details | B/X/L/Esc/Q/Tab exit"))
+            lines.append(f"Look cursor: ({cursor_x},{cursor_y}) {self.describe_tile(cursor_x, cursor_y)}")
         frame = "".join("\033[2K" + str(line) + "\n" for line in lines)
         if frame == self._last_draw_frame and not self._force_full_redraw:
             return
@@ -16414,12 +17554,18 @@ class FarmGame(
 
     def draw_streamed_wilderness_look_cursor(self, cursor_x: int, cursor_y: int) -> None:
         self.sync_travel_followers()
-        lines = list(self.header_lines())
-        lines.extend(self.wilderness_stream_map_lines(cursor_x, cursor_y, (cursor_x, cursor_y)))
-        lines.extend(self.footer_lines())
+        lines: List[str] = []
+        map_rows = self.wilderness_stream_map_lines(cursor_x, cursor_y, (cursor_x, cursor_y))
         chunk_x, chunk_y, local_x, local_y = self.wilderness_stream_resolve(cursor_x, cursor_y)
-        lines.append(f"Look: chunk ({chunk_x},{chunk_y}) tile ({local_x},{local_y}) - {self.describe_streamed_wilderness_tile(cursor_x, cursor_y)}")
-        lines.append("WASD/Arrows/Numpad move across streamed chunks | Z/Enter/I details | X/L/Esc/Q/Tab exit")
+        if self.hud_sidebar_active():
+            lines.extend(self.header_lines())
+            lines.extend(self.combine_map_and_sidebar(map_rows, (cursor_x, cursor_y), True, "Look"))
+            lines.extend(self.footer_lines("LOOK: WASD/Arrows/Num move | Z/Enter/I details | B/X/L/Esc/Q/Tab exit"))
+        else:
+            lines.extend(self.header_lines())
+            lines.extend(map_rows)
+            lines.extend(self.footer_lines("LOOK: WASD/Arrows/Num move | Z/Enter/I details | B/X/L/Esc/Q/Tab exit"))
+            lines.append(f"Look: chunk ({chunk_x},{chunk_y}) tile ({local_x},{local_y}) - {self.describe_streamed_wilderness_tile(cursor_x, cursor_y)}")
         frame = "".join("\033[2K" + str(line) + "\n" for line in lines)
         if frame == self._last_draw_frame and not self._force_full_redraw:
             return
@@ -16441,7 +17587,7 @@ class FarmGame(
         cursor_x, cursor_y = self.target_tile_pos()
         if not self.in_active_bounds(cursor_x, cursor_y):
             cursor_x, cursor_y = self.state.player_x, self.state.player_y
-        self.set_message("Look cursor active. Move the cursor to inspect the map.")
+        self.set_message("Look cursor active. Move the cursor to inspect the map.", log=False)
 
         while True:
             self.draw_with_look_cursor(cursor_x, cursor_y)
@@ -16449,8 +17595,8 @@ class FarmGame(
             if len(key) == 1 and key.isalpha():
                 key = key.lower()
 
-            if key in ["\t", "\x1b", "q", "l", "x"]:
-                self.set_message("Look cursor closed. Camera recentered on you.")
+            if key in ["\t", "\x1b", "q", "l", "x", "b"]:
+                self.set_message("Look cursor closed. Camera recentered on you.", log=False)
                 self.invalidate_draw_cache()
                 return
 
@@ -16465,7 +17611,7 @@ class FarmGame(
                     cursor_x = max(0, min(self.active_map_width() - 1, cursor_x + dx))
                     cursor_y = max(0, min(self.active_map_height() - 1, cursor_y + dy))
                     description = self.describe_tile(cursor_x, cursor_y)
-                self.set_message(f"Look cursor at {cursor_x},{cursor_y}: {description}")
+                self.state.message = f"Look cursor at {cursor_x},{cursor_y}: {description}"
                 continue
 
             if key in MENU_CONFIRM_KEYS or key == "i":
@@ -16474,7 +17620,7 @@ class FarmGame(
                 self.invalidate_draw_cache()
                 continue
 
-            self.set_message("Look mode: WASD/numpad move, Z/Enter details, X/L/Esc/Q exit.")
+            self.set_message("Look mode: WASD/numpad move, Z/Enter details, B/X/L/Esc/Q/Tab exit.", log=False)
 
     def inspect_target(self):
         """Dedicated look/inspect command bound to I."""
@@ -16530,6 +17676,261 @@ class FarmGame(
             lines.append(f"ACTION | {interact_hint}")
         return "\n".join(lines)
 
+    def hud_sidebar_width(self) -> int:
+        """Return the framed sidebar width available beside the 54-column map."""
+        try:
+            cols = int(terminal_width())
+        except Exception:
+            cols = UI_WIDTH
+        available = cols - VIEW_WIDTH - GUTTER_WIDTH - 1
+        return max(0, min(38, available))
+
+    def hud_sidebar_active(self) -> bool:
+        """Use the sidebar only when it fits without shrinking or clipping the map."""
+        return bool(
+            getattr(self.state, "show_hud_sidebar", True)
+            and self.hud_sidebar_width() >= 28
+            and self.terminal_row_count() >= VIEW_HEIGHT + 5
+        )
+
+    def hud_display_width(self) -> int:
+        if self.hud_sidebar_active():
+            return VIEW_WIDTH + GUTTER_WIDTH + self.hud_sidebar_width()
+        try:
+            cols = int(terminal_width())
+        except Exception:
+            cols = UI_WIDTH
+        return max(32, min(UI_WIDTH, cols - 1))
+
+    def hud_activity_category(self, message: object) -> str:
+        text = strip_ansi(str(message or "")).casefold()
+        if any(word in text for word in ("relationship", "reputation", "friendship", "affection", "bond ")):
+            return "social"
+        if any(word in text for word in ("damage", "attacks", "defeated", "enemy", "poison", "combat", " hp")):
+            return "combat"
+        if any(word in text for word in ("bought", "sold", "income", "costs", "paid", "gold", "$")):
+            return "money"
+        if any(word in text for word in ("found", "received", "gained", "collected", "harvested", "recovered", "crafted")):
+            return "gain"
+        if any(word in text for word in ("cannot", "can't", "blocked", "not enough", "requires", "failed", "need ")):
+            return "warning"
+        if any(word in text for word in ("entered ", "returned to", "arrived", "discovered", "travel")):
+            return "travel"
+        return "general"
+
+    def add_hud_activity(self, message: object, category: str = "") -> None:
+        """Append one persistent HUD event, compressing immediate repetitions."""
+        text = " ".join(strip_ansi(str(message or "")).replace("\r", " ").split())[:300]
+        if not text:
+            return
+        log = getattr(self.state, "hud_activity_log", None)
+        if not isinstance(log, list):
+            log = []
+            self.state.hud_activity_log = log
+        resolved_category = str(category or self.hud_activity_category(text))[:24]
+        time_label = f"{int(self.state.hour):02d}:{int(self.state.minute):02d}"
+        date_label = str(getattr(self.state, "date_label", "") or "")[:32]
+        if log and isinstance(log[-1], dict) and str(log[-1].get("text", "")) == text:
+            log[-1]["count"] = min(999, max(1, int(log[-1].get("count", 1) or 1)) + 1)
+            log[-1]["time"] = time_label
+            log[-1]["date"] = date_label
+            log[-1]["category"] = resolved_category
+        else:
+            log.append({
+                "text": text,
+                "category": resolved_category,
+                "count": 1,
+                "time": time_label,
+                "date": date_label,
+            })
+        self.state.hud_activity_log = log[-100:]
+
+    def hud_activity_style(self, category: str) -> str:
+        return {
+            "combat": C.HOSTILE,
+            "gain": C.CROP_READY,
+            "money": C.SERVICE,
+            "social": C.LANDMARK_ACTIVE,
+            "dialogue": C.UI_TITLE,
+            "warning": C.SOIL_WET,
+            "travel": C.INFRA,
+        }.get(str(category), C.UI_MUTED)
+
+    def hud_activity_log_lines(self, category: str = "all") -> List[str]:
+        entries = [
+            entry for entry in (getattr(self.state, "hud_activity_log", []) or [])
+            if isinstance(entry, dict)
+            and (category == "all" or str(entry.get("category", "general")) == category)
+        ]
+        lines = ["ACTIVITY LOG", "", "Newest events appear first.", ""]
+        if not entries:
+            lines.append("No matching activity has been recorded yet.")
+            return lines
+        for entry in reversed(entries):
+            count = max(1, int(entry.get("count", 1) or 1))
+            suffix = f" x{count}" if count > 1 else ""
+            stamp = " ".join(part for part in (str(entry.get("date", "")), str(entry.get("time", ""))) if part).strip()
+            lines.append(f"[{str(entry.get('category', 'general')).title()}] {stamp}".rstrip())
+            lines.append(f"- {entry.get('text', '')}{suffix}")
+            lines.append("")
+        return lines
+
+    def hud_fullscreen_history_rows(self, category: str, width: int) -> List[str]:
+        entries = [
+            entry for entry in (getattr(self.state, "hud_activity_log", []) or [])
+            if isinstance(entry, dict)
+            and (category == "all" or str(entry.get("category", "general")) == category)
+        ]
+        if not entries:
+            return ["No matching activity has been recorded yet."]
+        rows: List[str] = []
+        for entry in entries:
+            stamp = " ".join(
+                part for part in (str(entry.get("date", "")), str(entry.get("time", ""))) if part
+            ).strip()
+            label = str(entry.get("category", "general")).replace("_", " ").title()
+            rows.append(f"[{stamp or 'Earlier'}] {label}")
+            count = max(1, int(entry.get("count", 1) or 1))
+            suffix = f" x{count}" if count > 1 else ""
+            rows.extend(wrap_panel_row(f"  {entry.get('text', '')}{suffix}", width))
+            rows.append("")
+        return rows
+
+    def hud_fullscreen_history_frame(
+        self,
+        category: str = "all",
+        scroll_top: Optional[int] = None,
+        width: Optional[int] = None,
+        height: Optional[int] = None,
+    ) -> Tuple[List[str], int, int]:
+        frame_width = max(36, min(120, int(width or max(36, terminal_width() - 2))))
+        frame_height = max(12, min(60, int(height or max(12, self.terminal_row_count() - 1))))
+        inner = frame_width - 2
+        visible_rows = max(4, frame_height - 6)
+        history_rows = self.hud_fullscreen_history_rows(category, inner)
+        max_scroll = max(0, len(history_rows) - visible_rows)
+        resolved_scroll = max_scroll if scroll_top is None else max(0, min(max_scroll, int(scroll_top)))
+        visible = history_rows[resolved_scroll:resolved_scroll + visible_rows]
+        visible.extend([""] * max(0, visible_rows - len(visible)))
+
+        def framed(text: object, style: str = "") -> str:
+            fitted = fit_text(str(text), inner)
+            padded = fitted + " " * max(0, inner - visible_text_len(fitted))
+            body = colorize(padded, style) if style else padded
+            return colorize("│", C.UI_BORDER) + body + colorize("│", C.UI_BORDER)
+
+        title = " ACTIVITY HISTORY "
+        top = "┌" + title + "─" * max(0, inner - len(title)) + "┐"
+        filter_label = "All activity" if category == "all" else category.replace("_", " ").title()
+        lines = [colorize(top, C.UI_BORDER + C.BOLD)]
+        lines.append(framed(f"Filter: {filter_label} | {len(history_rows)} display rows", C.UI_TITLE))
+        lines.append(colorize("├" + "─" * inner + "┤", C.UI_BORDER))
+        lines.extend(framed(row, C.UI_MUTED) for row in visible)
+        lines.append(colorize("├" + "─" * inner + "┤", C.UI_BORDER))
+        lines.append(framed("Up/Down scroll | PgUp/PgDn page | Home/End | F filter | B/X/J/Esc/Q/Tab close", C.UI_SELECTED))
+        lines.append(colorize("└" + "─" * inner + "┘", C.UI_BORDER + C.BOLD))
+        return lines, resolved_scroll, max_scroll
+
+    def show_fullscreen_activity_log(self) -> None:
+        categories = ["all", "dialogue", "combat", "gain", "money", "social", "warning", "travel", "general"]
+        category_index = 0
+        scroll_top: Optional[int] = None
+        while True:
+            category = categories[category_index]
+            lines, scroll_top, max_scroll = self.hud_fullscreen_history_frame(category, scroll_top)
+            frame = "".join("\033[2K" + str(line) + "\n" for line in lines)
+            self.prepare_terminal_for_fast_draw()
+            try:
+                sys.stdout.write("\033[H" + frame + "\033[J")
+                sys.stdout.flush()
+            except Exception:
+                clear_screen()
+                print(frame, end="")
+            key = normalize_key(read_key())
+            if key in {"b", "x", "j", "\x1b", "q", "\t"}:
+                self.state.message = "Closed activity history."
+                self.invalidate_draw_cache()
+                return
+            if key in {"w", "UP"}:
+                scroll_top = max(0, int(scroll_top) - 1)
+            elif key in {"s", "DOWN"}:
+                scroll_top = min(max_scroll, int(scroll_top) + 1)
+            elif key in {"a", "LEFT", "PGUP"}:
+                scroll_top = max(0, int(scroll_top) - 10)
+            elif key in {"d", "RIGHT", "PGDN"}:
+                scroll_top = min(max_scroll, int(scroll_top) + 10)
+            elif key == "HOME":
+                scroll_top = 0
+            elif key == "END":
+                scroll_top = max_scroll
+            elif key == "f":
+                category_index = (category_index + 1) % len(categories)
+                scroll_top = None
+
+    def hud_sidebar_activity_rows(self, width: int, height: int) -> List[Tuple[str, str]]:
+        entries = [entry for entry in (getattr(self.state, "hud_activity_log", []) or []) if isinstance(entry, dict)]
+        if not entries and str(getattr(self.state, "message", "")).strip():
+            entries = [{"text": str(self.state.message), "category": "general", "count": 1, "time": ""}]
+        selected: List[Tuple[str, str]] = []
+        for entry in reversed(entries):
+            count = max(1, int(entry.get("count", 1) or 1))
+            suffix = f" x{count}" if count > 1 else ""
+            stamp = str(entry.get("time", "") or "")
+            prefix = f"{stamp} " if stamp else ""
+            wrapped = wrap_panel_row(f"{prefix}{entry.get('text', '')}{suffix}", width)
+            styled = [(row, self.hud_activity_style(str(entry.get("category", "general")))) for row in wrapped]
+            if len(styled) > height:
+                styled = styled[:height]
+                styled[-1] = (fit_text(styled[-1][0].rstrip() + " ...", width), styled[-1][1])
+            if selected and len(styled) + len(selected) > height:
+                break
+            selected = styled + selected
+            if len(selected) >= height:
+                break
+        return [("", "")] * max(0, height - len(selected)) + selected[-height:]
+
+    def hud_sidebar_lines(
+        self,
+        cursor: Optional[Tuple[int, int]] = None,
+        streamed: bool = False,
+        mode_label: str = "Target",
+    ) -> List[str]:
+        width = self.hud_sidebar_width()
+        inner = max(8, width - 2)
+
+        def border(label: str, first: bool = False) -> str:
+            left, right = ("┌", "┐") if first else ("├", "┤")
+            title = f" {label} "
+            fill = max(0, inner - visible_text_len(title))
+            return colorize(left + title + "─" * fill + right, C.UI_BORDER + C.BOLD)
+
+        def row(text: object, style: str = "") -> str:
+            fitted = fit_text(str(text), inner)
+            padded = fitted + " " * max(0, inner - visible_text_len(fitted))
+            body = colorize(padded, style) if style else padded
+            return colorize("│", C.UI_BORDER) + body + colorize("│", C.UI_BORDER)
+
+        lines = [border("ACTIVITY - J FULL LOG", first=True)]
+        lines.extend(row(value, style) for value, style in self.hud_sidebar_activity_rows(inner, VIEW_HEIGHT - 2))
+        lines.append(colorize("└" + "─" * inner + "┘", C.UI_BORDER + C.BOLD))
+        return lines[:VIEW_HEIGHT]
+
+    def combine_map_and_sidebar(
+        self,
+        map_rows: List[str],
+        cursor: Optional[Tuple[int, int]] = None,
+        streamed: bool = False,
+        mode_label: str = "Target",
+    ) -> List[str]:
+        if not self.hud_sidebar_active():
+            return list(map_rows)
+        sidebar = self.hud_sidebar_lines(cursor, streamed, mode_label)
+        combined: List[str] = []
+        for index in range(VIEW_HEIGHT):
+            map_row = map_rows[index] if index < len(map_rows) else ""
+            side_row = sidebar[index] if index < len(sidebar) else " " * self.hud_sidebar_width()
+            combined.append(pad_visual(map_row, VIEW_WIDTH) + " " * GUTTER_WIDTH + side_row)
+        return combined
 
     def hud_line_width(self) -> int:
         try:
@@ -16641,6 +18042,12 @@ class FarmGame(
             context_chips.append(status_chip(f"Mine F{s.mine_floor}/{s.deepest_mine_floor} {self.mine_floor_status_label(s.mine_floor)}", C.UNDERGROUND_RELIC))
         if self.active_food_buff_summary():
             context_chips.append(status_chip(f"Buffs {self.active_food_buff_summary()}", C.UNDERGROUND_RELIC))
+        tracked_quest_text = self.tracked_quest_hud_text()
+        if tracked_quest_text:
+            context_chips.append(status_chip(tracked_quest_text, C.LANDMARK_ACTIVE))
+        planned_event_text = self.planned_event_hud_text()
+        if planned_event_text:
+            context_chips.append(status_chip(planned_event_text, C.LANDMARK_ACTIVE))
 
         lines: List[str] = [
             colorize(fit_text(GAME_DISPLAY_TITLE, width), C.UI_TITLE),
@@ -18755,7 +20162,7 @@ class FarmGame(
             f"Build Board: {item.get('name', item_id)} | ${item.get('cost', 0)} | {size} | "
             f"{'OK' if ok else 'Blocked: ' + reason}"
         )
-        lines.append("WASD/Arrows/Numpad move cursor | Z/Enter place | I inspect | X/Esc/Q/Tab cancel")
+        lines.append("WASD/Arrows/Numpad move cursor | Z/Enter place | I inspect | B/X/Esc/Q/Tab cancel")
         frame = "".join("\033[2K" + str(line) + "\n" for line in lines)
         if frame == self._last_draw_frame and not self._force_full_redraw:
             return
@@ -19934,9 +21341,13 @@ class FarmGame(
         animals: List[Dict[str, object]] = []
         used = set()
         candidates = []
+        event_lookup = self.wilderness_event_visual_lookup(chunk_x, chunk_y, grid)
+        seasonal_lookup = self.wilderness_seasonal_surface_lookup(chunk_x, chunk_y, grid)
         for y in range(2, h - 2):
             for x in range(2, w - 2):
-                if not self.wilderness_stream_actor_passable(chunk_x, chunk_y, x, y):
+                if not self.wilderness_stream_actor_passable(
+                    chunk_x, chunk_y, x, y, event_lookup, seasonal_lookup,
+                ):
                     continue
                 biome = grid[y][x] if grid[y][x] in WILDERNESS_BIOME_TILES else self.wilderness_world_biome_tile(*self.wilderness_world_coords(chunk_x, chunk_y, x, y))
                 candidates.append((x, y, biome))
@@ -20750,16 +22161,19 @@ class FarmGame(
                 for placed in self.placed_objects_for_scope("Farm"):
                     object_name = str(placed["name"])
                     anchor_x, anchor_y = int(placed["x"]), int(placed["y"])
-                    for tile_x, tile_y in self.object_footprint_tiles(object_name, anchor_x, anchor_y):
+                    rotation = int(placed.get("rotation", 0))
+                    for tile_x, tile_y in self.object_footprint_tiles(
+                        object_name, anchor_x, anchor_y, rotation,
+                    ):
                         object_lookup.setdefault(
-                            (tile_x, tile_y), (object_name, anchor_x, anchor_y),
+                            (tile_x, tile_y), (object_name, anchor_x, anchor_y, rotation),
                         )
             object_record = object_lookup.get((source_x, source_y))
             if object_record:
-                object_name, anchor_x, anchor_y = object_record
+                object_name, anchor_x, anchor_y, rotation = object_record
                 return self.render_placed_object(
                     object_name, source_x, source_y, anchor_x, anchor_y,
-                    storage_coordinates=True,
+                    storage_coordinates=True, rotation=rotation,
                 )
             tile = self.base_map[source_y][source_x]
             if tile == "H":
@@ -20998,6 +22412,7 @@ class FarmGame(
         map_h = len(current_map)
         map_w = len(current_map[0]) if map_h else 0
         actors = self.frame_actor_position_lookups(map_w, map_h)
+        temporary_participants = self.temporary_participant_position_lookup()
         # Authored residents are rendered by source coordinate inside
         # render_seamless_home_world_tile().  Feeding those same source
         # coordinates into the current chunk renderer created a second,
@@ -21020,9 +22435,12 @@ class FarmGame(
         for placed in self.placed_objects_for_scope("Farm"):
             object_name = str(placed["name"])
             anchor_x, anchor_y = int(placed["x"]), int(placed["y"])
-            for tile_x, tile_y in self.object_footprint_tiles(object_name, anchor_x, anchor_y):
+            rotation = int(placed.get("rotation", 0))
+            for tile_x, tile_y in self.object_footprint_tiles(
+                object_name, anchor_x, anchor_y, rotation,
+            ):
                 self._frame_home_farm_object_lookup.setdefault(
-                    (tile_x, tile_y), (object_name, anchor_x, anchor_y),
+                    (tile_x, tile_y), (object_name, anchor_x, anchor_y, rotation),
                 )
         procedural_town_active = bool(self.current_procedural_town_plan())
         civic_lookup = self.procedural_town_civic_overlay_lookup() if procedural_town_active else {}
@@ -21041,16 +22459,20 @@ class FarmGame(
             and not self.location_is_weather_sheltered()
         )
         snapshots = self.wilderness_stream_actor_snapshots()
+        quest_marker = self.tracked_quest_stream_position()
         held_obj = self.state.held_object if self.can_hold_objects_here() else None
         held_anchor = self.front_tile_pos() if held_obj else None
         held_ok = False
         held_footprint = set()
         if held_obj and held_anchor:
+            held_rotation = normalize_furniture_rotation(self.state.held_object_rotation)
             held_ok, _held_reason = self.can_place_object(
-                held_obj, held_anchor[0], held_anchor[1],
+                held_obj, held_anchor[0], held_anchor[1], rotation=held_rotation,
             )
             held_footprint = set(
-                self.object_footprint_tiles(held_obj, held_anchor[0], held_anchor[1])
+                self.object_footprint_tiles(
+                    held_obj, held_anchor[0], held_anchor[1], held_rotation,
+                )
             )
         visible_chunks = self.wilderness_stream_viewport_chunks(focus_x, focus_y, margin=0)
         neighbor_grids = {
@@ -21102,10 +22524,14 @@ class FarmGame(
                     if cursor == (relative_x, relative_y):
                         line.append(colorize("X", C.PLACEMENT))
                     elif held_obj and (relative_x, relative_y) in held_footprint:
-                        marker = "X" if (relative_x, relative_y) == held_anchor else "x"
-                        line.append(colorize(marker, C.PLACEMENT if held_ok else C.PLACEMENT_BAD))
+                        line.append(self.render_held_object_preview(
+                            held_obj, relative_x, relative_y,
+                            held_anchor[0], held_anchor[1], held_ok,
+                        ))
                     elif snapshot:
                         line.append(self.render_wilderness_stream_actor(snapshot[0], snapshot[1]))
+                    elif quest_marker == (relative_x, relative_y):
+                        line.append(self.render_tracked_quest_marker())
                     else:
                         grid = neighbor_grids.get((chunk_x, chunk_y))
                         if grid:
@@ -21156,8 +22582,10 @@ class FarmGame(
                 elif position == (int(self.state.player_x), int(self.state.player_y)):
                     line.append(self.render_player())
                 elif held_obj and (relative_x, relative_y) in held_footprint:
-                    marker = "X" if (relative_x, relative_y) == held_anchor else "x"
-                    line.append(colorize(marker, C.PLACEMENT if held_ok else C.PLACEMENT_BAD))
+                    line.append(self.render_held_object_preview(
+                        held_obj, relative_x, relative_y,
+                        held_anchor[0], held_anchor[1], held_ok,
+                    ))
                 elif self.state.fishing_active and position == (int(self.state.fishing_target_x), int(self.state.fishing_target_y)):
                     phase = self.fishing_phase()
                     line.append(colorize("!" if phase == "bite" else ("?" if phase == "nibble" else "o"), C.PLACEMENT if phase == "bite" else C.WATER))
@@ -21173,8 +22601,12 @@ class FarmGame(
                     line.append(self.render_animal(actors["wilderness_animals"][position]))
                 elif position in actors["followers"]:
                     line.append(self.render_travel_follower(str(actors["followers"][position])))
+                elif position in temporary_participants:
+                    line.append(self.render_temporary_participant(temporary_participants[position]))
                 elif position in npc_positions:
                     line.append(self.render_town_npc(npc_positions[position]))
+                elif quest_marker == (relative_x, relative_y):
+                    line.append(self.render_tracked_quest_marker())
                 else:
                     overlay = (
                         self.render_weather_overlay(local_x, local_y, current_map)
@@ -21226,34 +22658,14 @@ class FarmGame(
         self._frame_placed_object_lookup = self.build_frame_placed_object_lookup()
         # Lighting is derived once per frame, then shared by every interior cell.
         self._interior_light_position_cache = {}
+        self._frame_active_furniture_lights = None
         map_h = len(tile_map)
         map_w = len(tile_map[0]) if map_h else 0
-        if (
-            self.on_farm()
-            or self.on_town()
-            or self.on_wilderness()
-            or self.on_wilderness_cave()
-            or self.on_wilderness_dungeon()
-            or self.on_procedural_town_interior()
-        ):
-            cam_x = max(
-                0,
-                min(
-                    max(0, map_w - VIEW_WIDTH),
-                    self.state.player_x - VIEW_WIDTH // 2,
-                ),
-            )
-            cam_y = max(
-                0,
-                min(
-                    max(0, map_h - VIEW_HEIGHT),
-                    self.state.player_y - VIEW_HEIGHT // 2,
-                ),
-            )
-        else:
-            cam_x, cam_y = 0, 0
+        cam_x, cam_y = self.camera_origin()
         npc_positions = self.town_npc_position_lookup()
+        quest_marker = self.tracked_quest_local_position()
         actor_lookups = self.frame_actor_position_lookups(map_w, map_h)
+        temporary_participants = self.temporary_participant_position_lookup()
         procedural_town_active = bool(
             self.on_wilderness() and self.current_procedural_town_plan()
         )
@@ -21295,8 +22707,13 @@ class FarmGame(
         held_ok = False
         held_footprint = set()
         if held_obj and held_anchor:
-            held_ok, _reason = self.can_place_object(held_obj, held_anchor[0], held_anchor[1])
-            held_footprint = set(self.object_footprint_tiles(held_obj, held_anchor[0], held_anchor[1]))
+            held_rotation = normalize_furniture_rotation(self.state.held_object_rotation)
+            held_ok, _reason = self.can_place_object(
+                held_obj, held_anchor[0], held_anchor[1], rotation=held_rotation,
+            )
+            held_footprint = set(self.object_footprint_tiles(
+                held_obj, held_anchor[0], held_anchor[1], held_rotation,
+            ))
 
         for screen_y in range(VIEW_HEIGHT):
             world_y = cam_y + screen_y
@@ -21319,8 +22736,10 @@ class FarmGame(
                 if world_x == s.player_x and world_y == s.player_y:
                     line.append(self.render_player())
                 elif held_obj and (world_x, world_y) in held_footprint:
-                    marker = "X" if (world_x, world_y) == held_anchor else "x"
-                    line.append(colorize(marker, C.PLACEMENT if held_ok else C.PLACEMENT_BAD))
+                    line.append(self.render_held_object_preview(
+                        held_obj, world_x, world_y,
+                        held_anchor[0], held_anchor[1], held_ok,
+                    ))
                 elif s.fishing_active and world_x == s.fishing_target_x and world_y == s.fishing_target_y:
                     phase = self.fishing_phase()
                     marker = "!" if phase == "bite" else ("?" if phase == "nibble" else "o")
@@ -21341,8 +22760,12 @@ class FarmGame(
                     line.append(self.render_farm_animal(farm_animal))
                 elif follower_id:
                     line.append(self.render_travel_follower(str(follower_id)))
+                elif position in temporary_participants:
+                    line.append(self.render_temporary_participant(temporary_participants[position]))
                 elif npc:
                     line.append(self.render_town_npc(npc))
+                elif position == quest_marker:
+                    line.append(self.render_tracked_quest_marker())
                 else:
                     overlay = (
                         self.render_weather_overlay(world_x, world_y, tile_map)
@@ -21370,7 +22793,32 @@ class FarmGame(
         self._frame_placed_object_lookup = None
         return lines
 
-    def footer_lines(self) -> List[str]:
+    def hud_control_line(self, control_override: str = "") -> str:
+        if not self.state.show_control_hints:
+            return ""
+        if control_override:
+            return str(control_override)
+        if self.on_wilderness():
+            if self.wilderness_field_combat_active():
+                return "FIELD COMBAT: WASD/Num move/attack | F aim | V skills | P potion | ./Num5 wait | cross region to escape"
+            return "WASD/Num sail | Z use dock | I inspect | R return" if self.state.wilderness_boating else "WASD/Num move | Red patrols fight | Z interact/enter | I inspect | L look | U overworld | R return"
+        if self.on_wilderness_overworld():
+            return "Overworld: WASD/Num move | U/Z/Enter enter | B/X/Esc/C/Q/Tab close | R return"
+        if self.on_wilderness_cave():
+            return "WASD/Num move | F pickaxe | Z gather/exit | I inspect | L look | Tab menu"
+        if self.on_wilderness_dungeon():
+            return "WASD/Num move/attack | F aim | V skills | P potion | ./Num5 wait | Z use | I inspect"
+        if self.on_wilderness_outpost():
+            return "WASD/Num move | Z records/bunk/supplies | D leave | I inspect | Tab menu"
+        if self.on_wilderness_structure():
+            return "WASD/Num move | Z rest/records/services | D leave | I inspect | Tab menu"
+        if self.on_mine():
+            return "WASD/Num move | Clear enemies for > | F mine | Z interact | L look"
+        if self.on_town():
+            return "WASD/Num move | Z doors/signs/benches | I inspect | L look | Tab menu"
+        return "WASD/Num move | F tool | Z use | I inspect | L look | X furniture | Tab menu"
+
+    def footer_lines(self, control_override: str = "") -> List[str]:
         width = self.hud_line_width()
         max_rows = self.hud_footer_budget()
         lines = [colorize("-" * width, C.UI_BORDER)]
@@ -21387,41 +22835,36 @@ class FarmGame(
             line_cap = remaining if max_lines is None else min(remaining, max(1, int(max_lines)))
             lines.extend(self.wrap_hud_text(text, width, line_cap, ellipsis=ellipsis))
 
+        control_line = self.hud_control_line(control_override)
+        if self.hud_sidebar_active() and control_line:
+            control_line += " | J full log"
+        if self.hud_sidebar_active():
+            if control_line:
+                append_wrapped(f"CONTROLS | {control_line}", max_lines=2)
+            return [lines[0]] + [style_labeled_row(line) for line in lines[1:]]
+
         status_blocks: List[str] = []
         if self.state.fishing_active:
             status_blocks.append(f"{self.fishing_status_text()} | F reel")
         if self.state.held_object:
             x, y = self.front_tile_pos()
-            ok, reason = self.can_place_object(self.state.held_object, x, y) if self.can_hold_objects_here() else (False, "wrong location")
+            rotation = normalize_furniture_rotation(self.state.held_object_rotation)
+            ok, reason = self.can_place_object(
+                self.state.held_object, x, y, rotation=rotation,
+            ) if self.can_hold_objects_here() else (False, "wrong location")
             status = "OK" if ok else f"Blocked: {reason}"
-            status_blocks.append(f"Holding: {self.state.held_object} ({self.footprint_label(self.state.held_object)}) | Z place | X store | {status}")
+            rotate_hint = " | R rotate" if furniture_is_rotatable(self.state.held_object) else ""
+            finish_hint = " | C finish" if furniture_has_art(self.state.held_object) else ""
+            status_blocks.append(
+                f"Holding: {normalize_furniture_finish(self.state.held_object_finish)} "
+                f"{self.state.held_object} "
+                f"({self.footprint_label(self.state.held_object, rotation)}) | "
+                f"Z place | X store{rotate_hint}{finish_hint} | {status}"
+            )
         if self.map_native_combat_active():
             status_blocks.append(self.dungeon_combat_status_line())
 
         target_line = self.target_status_line() if self.state.show_target_info else ""
-        control_line = ""
-        if self.state.show_control_hints:
-            if self.on_wilderness():
-                if self.wilderness_field_combat_active():
-                    control_line = "FIELD COMBAT: WASD/Num move/attack | F aim | V skills | P potion | ./Num5 wait | cross region to escape"
-                else:
-                    control_line = "WASD/Num sail | Z use dock | I inspect | R return" if self.state.wilderness_boating else "WASD/Num move | Red patrols fight | Z interact/enter | I inspect | L look | U overworld | R return"
-            elif self.on_wilderness_overworld():
-                control_line = "Overworld: WASD/Num move | U/Z/Enter enter | Esc/C/Q/Tab cancel | R return"
-            elif self.on_wilderness_cave():
-                control_line = "WASD/Num move | F pickaxe | Z gather/exit | I inspect | L look | Tab menu"
-            elif self.on_wilderness_dungeon():
-                control_line = "WASD/Num move/attack | F aim | V skills | P potion | ./Num5 wait | Z use | I inspect"
-            elif self.on_wilderness_outpost():
-                control_line = "WASD/Num move | Z records/bunk/supplies | D leave | I inspect | Tab menu"
-            elif self.on_wilderness_structure():
-                control_line = "WASD/Num move | Z rest/records/services | D leave | I inspect | Tab menu"
-            elif self.on_mine():
-                control_line = "WASD/Num move | Clear enemies for > | F mine | Z interact | L look"
-            elif self.on_town():
-                control_line = "WASD/Num move | Z doors/signs/benches | I inspect | L look | Tab menu"
-            else:
-                control_line = "WASD/Num move | F tool | Z use | I inspect | L look | X furniture | Tab menu"
 
         append_wrapped(f"MESSAGE | {self.state.message}", max_lines=2, ellipsis=False)
 
@@ -21440,9 +22883,15 @@ class FarmGame(
 
     def render_frame_text(self) -> str:
         self.sync_travel_followers()
+        self.sync_temporary_participants()
         lines: List[str] = []
-        lines.extend(self.header_lines())
-        lines.extend(self.map_lines())
+        map_rows = self.map_lines()
+        if self.hud_sidebar_active():
+            lines.extend(self.header_lines())
+            lines.extend(self.combine_map_and_sidebar(map_rows))
+        else:
+            lines.extend(self.header_lines())
+            lines.extend(map_rows)
         lines.extend(self.footer_lines())
         # Clear every terminal row before writing the replacement line.
         # This prevents ghosted map/NPC/player fragments when the camera moves
@@ -21483,12 +22932,15 @@ class FarmGame(
         self._force_full_redraw = False
 
 
-    def set_message(self, msg: str):
+    def set_message(self, msg: str, category: str = "", log: bool = True):
         self.sync_travel_followers()
         rejected = self.drop_rejected_inventory_near_player()
         if rejected:
             msg = f"{msg} Backpack full; {format_drops(rejected)} was left in a dropped pack here."
         self.state.message = msg
+        if log:
+            self.add_hud_activity(msg, category)
+            self.world_dialogue_record_player_event(msg, category)
 
     def safe_menu(self, menu_func, fallback_message: str = "Closed menu."):
         """
@@ -21542,6 +22994,9 @@ class FarmGame(
         self.update_farm_animal_actors(force=False)
         if minutes > 0:
             self.advance_world_magic_effects(minutes)
+            self.world_dialogue_tick(minutes)
+            self.update_planned_events()
+            self.refresh_quest_states()
 
     def spend_stamina(self, amount: int) -> bool:
         original_amount = int(amount)
@@ -21819,21 +23274,9 @@ class FarmGame(
                 ]
                 self.advance_dungeon_roguelike_turn("struggle free")
                 return
-        if dx and dy:
-            if self.on_wilderness():
-                horizontal_open = self.wilderness_water_movement_preview(
-                    int(s.player_x) + dx, int(s.player_y)
-                )
-                vertical_open = self.wilderness_water_movement_preview(
-                    int(s.player_x), int(s.player_y) + dy
-                )
-            else:
-                horizontal_open = self.passable(int(s.player_x) + dx, int(s.player_y))
-                vertical_open = self.passable(int(s.player_x), int(s.player_y) + dy)
-            if not horizontal_open or not vertical_open:
-                self.set_facing_from_delta(dx, dy)
-                self.set_message("You cannot move diagonally through a blocked corner.")
-                return
+        # Diagonal movement is governed by the destination tile alone. Side
+        # tiles are not part of the move, so walls or furniture beside an open
+        # destination must not trap the player or prevent retracing a step.
         self.set_facing_from_delta(dx, dy)
         was_in_shop = self.in_seed_shop(s.player_x, s.player_y)
         was_in_blacksmith = self.in_blacksmith(s.player_x, s.player_y)
@@ -21926,6 +23369,9 @@ class FarmGame(
         if self.on_wilderness_structure() and self.in_active_bounds(nx, ny) and self.active_map()[ny][nx] == "D":
             self.exit_wilderness_structure()
             return
+        if self.on_wilderness_structure() and self.in_active_bounds(nx, ny) and self.active_map()[ny][nx] == "_":
+            self.use_wilderness_structure_action(nx, ny)
+            return
         if self.on_wilderness():
             if self.try_enter_wilderness_transition_at(nx, ny):
                 return
@@ -21992,8 +23438,12 @@ class FarmGame(
                 return
 
         if self.passable(nx, ny):
+            if getattr(s, "player_furniture_pose", None):
+                s.player_furniture_pose = {}
             s.player_x, s.player_y = nx, ny
             self.update_travel_followers_after_player_move(previous_player_position)
+            self.update_temporary_participants_after_player_move()
+            self.refresh_quest_states()
             if self.on_wilderness():
                 self.apply_wilderness_current_after_move(dx, dy)
             now_in_shop = self.in_seed_shop(nx, ny)
@@ -22144,6 +23594,8 @@ class FarmGame(
                     if grid:
                         return self.wilderness_stream_tile_interactable(str(grid[_local_y][_local_x]))
             return False
+        if self.temporary_participant_at(x, y):
+            return True
         if self.travel_follower_at(x, y):
             return True
         if (
@@ -22166,17 +23618,28 @@ class FarmGame(
         if self.on_wilderness() and self.procedural_town_civic_overlay_at(x, y):
             return True
         if self.on_procedural_town_interior():
+            if (
+                hasattr(self, "on_player_owned_procedural_residence")
+                and self.on_player_owned_procedural_residence()
+                and self.get_placed_object(x, y)
+            ):
+                return True
             tile = self.active_map()[y][x]
             building = self.current_procedural_town_building()
-            if tile == "P" and building and str(building.get("type_id", "")) == "sheriff_office":
-                return True
-            return tile in {
-                "D", "<", "U", ">", "&", "_", "|",
-            }
+            return self.procedural_town_interior_tile_interactable(
+                tile,
+                building,
+                x,
+                y,
+            )
         if self.on_wilderness_outpost():
             return self.active_map()[y][x] in {"D", "&", "@", "n", "b", "s", "P"}
         if self.on_wilderness_structure():
-            return self.active_map()[y][x] in {"D", "&", "@", "b", "s", "P", "+"}
+            if self.wilderness_structure_catalog_furniture_at(x, y):
+                return True
+            return self.active_map()[y][x] in (
+                self.town_interior_interactable_tiles() | {"D", "@", "_", "|"}
+            )
 
         if self.on_town():
             public_feature = self.town_public_event_feature_at(x, y)
@@ -22186,6 +23649,8 @@ class FarmGame(
             return self.in_seed_shop(x, y) or self.in_blacksmith(x, y) or tile in ["E", "D", "Q", "G", "C", "X", "L", "M", "I", "Y", "A", "H", "R", "P", "U", "?", "F", "b", "B", "N", "m", "$", "!", "T", "W", "~", "h"]
 
         if self.on_town_interior():
+            if self.starting_town_catalog_furniture_at(x, y):
+                return True
             tile = self.active_map()[y][x]
             return tile in self.town_interior_interactable_tiles()
 
@@ -22302,6 +23767,14 @@ class FarmGame(
         """General interaction prefers the faced tile, then the standing tile."""
         sx, sy = self.state.player_x, self.state.player_y
         fx, fy = self.front_tile_pos()
+        standing_key, standing_obj, standing_ax, standing_ay = self.placed_object_at(sx, sy)
+        if standing_obj and standing_ax is not None and standing_ay is not None:
+            if furniture_walkable_kind(
+                standing_obj,
+                int(sx) - int(standing_ax), int(sy) - int(standing_ay),
+                self.object_rotation_for_key(standing_key, standing_obj),
+            ) == "seat":
+                return sx, sy
         if self.is_interactable_tile(fx, fy):
             return fx, fy
         if self.is_interactable_tile(sx, sy):
@@ -22318,6 +23791,11 @@ class FarmGame(
             if self.on_wilderness():
                 return f"Z/Enter: enter neighboring chunk and interact | {self.describe_streamed_wilderness_tile(x, y)}"
             return "Z/Enter: nothing"
+
+        temporary_participant = self.temporary_participant_at(x, y)
+        if temporary_participant:
+            actor = self.temporary_participant_actor(temporary_participant)
+            return f"Z/Enter: talk to {actor.get('name', 'companion')}"
 
         travel_follower_id = self.travel_follower_at(x, y)
         if travel_follower_id:
@@ -22369,6 +23847,13 @@ class FarmGame(
             if home_sign:
                 return "Z/Enter: read home-road directions"
         if self.on_procedural_town_interior():
+            if (
+                hasattr(self, "on_player_owned_procedural_residence")
+                and self.on_player_owned_procedural_residence()
+            ):
+                _object_key, placed, _ax, _ay = self.placed_object_at(x, y)
+                if placed and INFRASTRUCTURE_DATA.get(placed, {}).get("category") == "furniture":
+                    return self.furniture_action_hint_for(placed).replace("Z:", "Z/Enter:")
             tile = self.active_map()[y][x]
             if tile == "D":
                 return "Walk into door: leave building"
@@ -22392,7 +23877,7 @@ class FarmGame(
             building = self.current_procedural_town_building()
             if tile == "P" and building and str(building.get("type_id", "")) == "sheriff_office":
                 return "Z/Enter: open bounty board"
-            return "Z/Enter: nothing"
+            return self.procedural_town_interior_tile_hint(tile, building, x, y)
         if self.on_wilderness_outpost():
             tile = self.active_map()[y][x]
             if tile == "@":
@@ -22405,6 +23890,9 @@ class FarmGame(
         if self.on_wilderness_structure():
             tile = self.active_map()[y][x]
             record = self.wilderness_structure_record()
+            catalog_furniture = self.wilderness_structure_catalog_furniture_at(x, y)
+            if isinstance(catalog_furniture, dict):
+                return self.catalog_furniture_action_hint(catalog_furniture).replace("Z:", "Z/Enter:")
             game_id = self.game_table_fixture_id(tile)
             if game_id and str(record.get("type_id", "")) in {"roadside_inn", "desert_caravanserai", "tundra_wayhouse"}:
                 return (
@@ -22412,7 +23900,14 @@ class FarmGame(
                     if record.get("repaired")
                     else "Z/Enter: inspect unrestored game table"
                 )
-            return {"D": "Walk into door: return to wilderness", "b": "Z/Enter: rest here", "P": "Z/Enter: review structure records", "&": "Z/Enter: use restored service counter", "s": "Z/Enter: check regional supplies", "@": "Z/Enter: talk to caretaker", "+": "Z/Enter: visit wayside shrine"}.get(tile, "Z/Enter: inspect structure")
+            fixture = BUILDING_TEMPLATE_FURNISHING_DATA.get(str(tile))
+            if not isinstance(fixture, dict):
+                fixture = BUILDING_TEMPLATE_GENERIC_FIXTURE_DATA.get(str(tile))
+            if isinstance(fixture, dict):
+                return self.furniture_action_hint_for(
+                    building_template_functional_furniture_name(fixture)
+                ).replace("Z:", "Z/Enter:")
+            return {"D": "Walk into door: return to wilderness", "_": "Z/Enter: open room door", "|": "Z/Enter: close room door", "b": "Z/Enter: rest here", "P": "Z/Enter: open site work and restoration board", "&": "Z/Enter: use restored service counter", "s": "Z/Enter: check regional supplies", "@": "Z/Enter: talk to caretaker", "+": "Z/Enter: visit wayside shrine"}.get(tile, "Z/Enter: use structure fixture")
 
         if self.on_town_interior():
             return self.town_interior_tile_hint(x, y)
@@ -22424,6 +23919,8 @@ class FarmGame(
                 return f"Z/Enter: read mailbox ({count} unread)"
             if placed:
                 if self.on_house():
+                    if INFRASTRUCTURE_DATA.get(placed, {}).get("category") == "furniture":
+                        return self.furniture_action_hint_for(placed).replace("Z:", "Z/Enter:")
                     return f"Z/Enter: use {placed}"
                 if placed == "Seed Hopper":
                     return "Z/Enter: load Seed Hopper"
@@ -22796,6 +24293,89 @@ class FarmGame(
         self.vertical_panel_view("Weather Forecast", self.forecast_date_rows(7), LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
         self.set_message("Checked the farmhouse weather forecast.")
 
+    def house_furniture_ensemble_status(self) -> List[Dict[str, object]]:
+        records: List[Dict[str, object]] = []
+        for key, obj_name in self.state.placed_objects.items():
+            if not isinstance(key, str) or not key.startswith("HouseInterior:"):
+                continue
+            parsed = self.parse_object_key(key)
+            if not parsed:
+                continue
+            _scope, x, y = parsed
+            rotation = self.object_rotation_for_key(key)
+            width, height = self.object_footprint_size(obj_name, rotation)
+            records.append({
+                "name": str(obj_name),
+                "function": str(INFRASTRUCTURE_DATA.get(obj_name, {}).get("furniture_function", "")),
+                "min_x": int(x), "min_y": int(y),
+                "max_x": int(x) + width - 1, "max_y": int(y) + height - 1,
+            })
+
+        def matches(record: Dict[str, object], functions: set, names: set) -> bool:
+            return str(record["function"]) in functions or str(record["name"]) in names
+
+        def distance(first: Dict[str, object], second: Dict[str, object]) -> int:
+            dx = max(
+                0,
+                int(second["min_x"]) - int(first["max_x"]),
+                int(first["min_x"]) - int(second["max_x"]),
+            )
+            dy = max(
+                0,
+                int(second["min_y"]) - int(first["max_y"]),
+                int(first["min_y"]) - int(second["max_y"]),
+            )
+            return max(dx, dy)
+
+        def paired(
+            first_functions: set, first_names: set,
+            second_functions: set, second_names: set,
+            radius: int,
+        ) -> bool:
+            first_group = [r for r in records if matches(r, first_functions, first_names)]
+            second_group = [r for r in records if matches(r, second_functions, second_names)]
+            return any(
+                first is not second and distance(first, second) <= radius
+                for first in first_group for second in second_group
+            )
+
+        definitions = [
+            (
+                "Bedroom Retreat", 4,
+                paired({"sleep"}, {"Bed", "Child Bed"}, {"storage", "mirror"}, {"Dresser", "Wardrobe", "Nightstand"}, 5),
+                "Keep a bed near a wardrobe, dresser, nightstand, vanity, or hutch.",
+            ),
+            (
+                "Working Kitchen", 4,
+                paired({"cook"}, {"Kitchen Counter"}, {"dining", "family_meal", "storage"}, {"Pantry", "Wooden Table"}, 6),
+                "Arrange cooking space near dining furniture or food storage.",
+            ),
+            (
+                "Cozy Parlor", 4,
+                paired({"rest"}, {"Couch", "Armchair"}, {"hearth"}, {"Fireplace", "Tea Table", "Standing Lamp"}, 5),
+                "Place comfortable seating near a hearth, lamp, or tea table.",
+            ),
+            (
+                "Study Corner", 3,
+                paired({"bookshelf"}, {"Bookshelf"}, {"craft"}, {"Writing Desk", "Study Desk"}, 5),
+                "Place books near a writing, study, or workshop surface.",
+            ),
+            (
+                "Family Room", 4,
+                paired({"family_meal"}, {"Family Table"}, set(), {"Crib", "Child Bed", "Toy Shelf", "Keepsake Chest"}, 6),
+                "Arrange the family table near children's or keepsake furniture.",
+            ),
+            (
+                "Proper Washroom", 3,
+                paired({"bathe"}, {"Wash Basin"}, {"mirror", "storage"}, {"Wall Mirror", "Dresser"}, 5),
+                "Place bathing facilities near a mirror or clothing storage.",
+            ),
+        ]
+        return [
+            {"name": name, "bonus": bonus, "active": bool(active), "hint": hint}
+            for name, bonus, active, hint in definitions
+        ]
+
     def house_comfort_score(self) -> int:
         """Calculate comfort from unique placed furniture and purchased house upgrades."""
         furniture_scores = {
@@ -22843,12 +24423,16 @@ class FarmGame(
         }
         score = 0
         seen: Dict[str, int] = {}
-        for key, obj_name in self.state.placed_objects.items():
-            if not isinstance(key, str) or not key.startswith("HouseInterior:"):
-                continue
-            seen[obj_name] = seen.get(obj_name, 0) + 1
+        for mapping in (self.state.placed_objects, self.state.placed_floor_objects):
+            for key, obj_name in mapping.items():
+                if not isinstance(key, str) or not key.startswith("HouseInterior:"):
+                    continue
+                seen[obj_name] = seen.get(obj_name, 0) + 1
         for obj_name, count in seen.items():
-            base = furniture_scores.get(obj_name, 0)
+            base = furniture_scores.get(
+                obj_name,
+                max(0, int(INFRASTRUCTURE_DATA.get(obj_name, {}).get("comfort", 0) or 0)),
+            )
             if base <= 0:
                 continue
             # Duplicate furniture still helps, but with diminishing returns.
@@ -22857,6 +24441,23 @@ class FarmGame(
                 score += min(count - 1, 3)
         for upgrade in self.state.house_upgrades:
             score += upgrade_scores.get(upgrade, 0)
+        score += sum(
+            int(ensemble["bonus"])
+            for ensemble in self.house_furniture_ensemble_status()
+            if ensemble["active"]
+        )
+        display_bonus = 0
+        for key, furniture_state in dict(getattr(self.state, "furniture_states", {}) or {}).items():
+            if not (
+                str(key).startswith("placed:HouseInterior:")
+                or str(key).startswith("catalog:HouseInterior:")
+            ) or not isinstance(furniture_state, dict):
+                continue
+            if not str(furniture_state.get("display_item", "") or ""):
+                continue
+            value = max(0, int(furniture_state.get("display_value", 0) or 0))
+            display_bonus += 1 + min(2, value // 250)
+        score += min(12, display_bonus)
         return max(0, score)
 
     def house_comfort_rank(self) -> str:
@@ -22925,9 +24526,18 @@ class FarmGame(
             "- Rugs, couch, bed, plants, art, lighting",
             "- Kitchen, pantry, wash basin, fireplace",
             "- Desks, shelves, wardrobes, tables, seating",
+            "- Meaningful possessions arranged on household display surfaces",
             "",
             "Duplicates help a little, but unique furniture matters more.",
         ]
+        rows.extend(["", "ARRANGEMENT BONUSES"])
+        for ensemble in self.house_furniture_ensemble_status():
+            marker = "+" if ensemble["active"] else "-"
+            rows.append(
+                f"{marker} {ensemble['name']}: +{ensemble['bonus']} comfort"
+                if ensemble["active"]
+                else f"{marker} {ensemble['name']}: {ensemble['hint']}"
+            )
         self.vertical_panel_view("House Comfort", rows, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
         self.set_message(
             f"House comfort: {rank} ({score}). "
@@ -23224,6 +24834,38 @@ class FarmGame(
                     "- Build Mode can move eligible objects without losing loaded machine contents or progress.",
                 ],
             },
+            "functional_furniture": {
+                "title": "Furniture and Interior Objects",
+                "hint": "using every furnishing",
+                "lines": [
+                    "FUNCTIONAL FURNITURE", "",
+                    "- Face furniture and press Z/Enter. The target line states its real action rather than merely saying inspect.",
+                    "- Chairs, stools, sofas, and benches seat you on their usable cell, pass time, and restore stamina once daily.",
+                    "- Beds provide full sleep in your homes; inn beds provide paid overnight lodging; other beds allow a shorter rest.",
+                    "- Stoves, ovens, kitchens, and preparation counters open cooking. Workbenches and tool stations open crafting.",
+                    "- Desks support persistent journal entries, note review, crafting, and daily planning for focus recovery.",
+                    "- Dining and social tables support sitting, meals, conversation, and writing. Game furniture starts its represented game.",
+                    "- Cabinets, shelves, wardrobes, dressers, bookcases, counters, and chests are real shared containers across their full footprint.",
+                    "- Baths and wash fixtures restore stamina and some combat health while advancing time.",
+                    "- Lamps, chandeliers, and candelabra toggle on and off and illuminate nearby interior floor while active.",
+                    "- Potted plants can be watered daily and eventually harvested for flowers or herbs.",
+                    "- Art, sculpture, tapestries, and aquariums can be studied for a small once-daily focus or recovery benefit.",
+                    "- Clocks show the exact time and can change your wake-up time. Mirrors and clothing storage change appearance.",
+                    "- Rugs can be cleaned and straightened. Room dividers fold open into passable space and close again.",
+                    "- Public shop counters open the building's actual service; public storage respects display and ownership rules.",
+                    "- Furniture state, stored contents, plant care, lights, notes, and divider positions persist in the save.",
+                    "- Repeated use builds familiarity: New furniture becomes Familiar, Trusted, and eventually a Favorite.",
+                    "- Familiar furniture provides stronger recovery, focus, plant yields, and other benefits where appropriate.",
+                    "- Complementary nearby furniture creates room support: beds benefit from storage and rugs, desks from seats and light, and baths from mirrors and privacy.",
+                    "- Beds now offer overnight sleep, one-hour rests, wake-time control, and a room-support summary.",
+                    "- Plants can be fertilized and harvested deliberately. Deluxe fertilizer can increase their yield.",
+                    "- Aquariums hold real caught fish; stocked, fed fish can reproduce when the tank has room.",
+                    "- Better-supported and familiar cooking stations prepare food faster and can produce a bonus serving.",
+                    "- Owned beds can be assigned to a spouse or child. Household routines respect assignments and family use builds familiarity.",
+                    "- Tables in owned homes can display a real inventory item. Examine displays for daily focus or return the item at any time.",
+                    "- Valuable household displays add a bounded comfort bonus. Stocked aquariums and occupied displays must be emptied before storage, so contents cannot be lost.",
+                ],
+            },
             "shipping": {
                 "title": "Shipping",
                 "hint": "sell safely",
@@ -23387,10 +25029,20 @@ class FarmGame(
                     "- Bulletin jobs refresh daily and trade common goods for money and town-wide goodwill.",
                     "- Companion quests unlock after stronger bonds and can affect tactical participation.",
                     "- Festivals occur on calendar dates and contain limited activities, rewards, scenes, and attendance.",
+                    "- Weddings, births, outings, festivals, elections, council sessions, caravan journeys, and major landmark work unfold over the visible world instead of replacing it with a detached text panel.",
+                    "- Confirm advances a world event one beat at a time. B, X, Escape, Q, or Tab safely skips presentation while preserving earned outcomes.",
+                    "- Runtime world events persist their scene record, so an interrupted save can validate and resume the active sequence.",
                     "- The mailbox delivers progression notices, relationship letters, invitations, and system guidance.",
                     "- Museum donations track agriculture, fishing, geology, monsters, history, engineering, and forage.",
                     "- Donating may be more valuable long-term than selling the first example of a rare discovery.",
                     "- Journal quest pages distinguish active, ready-to-turn-in, and completed obligations.",
+                    "- Resident requests, companion quests, bulletin jobs, regional contracts, bounties, and combat missions also appear in the unified Quest Log.",
+                    "- Unified legacy entries use their original completion and reward rules, so rewards are never granted twice.",
+                    "- Bulletin jobs and bounties still require their physical boards even when their objectives are tracked from the Journal.",
+                    "- Unified quests can track travel, conversations, escorts, battles, fishing, harvesting, crafting, repairs, inspections, and recovered loot.",
+                    "- Open Planned Activities from the Quest Log to inspect appointments, see conflicts, reschedule, cancel, or review their history.",
+                    "- Quest-linked expeditions protect their schedules; ordinary social plans remain under your control.",
+                    "- Severe weather can postpone outdoor plans, and an unavailable participant cancels cleanly without an automatic relationship penalty.",
                 ],
             },
             "relationships": {
@@ -23505,10 +25157,15 @@ class FarmGame(
                     "- Open Tab > Farm & Home > Build Mode inside the farmhouse to arrange furniture.",
                     "- The build cursor scrolls independently from the player.",
                     "- Z or Enter picks up furniture and commits its new position.",
-                    "- P opens the palette; X stores empty furniture; C cancels a move.",
-                    "- Primary-home comfort raises maximum stamina.",
+                    "- P opens the palette; R rotates; F chooses a finish; X stores empty furniture; C cancels.",
+                    "- Quick pickup preserves orientation and finish: R rotates and C cycles finishes while holding.",
+                    "- Primary-home comfort raises maximum stamina, and nearby furniture ensembles add bonuses.",
+                    "- Bedroom, kitchen, parlor, study, family-room, and washroom arrangements are recognized.",
                     "- Beds sleep, calendars show dates, mirrors change player color, and bookshelves open tutorials.",
                     "- Kitchen counters unlock cooking when placed.",
+                    "- Large furniture has distinct sections: use the visible stove, sink, shelves, seats, tools, or drawers.",
+                    "- Rotating a piece also rotates its functional sections and usable approach sides.",
+                    "- Spouses and children use available furniture during home routines without occupying blocked cells.",
                     "- Family furniture opens child and household records once the home grows.",
                 ],
             },
@@ -23851,9 +25508,11 @@ class FarmGame(
                     "- Settings control display behavior, interface preferences, tutorials, and whether characters age beyond adulthood.",
                     "- Wake-up time defaults to 7:00 AM and can be changed from 4:00 AM through noon in Settings.",
                     "- The menu hint area appears outside the active menu frame so guidance does not cover choices.",
-                    "- Most menus support arrows or W/S, Z or Enter to confirm, and X or Escape to go back.",
+                    "- Most menus support arrows or W/S, page keys for long lists, Z or Enter to confirm, and B/X/Escape/Q/Tab to go back.",
                     "- Inspect mode identifies terrain and interactable objects without committing to an action.",
-                    "- Terminal size matters: enlarge the window if map borders, descriptions, or side panels appear cramped.",
+                    "- The complete status HUD remains above the map; on wide terminals, a separate right-side feed shows recent dialogue, interactions, and activity.",
+                    "- Press J during normal play to open Activity History; press B, X, J, Escape, Q, or Tab to close it.",
+                    "- The right-side activity feed can be disabled in Settings to restore the complete legacy stacked HUD, and it disables itself when the terminal is narrow.",
                     "- The Journal and tutorial library are always available; learning notices do not permanently lock information away.",
                     "- Older compatible saves are migrated when loaded, but keeping a backup before updating the game is still wise.",
                 ],
@@ -23864,7 +25523,8 @@ class FarmGame(
                 "lines": [
                     "JOURNAL AND CODEX",
                     "",
-                    "- The Journal tracks today's priorities, quests, land claims, relationships, birthdays, family, bestiary, combat reports, and crafting goals.",
+                    "- The Journal tracks today's priorities, quests, land claims, relationships, birthdays, family, bestiary, combat reports, crafting goals, and recent activity.",
+                    "- Activity Log preserves up to 100 categorized messages, compresses immediate repetitions, and can be filtered by combat, gains, trade, social changes, warnings, travel, or general activity.",
                     "- Open it from the Tab menu, farmhouse desk, or library.",
                     "- If you feel lost, check Progress Goals first.",
                     "- The calendar tracks birthdays, festivals, market days, hazards, and warnings.",
@@ -23900,6 +25560,7 @@ class FarmGame(
                     "inventory_crafting_cooking",
                     "animals",
                     "farm_buildings",
+                    "functional_furniture",
                     "shipping",
                     "money_and_shops",
                     "tavern_games",
@@ -24250,9 +25911,1636 @@ class FarmGame(
         self.farm_building_menu(obj_name, key)
 
 
-    def use_house_furniture(self, placed: str):
+    def catalog_furniture_at(self, x: int, y: int) -> Optional[Dict[str, object]]:
+        """Return generated/catalog furniture consistently in every interior."""
+        if self.on_procedural_town_interior():
+            record = self.procedural_town_catalog_furniture_at(x, y)
+            return record if isinstance(record, dict) else None
+        record = self.starting_town_catalog_furniture_at(x, y)
+        return record if isinstance(record, dict) else None
+
+    def furniture_state_key(
+        self,
+        name: str,
+        x: int,
+        y: int,
+        catalog_record: Optional[Dict[str, object]] = None,
+        object_key: Optional[str] = None,
+    ) -> str:
+        if object_key:
+            return f"placed:{object_key}:{name}"
+        record = catalog_record if isinstance(catalog_record, dict) else {}
+        if self.on_procedural_town_interior():
+            source_x = int(record.get("source_x", x))
+            source_y = int(record.get("source_y", y))
+            anchor_x = source_x - int(record.get("offset_x", 0) or 0)
+            anchor_y = source_y - int(record.get("offset_y", 0) or 0)
+            plan = self.current_procedural_town_plan() or {}
+            building = self.current_procedural_town_building() or {}
+            floor = int(getattr(self.state, "current_procedural_building_floor", 0) or 0)
+            return (
+                f"catalog:{plan.get('id', 'town')}:{building.get('id', 'building')}:"
+                f"{floor}:{anchor_x},{anchor_y}:{name}"
+            )
+        anchor_x = int(x) - int(record.get("offset_x", 0) or 0)
+        anchor_y = int(y) - int(record.get("offset_y", 0) or 0)
+        return f"catalog:{self.state.location}:{anchor_x},{anchor_y}:{name}"
+
+    def furniture_state_record(
+        self,
+        name: str,
+        x: int,
+        y: int,
+        catalog_record: Optional[Dict[str, object]] = None,
+        object_key: Optional[str] = None,
+    ) -> Tuple[str, Dict[str, object]]:
+        if not isinstance(getattr(self.state, "furniture_states", None), dict):
+            self.state.furniture_states = {}
+        key = self.furniture_state_key(name, x, y, catalog_record, object_key)
+        record = self.state.furniture_states.setdefault(key, {})
+        if not isinstance(record, dict):
+            record = {}
+            self.state.furniture_states[key] = record
+        record["name"] = str(name)
+        return key, record
+
+    def furniture_action_for(self, name: str) -> str:
+        return furniture_action_id(name, INFRASTRUCTURE_DATA.get(name, {}))
+
+    def furniture_action_hint_for(self, name: str) -> str:
+        return f"Z: {furniture_action_label(name, INFRASTRUCTURE_DATA.get(name, {}))} | I: inspect"
+
+    def catalog_furniture_action_hint(self, record: Dict[str, object]) -> str:
+        component = str(record.get("component", ""))
+        component_labels = {
+            "cook": "cook", "prepare": "prepare food", "wash": "use sink",
+            "craft": "craft or repair", "gear": "manage equipment",
+            "rest": "sit down", "family_meal": "share a meal",
+            "social": "sit and socialize", "bookshelf": "read or browse books",
+            "storage": "open storage", "mirror": "use mirror",
+        }
+        if component in component_labels:
+            return f"Z: {component_labels[component]} | I: inspect"
+        return self.furniture_action_hint_for(str(record.get("name", "Furniture")))
+
+    def furniture_daily_available(self, state_record: Dict[str, object], field: str) -> bool:
+        return str(state_record.get(field, "")) != self.town_npc_day_key()
+
+    def furniture_mark_daily(self, state_record: Dict[str, object], field: str) -> None:
+        state_record[field] = self.town_npc_day_key()
+
+    @staticmethod
+    def furniture_familiarity_label(state_record: Dict[str, object]) -> str:
+        uses = max(0, int(state_record.get("uses", 0) or 0))
+        if uses >= 40:
+            return "Favorite"
+        if uses >= 15:
+            return "Trusted"
+        if uses >= 5:
+            return "Familiar"
+        return "New"
+
+    @staticmethod
+    def furniture_familiarity_bonus(state_record: Dict[str, object]) -> int:
+        return {"New": 0, "Familiar": 1, "Trusted": 2, "Favorite": 3}.get(
+            FarmGame.furniture_familiarity_label(state_record), 0
+        )
+
+    def record_furniture_use(
+        self, state_record: Dict[str, object], action: str,
+    ) -> None:
+        state_record["uses"] = max(0, int(state_record.get("uses", 0) or 0)) + 1
+        state_record["last_action"] = str(action)
+        state_record["last_used_day"] = self.town_npc_day_key()
+
+    @staticmethod
+    def cancel_furniture_use(state_record: Dict[str, object]) -> None:
+        """Do not award familiarity when the player immediately backs out."""
+        state_record["uses"] = max(0, int(state_record.get("uses", 0) or 0) - 1)
+
+    def furniture_name_at_position(self, x: int, y: int) -> str:
+        """Resolve furniture across catalog, placed, and authored fixture layers."""
+        if not self.in_active_bounds(int(x), int(y)):
+            return ""
+        catalog = self.catalog_furniture_at(int(x), int(y))
+        if isinstance(catalog, dict):
+            return str(catalog.get("name", ""))
+        placed = self.get_placed_object(int(x), int(y))
+        if placed and INFRASTRUCTURE_DATA.get(placed, {}).get("category") == "furniture":
+            return str(placed)
+        tile = str(self.active_map()[int(y)][int(x)])
+        fixture = BUILDING_TEMPLATE_FURNISHING_DATA.get(tile)
+        if not isinstance(fixture, dict):
+            fixture = BUILDING_TEMPLATE_GENERIC_FIXTURE_DATA.get(tile)
+        if isinstance(fixture, dict):
+            return building_template_functional_furniture_name(fixture)
+        semantic = self.town_semantic_furniture_name(tile) if self.on_town_interior() else ""
+        return str(semantic or "")
+
+    def furniture_room_support(
+        self, action: str, x: int, y: int, radius: int = 5,
+    ) -> Tuple[int, List[str]]:
+        """Return bonuses supplied by complementary furniture in the same room area."""
+        support_actions = {
+            "sleep": ("storage", "light", "rug", "privacy"),
+            "seat": ("table", "light", "hearth", "art", "read"),
+            "cook": ("storage", "table", "light"),
+            "work": ("seat", "light", "read", "storage"),
+            "read": ("seat", "light", "table"),
+            "bath": ("storage", "mirror", "privacy", "light"),
+            "hearth": ("seat", "rug", "table"),
+            "table": ("seat", "light", "hearth"),
+            "plant": ("light", "water", "art"),
+            "art": ("seat", "light"),
+            "aquarium": ("seat", "light", "plant"),
+        }.get(str(action), ())
+        if not support_actions:
+            return 0, []
+        found: Dict[str, str] = {}
+        for check_y in range(max(0, int(y) - radius), min(self.active_map_height(), int(y) + radius + 1)):
+            for check_x in range(max(0, int(x) - radius), min(self.active_map_width(), int(x) + radius + 1)):
+                if abs(check_x - int(x)) + abs(check_y - int(y)) > radius:
+                    continue
+                nearby_name = self.furniture_name_at_position(check_x, check_y)
+                if not nearby_name:
+                    continue
+                nearby_action = furniture_action_id(
+                    nearby_name, INFRASTRUCTURE_DATA.get(nearby_name, {})
+                )
+                if nearby_action in support_actions and nearby_action not in found:
+                    found[nearby_action] = nearby_name
+        ordered = [found[action_id] for action_id in support_actions if action_id in found]
+        return min(3, len(ordered)), ordered[:3]
+
+    def furniture_effectiveness(
+        self,
+        action: str,
+        x: int,
+        y: int,
+        state_record: Dict[str, object],
+    ) -> Tuple[int, List[str]]:
+        room_bonus, supporters = self.furniture_room_support(action, x, y)
+        return self.furniture_familiarity_bonus(state_record) + room_bonus, supporters
+
+    def furniture_status_text(
+        self,
+        name: str,
+        x: int,
+        y: int,
+        catalog_record: Optional[Dict[str, object]] = None,
+        object_key: Optional[str] = None,
+    ) -> str:
+        key = self.furniture_state_key(name, x, y, catalog_record, object_key)
+        states = getattr(self.state, "furniture_states", {})
+        state_record = states.get(key, {}) if isinstance(states, dict) else {}
+        if not isinstance(state_record, dict):
+            state_record = {}
+        action = furniture_action_id(name, INFRASTRUCTURE_DATA.get(name, {}))
+        room_bonus, supporters = self.furniture_room_support(action, x, y)
+        uses = max(0, int(state_record.get("uses", 0) or 0))
+        familiarity = self.furniture_familiarity_label(state_record)
+        support_text = (
+            f" Room support +{room_bonus} from {', '.join(supporters)}."
+            if room_bonus and supporters else ""
+        )
+        assignment = str(state_record.get("assigned_name", "") or "")
+        display_item = str(state_record.get("display_item", "") or "")
+        personal_text = f" Assigned to {assignment}." if assignment else ""
+        display_text = f" Displaying {display_item}." if display_item else ""
+        return (
+            f" Familiarity: {familiarity} ({uses} uses)."
+            f"{personal_text}{display_text}{support_text}"
+        )
+
+    def catalog_furniture_cells_for_state_key(self, target_key: str) -> List[Tuple[int, int, Dict[str, object]]]:
+        if self.on_procedural_town_interior():
+            plan = self.current_procedural_town_plan() or {}
+            building = self.current_procedural_town_building() or {}
+            floor = int(getattr(self.state, "current_procedural_building_floor", 0) or 0)
+            lookup = getattr(self, "_procedural_town_catalog_furniture_cache", {}).get(
+                (str(plan.get("id", "")), str(building.get("id", "")), floor), {}
+            )
+        else:
+            lookup = getattr(self, "_starting_town_catalog_furniture_cache", {}).get(
+                str(self.state.location), {}
+            )
+        result = []
+        for (cell_x, cell_y), record in dict(lookup or {}).items():
+            if not isinstance(record, dict):
+                continue
+            name = str(record.get("name", "Furniture"))
+            if self.furniture_state_key(name, cell_x, cell_y, record) == target_key:
+                result.append((int(cell_x), int(cell_y), record))
+        return result
+
+    def sit_at_furniture(
+        self,
+        name: str,
+        x: int,
+        y: int,
+        catalog_record: Optional[Dict[str, object]],
+        object_key: Optional[str],
+        state_key: str,
+        state_record: Dict[str, object],
+        effect_bonus: int = 0,
+    ) -> bool:
+        seat_x, seat_y = int(x), int(y)
+        if catalog_record is not None and not catalog_record.get("walkable_kind"):
+            seat = next(
+                (
+                    (cell_x, cell_y)
+                    for cell_x, cell_y, cell in self.catalog_furniture_cells_for_state_key(state_key)
+                    if str(cell.get("walkable_kind", "")) == "seat"
+                ),
+                None,
+            )
+            if seat:
+                seat_x, seat_y = seat
+        if self.in_active_bounds(seat_x, seat_y) and self.passable(seat_x, seat_y):
+            self.state.player_x, self.state.player_y = seat_x, seat_y
+        self.state.player_furniture_pose = {
+            "pose": "seated", "key": state_key, "name": name,
+            "x": int(self.state.player_x), "y": int(self.state.player_y),
+        }
+        restored = 0
+        if self.furniture_daily_available(state_record, "rested_day"):
+            comfort = max(2, min(10, int(INFRASTRUCTURE_DATA.get(name, {}).get("comfort", 3) or 3)))
+            restored = self.restore_stamina(comfort + max(0, int(effect_bonus)))
+            self.furniture_mark_daily(state_record, "rested_day")
+        self.advance_time(10)
+        self.set_message(
+            f"You sit on the {name.lower()} and recover {restored} stamina."
+            if restored else f"You sit on the {name.lower()} for a while."
+        )
+        return True
+
+    def write_furniture_journal_entry(self, name: str, state_record: Dict[str, object]) -> None:
+        entry = {
+            "date": format_date(self.state.month, self.state.day, self.state.year),
+            "time": f"{int(self.state.hour):02d}:{int(self.state.minute):02d}",
+            "location": self.location_label(),
+            "furniture": name,
+            "text": f"Plans and observations recorded at the {name.lower()}.",
+        }
+        self.state.furniture_journal_entries.append(entry)
+        self.state.furniture_journal_entries = self.state.furniture_journal_entries[-100:]
+        state_record["last_written_day"] = self.town_npc_day_key()
+        self.advance_time(15)
+        self.autosave_with_message(f"Wrote a journal entry at the {name.lower()}.")
+
+    def furniture_journal_lines(self) -> List[str]:
+        rows = ["WRITTEN NOTES", ""]
+        entries = list(getattr(self.state, "furniture_journal_entries", []) or [])
+        if not entries:
+            return rows + ["No entries yet. Use a desk or writing surface to begin."]
+        for entry in entries[-30:][::-1]:
+            rows.extend([
+                f"{entry.get('date', 'Unknown date')} - {entry.get('location', 'Unknown place')}",
+                str(entry.get("text", "A short note.")),
+                "",
+            ])
+        return rows
+
+    def furniture_work_menu(
+        self, name: str, state_record: Dict[str, object], effect_bonus: int = 0,
+    ) -> None:
+        while True:
+            choice = self.vertical_panel_select(
+                name,
+                [
+                    MenuItem(label="Write journal entry", value="write", enabled=True, hint="persistent notes"),
+                    MenuItem(label="Review written notes", value="review", enabled=True, hint=f"{len(self.state.furniture_journal_entries)} entries"),
+                    MenuItem(label="Craft or repair", value="craft", enabled=True),
+                    MenuItem(label="Plan the day", value="plan", enabled=True, hint="daily focus recovery"),
+                    MenuItem(label="Back", value=MENU_BACK, enabled=True),
+                ],
+                LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT, return_back=True,
+            )
+            if choice is None or choice.value == MENU_BACK:
+                self.cancel_furniture_use(state_record)
+                self.set_message(f"You step away from the {name.lower()}.")
+                return
+            if choice.value == "write":
+                self.write_furniture_journal_entry(name, state_record)
+                return
+            if choice.value == "review":
+                self.vertical_panel_view("Written Notes", self.furniture_journal_lines(), LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
+                continue
+            if choice.value == "craft":
+                self.safe_menu(self.show_crafting_menu, "Crafting closed.")
+                return
+            if choice.value == "plan":
+                before = int(self.state.combat_focus)
+                self.state.combat_focus = min(
+                    int(self.state.combat_max_focus), before + 5 + min(3, int(effect_bonus))
+                )
+                self.advance_time(15)
+                self.furniture_mark_daily(state_record, "planned_day")
+                self.autosave_with_message(
+                    f"Planned the day at the {name.lower()}. Focus +{self.state.combat_focus - before}."
+                )
+                return
+
+    def furniture_table_menu(
+        self, name: str, x: int, y: int, catalog_record: Optional[Dict[str, object]],
+        object_key: Optional[str], state_key: str, state_record: Dict[str, object],
+        effect_bonus: int = 0,
+    ) -> None:
+        can_display = bool(object_key) or self.on_house() or (
+            hasattr(self, "on_player_owned_procedural_residence")
+            and self.on_player_owned_procedural_residence()
+        )
+        displayed_item = str(state_record.get("display_item", "") or "")
+        items = [
+            MenuItem(label="Sit at the table", value="sit", enabled=True),
+            MenuItem(label="Share or eat a meal", value="meal", enabled=True),
+            MenuItem(label="Write and plan", value="write", enabled=True),
+        ]
+        if can_display:
+            items.append(MenuItem(
+                label="Arrange display", value="display", enabled=True,
+                hint=displayed_item or "empty surface",
+            ))
+        items.append(MenuItem(label="Back", value=MENU_BACK, enabled=True))
+        choice = self.vertical_panel_select(
+            name,
+            items,
+            LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT, return_back=True,
+        )
+        if choice is None or choice.value == MENU_BACK:
+            self.cancel_furniture_use(state_record)
+            self.set_message(f"You step away from the {name.lower()}.")
+        elif choice.value == "sit":
+            self.sit_at_furniture(
+                name, x, y, catalog_record, object_key, state_key, state_record,
+                effect_bonus,
+            )
+        elif choice.value == "meal":
+            if self.family_meal_menu() != "changed":
+                restored = self.restore_stamina(4 + min(4, int(effect_bonus)))
+                self.advance_time(20)
+                self.set_message(f"You pause for a simple meal at the {name.lower()}. Stamina +{restored}.")
+        elif choice.value == "write":
+            self.furniture_work_menu(name, state_record, effect_bonus)
+        elif choice.value == "display":
+            self.furniture_display_surface_menu(name, state_record)
+
+    def furniture_display_item_value(self, item_name: str) -> int:
+        ordinary = max(0, int(ITEM_SELL_PRICES.get(str(item_name), 0) or 0))
+        if ordinary:
+            return ordinary
+        return max(0, int(self.container_item_sell_price(str(item_name)) or 0))
+
+    def furniture_display_candidates(self) -> List[str]:
+        excluded_categories = {
+            "furniture", "infrastructure", "automation", "farm_building", "building",
+        }
+        return sorted(
+            str(item_name)
+            for item_name, quantity in self.state.inventory.items()
+            if int(quantity or 0) > 0
+            and str(INFRASTRUCTURE_DATA.get(str(item_name), {}).get("category", ""))
+            not in excluded_categories
+        )
+
+    def furniture_place_display_item(
+        self, name: str, state_record: Dict[str, object], item_name: str,
+    ) -> bool:
+        item_name = str(item_name)
+        if state_record.get("display_item"):
+            self.set_message(f"The {name.lower()} already has something displayed.")
+            return False
+        if consume_ingredient(self.state.inventory, item_name, 1) < 1:
+            self.set_message(f"You no longer have {item_name}.")
+            return False
+        state_record["display_item"] = item_name
+        state_record["display_value"] = self.furniture_display_item_value(item_name)
+        state_record.pop("display_studied_day", None)
+        self.autosave_with_message(f"Displayed {item_name} on the {name.lower()}.")
+        return True
+
+    def furniture_take_display_item(
+        self, name: str, state_record: Dict[str, object], quiet: bool = False,
+    ) -> bool:
+        item_name = str(state_record.get("display_item", "") or "")
+        if not item_name:
+            return False
+        self.state.inventory[item_name] = self.state.inventory.get(item_name, 0) + 1
+        state_record.pop("display_item", None)
+        state_record.pop("display_value", None)
+        state_record.pop("display_studied_day", None)
+        if not quiet:
+            self.autosave_with_message(f"Returned {item_name} from the {name.lower()} to your inventory.")
+        return True
+
+    def furniture_display_surface_menu(
+        self, name: str, state_record: Dict[str, object],
+    ) -> None:
+        displayed_item = str(state_record.get("display_item", "") or "")
+        if not displayed_item:
+            candidates = self.furniture_display_candidates()
+            choice = self.vertical_panel_select(
+                f"Display on {name}",
+                [
+                    MenuItem(
+                        label=item, value=item, enabled=True,
+                        hint=f"value ${self.furniture_display_item_value(item)}",
+                    )
+                    for item in candidates
+                ] + [MenuItem(label="Back", value=MENU_BACK, enabled=True)],
+                LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT, return_back=True,
+            )
+            if choice is not None and choice.value != MENU_BACK:
+                self.furniture_place_display_item(name, state_record, str(choice.value))
+            return
+        value = max(0, int(state_record.get("display_value", 0) or 0))
+        choice = self.vertical_panel_select(
+            f"{name} Display",
+            [
+                MenuItem(label=f"Examine {displayed_item}", value="examine", enabled=True, hint=f"value ${value}"),
+                MenuItem(label="Return item to inventory", value="take", enabled=True),
+                MenuItem(label="Back", value=MENU_BACK, enabled=True),
+            ],
+            LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT, return_back=True,
+        )
+        if choice is None or choice.value == MENU_BACK:
+            return
+        if choice.value == "take":
+            self.furniture_take_display_item(name, state_record)
+            return
+        first_today = self.furniture_daily_available(state_record, "display_studied_day")
+        focus_before = int(self.state.combat_focus)
+        if first_today:
+            focus_gain = 1 + min(4, value // 150)
+            self.state.combat_focus = min(
+                int(self.state.combat_max_focus), focus_before + focus_gain
+            )
+            self.furniture_mark_daily(state_record, "display_studied_day")
+        self.vertical_panel_view(
+            displayed_item,
+            [
+                displayed_item.upper(), "", self.container_item_description(displayed_item),
+                "", f"Estimated value: ${value}",
+                "A displayed possession contributes to the character of an owned home.",
+            ],
+            LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT,
+        )
+        self.set_message(
+            f"Examined the displayed {displayed_item}. Focus +{self.state.combat_focus - focus_before}."
+        )
+
+    def harvest_furniture_plant(
+        self, name: str, state_record: Dict[str, object], effect_bonus: int = 0,
+    ) -> bool:
+        fertilizer = max(0, int(state_record.get("fertilizer", 0) or 0))
+        threshold = 2 if fertilizer else 3
+        care = max(0, int(state_record.get("care", 0) or 0))
+        if care < threshold:
+            self.set_message(f"The {name.lower()} is still growing. Growth: {care}/{threshold}.")
+            return False
+        if not self.furniture_daily_available(state_record, "harvested_day"):
+            self.set_message(f"The {name.lower()} has already been harvested today.")
+            return False
+        item = "Wildflower" if "flower" in name.lower() else "Wild Herbs"
+        amount = 1 + (1 if fertilizer >= 2 or int(effect_bonus) >= 4 else 0)
+        self.state.inventory[item] = self.state.inventory.get(item, 0) + amount
+        state_record["care"] = 0
+        state_record["fertilizer"] = 0
+        self.furniture_mark_daily(state_record, "harvested_day")
+        self.autosave_with_message(f"Gathered {amount} {item} from the {name.lower()}.")
+        return True
+
+    def tend_furniture_plant(
+        self, name: str, state_record: Dict[str, object], effect_bonus: int = 0,
+    ) -> None:
+        fertilizer = max(0, int(state_record.get("fertilizer", 0) or 0))
+        threshold = 2 if fertilizer else 3
+        if not self.furniture_daily_available(state_record, "watered_day"):
+            care = int(state_record.get("care", 0) or 0)
+            if care >= threshold and self.furniture_daily_available(state_record, "harvested_day"):
+                self.harvest_furniture_plant(name, state_record, effect_bonus)
+            else:
+                self.set_message(f"The {name.lower()} has already been watered today. Growth: {care}/{threshold}.")
+            return
+        if not self.spend_stamina(1):
+            return
+        state_record["care"] = min(threshold, int(state_record.get("care", 0) or 0) + 1)
+        self.furniture_mark_daily(state_record, "watered_day")
+        self.advance_time(5)
+        self.autosave_with_message(
+            f"Watered and tended the {name.lower()}. Growth: {state_record['care']}/{threshold}."
+        )
+
+    def furniture_plant_menu(
+        self, name: str, state_record: Dict[str, object], effect_bonus: int,
+    ) -> None:
+        fertilizer = max(0, int(state_record.get("fertilizer", 0) or 0))
+        threshold = 2 if fertilizer else 3
+        care = max(0, int(state_record.get("care", 0) or 0))
+        fertilizer_item = next(
+            (
+                item for item in ("Deluxe Fertilizer", "Basic Fertilizer")
+                if inventory_ingredient_quantity(self.state.inventory, item) > 0
+            ),
+            "",
+        )
+        choice = self.vertical_panel_select(
+            name,
+            [
+                MenuItem(
+                    label="Water and tend", value="water",
+                    enabled=self.furniture_daily_available(state_record, "watered_day"),
+                    hint=f"growth {care}/{threshold}",
+                ),
+                MenuItem(
+                    label="Apply fertilizer", value="fertilize",
+                    enabled=bool(fertilizer_item) and fertilizer == 0,
+                    hint=fertilizer_item or "none in inventory",
+                ),
+                MenuItem(
+                    label="Harvest", value="harvest",
+                    enabled=care >= threshold and self.furniture_daily_available(state_record, "harvested_day"),
+                    hint="flowers or herbs",
+                ),
+                MenuItem(label="Plant status", value="status", enabled=True),
+                MenuItem(label="Back", value=MENU_BACK, enabled=True),
+            ],
+            LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT, return_back=True,
+        )
+        if choice is None or choice.value == MENU_BACK:
+            self.cancel_furniture_use(state_record)
+            self.set_message(f"You leave the {name.lower()} undisturbed.")
+        elif choice.value == "water":
+            self.tend_furniture_plant(name, state_record, effect_bonus)
+        elif choice.value == "fertilize" and fertilizer_item:
+            if consume_ingredient(self.state.inventory, fertilizer_item, 1):
+                state_record["fertilizer"] = 2 if fertilizer_item == "Deluxe Fertilizer" else 1
+                self.advance_time(5)
+                self.autosave_with_message(f"Applied {fertilizer_item} to the {name.lower()}.")
+        elif choice.value == "harvest":
+            self.harvest_furniture_plant(name, state_record, effect_bonus)
+        elif choice.value == "status":
+            self.vertical_panel_view(
+                name,
+                [
+                    name.upper(), "", f"Growth: {care}/{threshold}",
+                    f"Fertilizer: {'deluxe' if fertilizer >= 2 else 'basic' if fertilizer else 'none'}",
+                    f"Familiarity: {self.furniture_familiarity_label(state_record)}",
+                    "", "Water daily. Fertilizer shortens growth, while deluxe fertilizer can increase the harvest.",
+                ],
+                LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT,
+            )
+
+    def furniture_aquarium_contents(self, state_record: Dict[str, object]) -> Dict[str, int]:
+        raw = state_record.get("fish", {})
+        contents = {
+            str(item): max(0, int(quantity or 0))
+            for item, quantity in dict(raw or {}).items()
+            if str(item) in FISH_ITEMS and str(item) != "Old Boot" and int(quantity or 0) > 0
+        } if isinstance(raw, dict) else {}
+        state_record["fish"] = contents
+        return contents
+
+    def observe_furniture_aquarium(
+        self, name: str, state_record: Dict[str, object], effect_bonus: int,
+    ) -> None:
+        contents = self.furniture_aquarium_contents(state_record)
+        first_today = self.furniture_daily_available(state_record, "observed_day")
+        restored = self.restore_stamina((5 if first_today else 1) + min(3, effect_bonus))
+        focus_before = int(self.state.combat_focus)
+        if first_today:
+            self.state.combat_focus = min(
+                int(self.state.combat_max_focus), focus_before + 2 + min(2, len(contents))
+            )
+            self.furniture_mark_daily(state_record, "observed_day")
+        bred = ""
+        if contents and self.furniture_daily_available(state_record, "fed_day"):
+            self.furniture_mark_daily(state_record, "fed_day")
+            state_record["feedings"] = max(0, int(state_record.get("feedings", 0) or 0)) + 1
+            capacity = max(2, min(8, 2 + int(INFRASTRUCTURE_DATA.get(name, {}).get("comfort", 4) or 4) // 2))
+            total = sum(contents.values())
+            if total >= 2 and total < capacity and int(state_record["feedings"]) % 4 == 0:
+                fish_name = sorted(contents)[int(state_record["feedings"]) % len(contents)]
+                contents[fish_name] = contents.get(fish_name, 0) + 1
+                bred = f" A new {fish_name} appeared in the tank."
+        self.advance_time(10)
+        self.autosave_with_message(
+            f"You feed and watch the {name.lower()}. Stamina +{restored}, "
+            f"focus +{self.state.combat_focus - focus_before}.{bred}"
+        )
+
+    def furniture_aquarium_menu(
+        self, name: str, state_record: Dict[str, object], effect_bonus: int,
+    ) -> None:
+        contents = self.furniture_aquarium_contents(state_record)
+        capacity = max(2, min(8, 2 + int(INFRASTRUCTURE_DATA.get(name, {}).get("comfort", 4) or 4) // 2))
+        candidates = sorted(
+            item for item, quantity in self.state.inventory.items()
+            if int(quantity or 0) > 0 and item in FISH_ITEMS and item != "Old Boot"
+        )
+        choice = self.vertical_panel_select(
+            name,
+            [
+                MenuItem(label="Feed and observe", value="observe", enabled=True, hint="daily stamina and focus"),
+                MenuItem(label="Stock a fish", value="stock", enabled=bool(candidates) and sum(contents.values()) < capacity, hint=f"{sum(contents.values())}/{capacity}"),
+                MenuItem(label="Take a fish", value="take", enabled=bool(contents), hint=f"{sum(contents.values())} fish"),
+                MenuItem(label="View aquarium", value="status", enabled=True, hint=f"{len(contents)} species"),
+                MenuItem(label="Back", value=MENU_BACK, enabled=True),
+            ],
+            LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT, return_back=True,
+        )
+        if choice is None or choice.value == MENU_BACK:
+            self.cancel_furniture_use(state_record)
+            self.set_message(f"You step away from the {name.lower()}.")
+            return
+        if choice.value == "observe":
+            self.observe_furniture_aquarium(name, state_record, effect_bonus)
+            return
+        if choice.value == "status":
+            rows = [name.upper(), "", f"Capacity: {sum(contents.values())}/{capacity}"]
+            rows.extend([f"- {fish}: {quantity}" for fish, quantity in sorted(contents.items())] or ["- No fish stocked."])
+            rows.extend(["", "Fed fish can reproduce after several days when the tank has space."])
+            self.vertical_panel_view(name, rows, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
+            return
+        options = candidates if choice.value == "stock" else sorted(contents)
+        selected = self.vertical_panel_select(
+            "Stock Aquarium" if choice.value == "stock" else "Take from Aquarium",
+            [MenuItem(label=item, value=item, enabled=True) for item in options]
+            + [MenuItem(label="Back", value=MENU_BACK, enabled=True)],
+            LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT, return_back=True,
+        )
+        if selected is None or selected.value == MENU_BACK:
+            return
+        fish_name = str(selected.value)
+        if choice.value == "stock" and consume_ingredient(self.state.inventory, fish_name, 1):
+            contents[fish_name] = contents.get(fish_name, 0) + 1
+            self.autosave_with_message(f"Added a {fish_name} to the {name.lower()}.")
+        elif choice.value == "take" and contents.get(fish_name, 0) > 0:
+            contents[fish_name] -= 1
+            if contents[fish_name] <= 0:
+                contents.pop(fish_name, None)
+            self.state.inventory[fish_name] = self.state.inventory.get(fish_name, 0) + 1
+            self.autosave_with_message(f"Took a {fish_name} from the {name.lower()}.")
+
+    def furniture_bed_menu(
+        self,
+        name: str,
+        state_record: Dict[str, object],
+        effect_bonus: int,
+        supporters: List[str],
+    ) -> None:
+        owned_bed = self.on_house() or self.can_sleep_at_primary_town_residence()
+        inn_bed = self.on_inn_interior() or (
+            self.on_procedural_town_interior()
+            and str((self.current_procedural_town_building() or {}).get("type_id", "")) == "inn"
+        )
+        overnight_price = 0 if owned_bed else 25 if inn_bed else 0
+        nap_price = 0 if owned_bed or not inn_bed else 8
+        assigned_name = str(state_record.get("assigned_name", "") or "")
+        household_members = self.furniture_household_assignment_members()
+        choice = self.vertical_panel_select(
+            name,
+            [
+                MenuItem(
+                    label="Sleep until morning", value="sleep",
+                    enabled=owned_bed or inn_bed,
+                    hint="free" if not overnight_price else f"${overnight_price}",
+                ),
+                MenuItem(
+                    label="Take a one-hour rest", value="nap", enabled=True,
+                    hint="free" if not nap_price else f"${nap_price}",
+                ),
+                MenuItem(
+                    label=f"Change wake-up time ({self.wake_time_label()})",
+                    value="wake", enabled=owned_bed,
+                ),
+                MenuItem(
+                    label="Assign household member", value="assign",
+                    enabled=owned_bed and bool(household_members),
+                    hint=assigned_name or "unassigned",
+                ),
+                MenuItem(label="Bed and room status", value="status", enabled=True),
+                MenuItem(label="Back", value=MENU_BACK, enabled=True),
+            ],
+            LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT, return_back=True,
+        )
+        if choice is None or choice.value == MENU_BACK:
+            self.cancel_furniture_use(state_record)
+            self.set_message(f"You step away from the {name.lower()}.")
+            return
+        if choice.value == "wake":
+            self.cycle_wake_time_setting()
+            return
+        if choice.value == "assign":
+            self.furniture_assignment_menu(name, state_record, household_members)
+            return
+        if choice.value == "status":
+            comfort = max(1, int(INFRASTRUCTURE_DATA.get(name, {}).get("comfort", 4) or 4))
+            self.vertical_panel_view(
+                name,
+                [
+                    name.upper(), "", f"Comfort: {comfort}",
+                    f"Familiarity: {self.furniture_familiarity_label(state_record)}",
+                    f"Assigned to: {assigned_name or 'nobody'}",
+                    f"Effective rest bonus: +{effect_bonus}",
+                    "", "Nearby support:",
+                    *([f"- {supporter}" for supporter in supporters] or ["- No complementary furniture nearby."]),
+                ],
+                LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT,
+            )
+            return
+        price = overnight_price if choice.value == "sleep" else nap_price
+        if price and self.state.money < price:
+            self.set_message(f"Using this bed costs ${price}.")
+            return
+        if price:
+            self.state.money -= price
+        if choice.value == "sleep":
+            self.sleep(force=True)
+            return
+        comfort = max(4, int(INFRASTRUCTURE_DATA.get(name, {}).get("comfort", 6) or 6))
+        restored = self.restore_stamina(min(30, comfort * 2 + effect_bonus * 2))
+        before_hp = int(self.state.combat_current_hp)
+        self.state.combat_current_hp = min(
+            int(self.state.combat_max_hp), before_hp + max(1, effect_bonus // 2)
+        )
+        self.advance_time(60)
+        self.autosave_with_message(
+            f"Rested for an hour on the {name.lower()}. Stamina +{restored}, "
+            f"health +{self.state.combat_current_hp - before_hp}."
+        )
+
+    def furniture_household_assignment_members(self) -> List[Tuple[str, str]]:
+        members: List[Tuple[str, str]] = []
+        spouse_id = str(getattr(self.state, "spouse_npc_id", "") or "")
+        if spouse_id:
+            spouse = self.npc_record_by_id(spouse_id)
+            if spouse:
+                members.append((f"spouse:{spouse_id}", str(spouse.get("name", "Spouse"))))
+        for child in list(getattr(self.state, "children", []) or []):
+            child_id = int(child.get("id", 0) or 0)
+            if child_id:
+                members.append((f"household_child:{child_id}", str(child.get("name", f"Child {child_id}"))))
+        return members
+
+    def furniture_assignment_menu(
+        self,
+        name: str,
+        state_record: Dict[str, object],
+        members: Optional[List[Tuple[str, str]]] = None,
+    ) -> None:
+        members = members if members is not None else self.furniture_household_assignment_members()
+        current = str(state_record.get("assigned_actor_id", "") or "")
+        items = [
+            MenuItem(
+                label=member_name,
+                value=actor_id,
+                enabled=True,
+                hint="currently assigned" if actor_id == current else "",
+            )
+            for actor_id, member_name in members
+        ]
+        if current:
+            items.append(MenuItem(label="Clear assignment", value="clear", enabled=True))
+        items.append(MenuItem(label="Back", value=MENU_BACK, enabled=True))
+        choice = self.vertical_panel_select(
+            f"Assign {name}", items, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT, return_back=True,
+        )
+        if choice is None or choice.value == MENU_BACK:
+            return
+        if choice.value == "clear":
+            previous = str(state_record.get("assigned_name", "household member"))
+            state_record.pop("assigned_actor_id", None)
+            state_record.pop("assigned_name", None)
+            self.autosave_with_message(f"Cleared {previous}'s assignment to the {name.lower()}.")
+            return
+        actor_id = str(choice.value)
+        member_name = next((label for key, label in members if key == actor_id), actor_id)
+        furniture_states = getattr(self.state, "furniture_states", {})
+        if isinstance(furniture_states, dict):
+            for other_record in furniture_states.values():
+                if not isinstance(other_record, dict) or other_record is state_record:
+                    continue
+                if str(other_record.get("assigned_actor_id", "")) == actor_id:
+                    other_record.pop("assigned_actor_id", None)
+                    other_record.pop("assigned_name", None)
+        state_record["assigned_actor_id"] = actor_id
+        state_record["assigned_name"] = member_name
+        self.autosave_with_message(f"Assigned the {name.lower()} to {member_name}.")
+
+    def open_furniture_cooking(
+        self, name: str, state_record: Dict[str, object], effect_bonus: int,
+    ) -> None:
+        previous = getattr(self, "_active_cooking_furniture", None)
+        self._active_cooking_furniture = {
+            "name": str(name),
+            "bonus": max(0, int(effect_bonus)),
+            "familiarity": self.furniture_familiarity_label(state_record),
+        }
+        try:
+            self.safe_menu(self.show_cooking_menu, "Cooking closed.")
+        finally:
+            self._active_cooking_furniture = previous
+
+    def furniture_sink_menu(
+        self, name: str, state_record: Dict[str, object], effect_bonus: int,
+    ) -> None:
+        choice = self.vertical_panel_select(
+            name,
+            [
+                MenuItem(
+                    label="Wash up", value="wash",
+                    enabled=self.furniture_daily_available(state_record, "washed_day"),
+                    hint="daily recovery",
+                ),
+                MenuItem(label="Prepare and cook food", value="cook", enabled=True),
+                MenuItem(label="Back", value=MENU_BACK, enabled=True),
+            ],
+            LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT, return_back=True,
+        )
+        if choice is None or choice.value == MENU_BACK:
+            self.cancel_furniture_use(state_record)
+            self.set_message(f"You step away from the {name.lower()}.")
+        elif choice.value == "cook":
+            self.open_furniture_cooking(name, state_record, effect_bonus)
+        elif choice.value == "wash":
+            restored = self.restore_stamina(4 + min(4, effect_bonus))
+            hp_before = int(self.state.combat_current_hp)
+            self.state.combat_current_hp = min(
+                int(self.state.combat_max_hp), hp_before + 1 + min(1, effect_bonus // 3)
+            )
+            self.furniture_mark_daily(state_record, "washed_day")
+            self.advance_time(10)
+            self.autosave_with_message(
+                f"Washed up at the {name.lower()}. Stamina +{restored}, "
+                f"health +{self.state.combat_current_hp - hp_before}."
+            )
+
+    def furniture_tv_programs(self) -> Dict[str, str]:
+        """Return the programs currently airing on each farmhouse channel."""
+        hour = int(self.state.hour)
+        day = int(self.state.day)
+        weather_program = (
+            "Morning Farm Forecast" if hour < 12 else
+            "Field Conditions" if hour < 18 else
+            "Tomorrow on the Land"
+        )
+        entertainment = [
+            "The Lantern Harbor Mystery", "Songs from the Valley",
+            "The Clockmaker's Daughter", "Late-Night Comedy Hour",
+        ][(day + hour // 6) % 4]
+        family_program = [
+            "Making a Home", "Stories by Lamplight",
+            "Growing Up Elsewhere", "Neighbors and Kin",
+        ][(day + int(self.state.month)) % 4]
+        return {
+            "weather": weather_program,
+            "news": "Elsewhere Evening News" if hour >= 17 else "Town and Region Report",
+            "cooking": "The Practical Kitchen" if day % 2 else "Pantry to Plate",
+            "adventure": "Trailwise" if hour < 18 else "Tales Beyond the Road",
+            "family": family_program,
+            "entertainment": entertainment,
+        }
+
+    def furniture_tv_channel_menu(
+        self, name: str, state_record: Dict[str, object], effect_bonus: int,
+    ) -> None:
+        programs = self.furniture_tv_programs()
+        labels = {
+            "weather": "Farm & Weather",
+            "news": "Town News",
+            "cooking": "Cooking Channel",
+            "adventure": "Adventure Channel",
+            "family": "Family & Culture",
+            "entertainment": "Entertainment",
+        }
+        current = str(state_record.get("channel", "weather") or "weather")
+        items = []
+        for channel in ("weather", "news", "cooking", "adventure", "family", "entertainment"):
+            suffix = " (current)" if channel == current else ""
+            hint = programs[channel]
+            if not self.furniture_daily_available(state_record, f"tv_{channel}_day"):
+                hint += " - watched today"
+            items.append(MenuItem(label=f"{labels[channel]}{suffix}", value=channel, enabled=True, hint=hint))
+        items.append(MenuItem(label="Turn off television", value=MENU_BACK, enabled=True))
+        choice = self.vertical_panel_select(
+            "Television Channels", items,
+            LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT, return_back=True,
+        )
+        if choice is None or choice.value == MENU_BACK:
+            state_record["powered_on"] = False
+            self.invalidate_draw_cache()
+            self.cancel_furniture_use(state_record)
+            self.set_message("The television clicks off.")
+            return
+        self.watch_furniture_tv_channel(
+            name, state_record, str(choice.value), effect_bonus,
+        )
+
+    def watch_furniture_tv_channel(
+        self,
+        name: str,
+        state_record: Dict[str, object],
+        channel: str,
+        effect_bonus: int = 0,
+    ) -> None:
+        programs = self.furniture_tv_programs()
+        channel = channel if channel in programs else "weather"
+        state_record["channel"] = channel
+        state_record["powered_on"] = True
+        self.invalidate_draw_cache()
+        first_today = self.furniture_daily_available(state_record, f"tv_{channel}_day")
+        focus_before = int(self.state.combat_focus)
+        stamina_before = int(self.state.stamina)
+        lines = [programs[channel].upper(), ""]
+        result = ""
+
+        if channel == "weather":
+            tomorrow_month, tomorrow_day, tomorrow_year = advance_date(
+                self.state.month, self.state.day, self.state.year,
+            )
+            tomorrow_weather = forecast_weather_for_date(
+                tomorrow_month, tomorrow_day, tomorrow_year,
+            )
+            lines.extend([
+                f"Today: {self.state.weather}",
+                weather_forecast_summary(self.state.weather),
+                "",
+                f"Tomorrow: {tomorrow_weather}",
+                weather_forecast_summary(tomorrow_weather),
+                "",
+                f"Season: {self.state.season}",
+                "Rain and storms water exposed crops; severe weather makes distant travel riskier.",
+            ])
+            if first_today:
+                self.state.combat_focus = min(
+                    int(self.state.combat_max_focus), focus_before + 2 + min(2, effect_bonus),
+                )
+            result = "Watched the farm forecast"
+        elif channel == "news":
+            lines.extend([
+                f"{self.state.weekday}, {format_date(self.state.month, self.state.day, self.state.year)}",
+                f"Active bounties: {self.active_bounty_count()}/3",
+                "",
+                "Community notices:",
+                *self.town_calendar_notice_bullets(),
+            ])
+            if first_today:
+                self.state.combat_focus = min(
+                    int(self.state.combat_max_focus), focus_before + 2 + min(2, effect_bonus),
+                )
+            result = "Caught up on regional news"
+        elif channel == "cooking":
+            unknown = self.unknown_recipe_names()
+            learned = ""
+            week_key = self.bounty_week_key()
+            if unknown and str(state_record.get("cooking_broadcast_week", "")) != week_key:
+                index_seed = int(self.state.year) * 37 + int(self.state.month) * 11 + int(self.state.day)
+                learned = unknown[index_seed % len(unknown)]
+                if learned not in self.state.learned_recipe_ids:
+                    self.state.learned_recipe_ids.append(learned)
+                state_record["cooking_broadcast_week"] = week_key
+            lines.extend([
+                "Today's lesson turns ordinary pantry ingredients into a dependable meal.",
+                "",
+                f"Recipes known: {len(self.known_recipe_names())}/{len(COOKING_RECIPES)}",
+                f"Broadcast recipe: {learned}" if learned else "You have already taken this week's recipe notes.",
+            ])
+            if first_today:
+                self.state.combat_focus = min(
+                    int(self.state.combat_max_focus), focus_before + 2 + min(2, effect_bonus),
+                )
+            result = f"Learned {learned} from the cooking channel" if learned else "Watched a cooking demonstration"
+        elif channel == "adventure":
+            bounties = self.active_bounty_records()
+            lines.extend([
+                "Trail lesson: carry food, watch the hour, and mark a safe route home.",
+                "Roads lead toward settlements, structures, ports, and other useful destinations.",
+                "",
+                "Current leads:",
+                *(
+                    [f"- {record.get('title', 'Bounty')} at {record.get('target_chunk', record.get('chunk', 'marked coordinates'))}" for record in bounties[:3]]
+                    if bounties else ["- No accepted bounties. Check a sheriff's board for work."]
+                ),
+            ])
+            if first_today:
+                self.state.combat_focus = min(
+                    int(self.state.combat_max_focus), focus_before + 3 + min(2, effect_bonus),
+                )
+            result = "Watched a wilderness field lesson"
+        elif channel == "family":
+            household = bool(getattr(self.state, "spouse_npc_id", "") or self.state.children)
+            lines.extend([
+                "Today's program is about making time for the people who share a home.",
+                "",
+                f"Household bond: {self.family_bond_rank()} ({self.family_bond_score()}/999)",
+                f"Children at home: {len(self.state.children)}",
+                "A shared program can become a small household ritual.",
+            ])
+            if first_today:
+                if household:
+                    self.adjust_family_bond(1 + min(1, effect_bonus // 3))
+                self.state.combat_focus = min(
+                    int(self.state.combat_max_focus), focus_before + 2,
+                )
+            result = "Watched a family program"
+        else:
+            lines.extend([
+                "Settle in for a complete local production.",
+                "The program offers a quiet break from work and travel.",
+            ])
+            if first_today:
+                self.restore_stamina(5 + min(3, effect_bonus))
+                self.state.combat_focus = min(
+                    int(self.state.combat_max_focus), focus_before + 2 + min(2, effect_bonus),
+                )
+            result = f"Watched {programs[channel]}"
+
+        self.furniture_mark_daily(state_record, f"tv_{channel}_day")
+        state_record["last_program"] = programs[channel]
+        self.vertical_panel_view(
+            programs[channel], lines, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT,
+        )
+        self.advance_time(30 if channel != "entertainment" else 45)
+        self.autosave_with_message(
+            f"{result}. Stamina +{int(self.state.stamina) - stamina_before}, "
+            f"focus +{int(self.state.combat_focus) - focus_before}."
+        )
+
+    def use_nightstand_bedside_reading(
+        self, name: str, state_record: Dict[str, object], effect_bonus: int = 0,
+    ) -> None:
+        first_today = self.furniture_daily_available(state_record, "bedside_read_day")
+        before = int(self.state.combat_focus)
+        if first_today:
+            self.state.combat_focus = min(
+                int(self.state.combat_max_focus), before + 3 + min(3, effect_bonus),
+            )
+            self.furniture_mark_daily(state_record, "bedside_read_day")
+        self.advance_time(20)
+        self.autosave_with_message(
+            f"Read quietly at the {name.lower()}. Focus +{int(self.state.combat_focus) - before}."
+        )
+
+    def furniture_nightstand_menu(
+        self, name: str, x: int, y: int,
+        state_record: Dict[str, object], effect_bonus: int,
+    ) -> None:
+        notes = len(getattr(self.state, "furniture_journal_entries", []) or [])
+        choice = self.vertical_panel_select(
+            name,
+            [
+                MenuItem(label="Open bedside drawer", value="storage", enabled=True),
+                MenuItem(label="Read before bed", value="read", enabled=True, hint="daily focus"),
+                MenuItem(label=f"Set wake-up time ({self.wake_time_label()})", value="wake", enabled=True),
+                MenuItem(label="Arrange bedside display", value="display", enabled=True),
+                MenuItem(label="Review written notes", value="notes", enabled=bool(notes), hint=f"{notes} entries"),
+                MenuItem(label="Back", value=MENU_BACK, enabled=True),
+            ],
+            LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT, return_back=True,
+        )
+        if choice is None or choice.value == MENU_BACK:
+            self.cancel_furniture_use(state_record)
+            self.set_message("You step away from the nightstand.")
+        elif choice.value == "storage":
+            if not self.open_world_container_at(x, y):
+                self.set_message("The bedside drawer is empty and ready for personal items.")
+        elif choice.value == "read":
+            self.use_nightstand_bedside_reading(name, state_record, effect_bonus)
+        elif choice.value == "wake":
+            self.cycle_wake_time_setting()
+        elif choice.value == "display":
+            self.furniture_display_surface_menu(name, state_record)
+        elif choice.value == "notes":
+            self.vertical_panel_view("Written Notes", self.furniture_journal_lines(), LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
+
+    def use_rug_activity(
+        self,
+        name: str,
+        state_record: Dict[str, object],
+        activity: str,
+        effect_bonus: int = 0,
+    ) -> None:
+        if activity == "clean":
+            if not self.furniture_daily_available(state_record, "clean_day"):
+                self.set_message(f"The {name.lower()} is already clean and straightened today.")
+                return
+            if not self.spend_stamina(1):
+                return
+            state_record["straightened"] = True
+            self.furniture_mark_daily(state_record, "clean_day")
+            self.advance_time(5)
+            self.autosave_with_message(f"Cleaned and straightened the {name.lower()}.")
+            return
+        if activity == "family":
+            if not self.furniture_daily_available(state_record, "family_gather_day"):
+                self.set_message("The household has already spent time together here today.")
+                return
+            household = bool(getattr(self.state, "spouse_npc_id", "") or self.state.children)
+            if not household:
+                self.set_message("The rug is ready for games, stories, and a future household gathering.")
+                return
+            gain = self.adjust_family_bond(2 + min(1, effect_bonus // 3))
+            self.restore_stamina(2 + min(2, effect_bonus))
+            self.furniture_mark_daily(state_record, "family_gather_day")
+            self.advance_time(25)
+            self.autosave_with_message(f"Gathered together on the {name.lower()}. Household bond +{gain}.")
+            return
+        if not self.furniture_daily_available(state_record, "quiet_time_day"):
+            self.set_message("You have already taken quiet time here today.")
+            return
+        before_focus = int(self.state.combat_focus)
+        restored = self.restore_stamina(3 + min(3, effect_bonus))
+        self.state.combat_focus = min(
+            int(self.state.combat_max_focus), before_focus + 3 + min(2, effect_bonus),
+        )
+        self.furniture_mark_daily(state_record, "quiet_time_day")
+        self.advance_time(15)
+        self.autosave_with_message(
+            f"Took quiet time on the {name.lower()}. Stamina +{restored}, "
+            f"focus +{int(self.state.combat_focus) - before_focus}."
+        )
+
+    def furniture_rug_menu(
+        self, name: str, state_record: Dict[str, object], effect_bonus: int,
+    ) -> None:
+        household = bool(getattr(self.state, "spouse_npc_id", "") or self.state.children)
+        choice = self.vertical_panel_select(
+            name,
+            [
+                MenuItem(label="Sit and take quiet time", value="quiet", enabled=True, hint="daily recovery"),
+                MenuItem(label="Gather for games or stories", value="family", enabled=household, hint="household bond"),
+                MenuItem(label="Clean and straighten rug", value="clean", enabled=True),
+                MenuItem(label="Examine pattern and condition", value="status", enabled=True),
+                MenuItem(label="Back", value=MENU_BACK, enabled=True),
+            ],
+            LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT, return_back=True,
+        )
+        if choice is None or choice.value == MENU_BACK:
+            self.cancel_furniture_use(state_record)
+            self.set_message(f"You step off the {name.lower()}.")
+        elif choice.value == "status":
+            self.vertical_panel_view(
+                name,
+                [
+                    name.upper(), "",
+                    str(INFRASTRUCTURE_DATA.get(name, {}).get("description", "A woven household rug.")),
+                    "", f"Condition: {'clean and straight' if state_record.get('straightened') else 'lived-in'}",
+                    f"Familiarity: {self.furniture_familiarity_label(state_record)}",
+                    "Rugs are walkable gathering spaces; they never block the room.",
+                ],
+                LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT,
+            )
+        else:
+            self.use_rug_activity(name, state_record, str(choice.value), effect_bonus)
+
+    def furniture_outfit_menu(
+        self, name: str, x: int, y: int, state_record: Dict[str, object],
+    ) -> None:
+        items = [
+            MenuItem(label="Change appearance and color", value="appearance", enabled=True),
+            MenuItem(label="Open clothing storage", value="storage", enabled=True),
+        ]
+        if name in {"Dresser", "Dressing Vanity"}:
+            items.append(MenuItem(label="Arrange top display", value="display", enabled=True))
+        items.append(MenuItem(label="Back", value=MENU_BACK, enabled=True))
+        choice = self.vertical_panel_select(
+            name, items, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT, return_back=True,
+        )
+        if choice is None or choice.value == MENU_BACK:
+            self.cancel_furniture_use(state_record)
+            self.set_message(f"You close the {name.lower()}.")
+        elif choice.value == "appearance":
+            self.show_player_color_mirror_menu()
+        elif choice.value == "display":
+            self.furniture_display_surface_menu(name, state_record)
+        elif not self.open_world_container_at(x, y):
+            self.set_message(f"The {name.lower()} is ready to store clothing and linens.")
+
+    def furniture_family_menu(
+        self, name: str, x: int, y: int, state_record: Dict[str, object], effect_bonus: int,
+    ) -> None:
+        child_members = [
+            (actor_id, member_name)
+            for actor_id, member_name in self.furniture_household_assignment_members()
+            if actor_id.startswith("household_child:")
+        ]
+        is_bed = name in {"Crib", "Child Bed"}
+        is_toy_storage = name == "Toy Shelf"
+        items = [MenuItem(label="View children and household", value="status", enabled=True)]
+        if is_bed:
+            assigned = str(state_record.get("assigned_name", "") or "unassigned")
+            items.append(MenuItem(label="Assign this bed", value="assign", enabled=bool(child_members), hint=assigned))
+            items.append(MenuItem(label="Read a bedtime story", value="story", enabled=bool(self.state.children), hint="daily household bond"))
+        else:
+            items.append(MenuItem(label="Play or learn together", value="story", enabled=bool(self.state.children), hint="daily household bond"))
+        if is_toy_storage:
+            items.append(MenuItem(label="Open toy storage", value="storage", enabled=True))
+        items.append(MenuItem(label="Back", value=MENU_BACK, enabled=True))
+        choice = self.vertical_panel_select(
+            name, items, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT, return_back=True,
+        )
+        if choice is None or choice.value == MENU_BACK:
+            self.cancel_furniture_use(state_record)
+            self.set_message(f"You step away from the {name.lower()}.")
+        elif choice.value == "status":
+            if self.state.children:
+                rows = [line for child in self.state.children for line in self.household_child_status_lines(child)[:12]]
+                rows.extend(["", f"Household bond: {self.family_bond_rank()} ({self.family_bond_score()}/999)"])
+                self.vertical_panel_view("Children", rows, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
+            else:
+                self.set_message(f"The {name.lower()} is ready for a future family.")
+        elif choice.value == "assign":
+            self.furniture_assignment_menu(name, state_record, child_members)
+        elif choice.value == "storage":
+            if not self.open_world_container_at(x, y):
+                self.set_message("The toy shelf is empty and ready for toys, books, and keepsakes.")
+        elif choice.value == "story":
+            if not self.furniture_daily_available(state_record, "family_activity_day"):
+                self.set_message("You have already shared time here with the children today.")
+                return
+            gain = self.adjust_family_bond(2 + min(1, effect_bonus // 3))
+            before_focus = int(self.state.combat_focus)
+            self.state.combat_focus = min(
+                int(self.state.combat_max_focus), before_focus + 2,
+            )
+            self.furniture_mark_daily(state_record, "family_activity_day")
+            self.advance_time(20)
+            activity = "a bedtime story" if is_bed else "games and a small lesson"
+            self.autosave_with_message(f"Shared {activity}. Household bond +{gain}.")
+
+    def furniture_keepsake_menu(
+        self, name: str, x: int, y: int, state_record: Dict[str, object], effect_bonus: int,
+    ) -> None:
+        household = bool(getattr(self.state, "spouse_npc_id", "") or self.state.children)
+        choice = self.vertical_panel_select(
+            name,
+            [
+                MenuItem(label="Review family memories", value="memories", enabled=True),
+                MenuItem(label="Open keepsake storage", value="storage", enabled=True),
+                MenuItem(label="Arrange keepsake on top", value="display", enabled=True),
+                MenuItem(label="Reflect together", value="reflect", enabled=household, hint="daily household bond"),
+                MenuItem(label="Back", value=MENU_BACK, enabled=True),
+            ],
+            LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT, return_back=True,
+        )
+        if choice is None or choice.value == MENU_BACK:
+            self.cancel_furniture_use(state_record)
+            self.set_message("You close the keepsake chest.")
+        elif choice.value == "memories":
+            self.vertical_panel_view("Family Memories", self.family_event_log_lines(), LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
+        elif choice.value == "storage":
+            if not self.open_world_container_at(x, y):
+                self.set_message("The chest is ready to hold letters, drawings, and mementos.")
+        elif choice.value == "display":
+            self.furniture_display_surface_menu(name, state_record)
+        elif choice.value == "reflect":
+            if not self.furniture_daily_available(state_record, "reflected_day"):
+                self.set_message("The household has already revisited its memories today.")
+                return
+            gain = self.adjust_family_bond(2 + min(1, effect_bonus // 3))
+            self.furniture_mark_daily(state_record, "reflected_day")
+            self.advance_time(20)
+            self.autosave_with_message(f"Revisited family keepsakes together. Household bond +{gain}.")
+
+    def furniture_hearth_menu(
+        self, name: str, state_record: Dict[str, object], effect_bonus: int,
+    ) -> None:
+        household = bool(getattr(self.state, "spouse_npc_id", "") or self.state.children)
+        choice = self.vertical_panel_select(
+            name,
+            [
+                MenuItem(label="Warm up by the fire", value="warm", enabled=True, hint="daily recovery"),
+                MenuItem(label="Cook at the hearth", value="cook", enabled=True),
+                MenuItem(label="Gather for fireside time", value="family", enabled=household, hint="daily household bond"),
+                MenuItem(label="Back", value=MENU_BACK, enabled=True),
+            ],
+            LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT, return_back=True,
+        )
+        if choice is None or choice.value == MENU_BACK:
+            self.cancel_furniture_use(state_record)
+            self.set_message(f"You step away from the {name.lower()}.")
+        elif choice.value == "cook":
+            self.open_furniture_cooking(name, state_record, effect_bonus)
+        elif choice.value == "family":
+            if not self.furniture_daily_available(state_record, "fireside_day"):
+                self.set_message("The household has already shared fireside time today.")
+                return
+            gain = self.adjust_family_bond(2 + min(1, effect_bonus // 3))
+            restored = self.restore_stamina(3 + min(3, effect_bonus))
+            self.furniture_mark_daily(state_record, "fireside_day")
+            self.advance_time(30)
+            self.autosave_with_message(f"Shared stories by the {name.lower()}. Bond +{gain}, stamina +{restored}.")
+        elif choice.value == "warm":
+            first_today = self.furniture_daily_available(state_record, "warmed_day")
+            restored = self.restore_stamina(
+                ((10 if self.state.season == "Winter" else 6) + effect_bonus) if first_today else 1
+            )
+            self.furniture_mark_daily(state_record, "warmed_day")
+            self.advance_time(15)
+            self.autosave_with_message(f"Warmed yourself at the {name.lower()}. Stamina +{restored}.")
+
+    def use_functional_furniture(
+        self,
+        name: str,
+        x: int,
+        y: int,
+        *,
+        catalog_record: Optional[Dict[str, object]] = None,
+        object_key: Optional[str] = None,
+    ) -> bool:
+        data = INFRASTRUCTURE_DATA.get(name, {})
+        action = furniture_action_id(name, data)
+        state_key, state_record = self.furniture_state_record(
+            name, x, y, catalog_record, object_key,
+        )
+        self.record_furniture_use(state_record, action)
+        effect_bonus, supporters = self.furniture_effectiveness(
+            action, x, y, state_record,
+        )
+        if action == "game" and name in GAME_TABLE_BY_FURNITURE:
+            self.use_game_table_furniture(name, self.location_label())
+            return True
+        if action == "sleep":
+            self.furniture_bed_menu(name, state_record, effect_bonus, supporters)
+            return True
+        if action == "seat":
+            return self.sit_at_furniture(
+                name, x, y, catalog_record, object_key, state_key, state_record,
+                effect_bonus,
+            )
+        if action == "cook":
+            if "sink counter" in name.lower():
+                self.furniture_sink_menu(name, state_record, effect_bonus)
+            else:
+                self.open_furniture_cooking(name, state_record, effect_bonus)
+            return True
+        if action == "work":
+            writing_surface = any(
+                word in name.lower()
+                for word in ("writing", "secretary", "study", "map", "drafting", "sewing", "desk")
+            )
+            if str(data.get("furniture_function", "")) == "craft" and not writing_surface:
+                self.safe_menu(self.show_crafting_menu, "Crafting closed.")
+            else:
+                self.furniture_work_menu(name, state_record, effect_bonus)
+            return True
+        if action == "read":
+            if catalog_record is not None or object_key is not None:
+                self.bookshelf_furniture_component_menu(name, x, y)
+            elif self.world_container_at(x, y, create=True) is not None:
+                self.bookshelf_furniture_component_menu(name, x, y)
+            else:
+                self.show_bookshelf_menu()
+            return True
+        if name == "Nightstand":
+            self.furniture_nightstand_menu(name, x, y, state_record, effect_bonus)
+            return True
+        if action == "storage":
+            if not self.open_world_container_at(x, y):
+                self.set_message(f"The {name.lower()} is empty but ready to store useful items.")
+            return True
+        if action == "bath":
+            stamina = self.restore_stamina(
+                max(6, min(15, int(data.get("comfort", 8) or 8) + effect_bonus))
+            )
+            before_hp = int(self.state.combat_current_hp)
+            self.state.combat_current_hp = min(
+                int(self.state.combat_max_hp), before_hp + 3 + min(2, effect_bonus // 2)
+            )
+            self.advance_time(20)
+            self.autosave_with_message(
+                f"Used the {name.lower()}. Stamina +{stamina}, health +{self.state.combat_current_hp - before_hp}."
+            )
+            return True
+        if action == "mirror":
+            self.show_player_color_mirror_menu()
+            return True
+        if action == "hearth":
+            self.furniture_hearth_menu(name, state_record, effect_bonus)
+            return True
+        if action == "table":
+            self.furniture_table_menu(
+                name, x, y, catalog_record, object_key, state_key,
+                state_record, effect_bonus,
+            )
+            return True
+        if action == "light":
+            state_record["light_on"] = not bool(state_record.get("light_on", True))
+            self._frame_active_furniture_lights = None
+            self.invalidate_draw_cache()
+            self.autosave_with_message(
+                f"Turned the {name.lower()} {'on' if state_record['light_on'] else 'off'}."
+            )
+            return True
+        if action == "plant":
+            self.furniture_plant_menu(name, state_record, effect_bonus)
+            return True
+        if action == "art":
+            first_today = self.furniture_daily_available(state_record, "studied_day")
+            before = int(self.state.combat_focus)
+            if first_today:
+                self.state.combat_focus = min(
+                    int(self.state.combat_max_focus), before + 3 + min(2, effect_bonus)
+                )
+                self.furniture_mark_daily(state_record, "studied_day")
+            self.vertical_panel_view(
+                name,
+                [name.upper(), "", str(data.get("description", "A carefully made decorative work.")), "", "Studying art restores a little focus once each day."],
+                LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT,
+            )
+            self.set_message(f"Studied the {name.lower()}. Focus +{self.state.combat_focus - before}.")
+            return True
+        if action == "clock":
+            choice = self.vertical_panel_select(
+                name,
+                [
+                    MenuItem(label=f"Current time: {int(self.state.hour):02d}:{int(self.state.minute):02d}", value="time", enabled=True),
+                    MenuItem(label=f"Wake-up time: {self.wake_time_label()}", value="wake", enabled=True, hint="change"),
+                    MenuItem(label="Back", value=MENU_BACK, enabled=True),
+                ], LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT, return_back=True,
+            )
+            if choice and choice.value == "wake":
+                self.cycle_wake_time_setting()
+            else:
+                self.set_message(f"The {name.lower()} reads {int(self.state.hour):02d}:{int(self.state.minute):02d}.")
+            return True
+        if action == "rug":
+            self.furniture_rug_menu(name, state_record, effect_bonus)
+            return True
+        if action == "aquarium":
+            self.furniture_aquarium_menu(name, state_record, effect_bonus)
+            return True
+        if action == "privacy":
+            state_record["open"] = not bool(state_record.get("open", False))
+            self.invalidate_draw_cache()
+            self.autosave_with_message(
+                f"{'Opened' if state_record['open'] else 'Folded'} the {name.lower()}."
+            )
+            return True
+        if action == "calendar":
+            self.show_calendar()
+            return True
+        if action == "forecast":
+            self.furniture_tv_channel_menu(name, state_record, effect_bonus)
+            return True
+        if action == "keepsake":
+            self.furniture_keepsake_menu(name, x, y, state_record, effect_bonus)
+            return True
+        if action == "outfit":
+            self.furniture_outfit_menu(name, x, y, state_record)
+            return True
+        if action == "family":
+            self.furniture_family_menu(name, x, y, state_record, effect_bonus)
+            return True
+        if action == "records":
+            self.vertical_panel_view(
+                name,
+                [name.upper(), "", f"Records for {self.location_label()}.", "", *self.town_calendar_notice_bullets()],
+                LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT,
+            )
+            self.set_message(f"Read the {name.lower()}.")
+            return True
+        if action == "service":
+            if self.on_procedural_town_interior() and self.current_procedural_town_building():
+                self.procedural_town_building_service(self.current_procedural_town_building())
+            else:
+                self.set_message(f"You ring the {name.lower()} service bell.")
+            return True
+        if action == "animal_care":
+            if self.on_animal_store():
+                self.safe_menu(self.animal_store_menu, "Animal Store closed.")
+            else:
+                restored = self.restore_stamina(3)
+                self.advance_time(10)
+                self.set_message(f"You clean and prepare the {name.lower()}. Stamina +{restored}.")
+            return True
+        return False
+
+    def use_catalog_furniture_action_at(self, x: int, y: int) -> bool:
+        record = self.catalog_furniture_at(x, y)
+        if not record:
+            return False
+        name = str(record.get("name", "Furniture"))
+        component = str(record.get("component", ""))
+        if component and self.use_house_furniture_component(name, component, x, y):
+            return True
+        return self.use_functional_furniture(name, x, y, catalog_record=record)
+
+    def bookshelf_furniture_component_menu(self, placed: str, x: int, y: int):
+        has_storage = self.world_container_at(x, y, create=True) is not None
+        items = [MenuItem(label="Read and review guides", value="read", enabled=True)]
+        if has_storage:
+            items.append(MenuItem(label="Stored books and items", value="storage", enabled=True))
+        items.append(MenuItem(label="Back", value=MENU_BACK, enabled=True))
+        choice = self.vertical_panel_select(
+            placed, items, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT, return_back=True,
+        )
+        if choice is None or choice.value == MENU_BACK:
+            self.set_message(f"You step away from the {placed.lower()}.")
+        elif choice.value == "storage":
+            self.open_world_container_at(x, y)
+        else:
+            self.show_bookshelf_menu()
+
+    def use_house_furniture_component(
+        self, placed: str, component: str, x: int, y: int,
+    ) -> bool:
+        if component in {"cook", "prepare"}:
+            self.safe_menu(self.show_cooking_menu, "Cooking closed.")
+            return True
+        if component == "wash":
+            self.restore_stamina_from_house(f"sink_{placed}", 5, "kitchen sink")
+            return True
+        if component == "craft":
+            self.safe_menu(self.show_crafting_menu, "Crafting closed.")
+            return True
+        if component == "gear":
+            self.safe_menu(self.show_player_combat_equipment_menu, "Equipment closed.")
+            return True
+        if component == "mirror":
+            self.show_player_color_mirror_menu()
+            return True
+        if component == "rest":
+            amount = max(3, min(8, int(INFRASTRUCTURE_DATA.get(placed, {}).get("comfort", 5))))
+            self.restore_stamina_from_house(f"seat_{placed}", amount, placed.lower())
+            return True
+        if component in {"family_meal", "social"}:
+            if self.family_meal_menu() != "changed":
+                self.set_message(f"The {placed.lower()} is ready for conversation and shared meals.")
+            return True
+        if component == "bookshelf":
+            self.bookshelf_furniture_component_menu(placed, x, y)
+            return True
+        if component == "storage":
+            if not self.open_world_container_at(x, y):
+                self.set_message(f"The {placed.lower()} has no stored items yet.")
+            return True
+        return False
+
+    def use_house_furniture(
+        self, placed: str, component: str = "", x: Optional[int] = None,
+        y: Optional[int] = None,
+    ):
+        if component and x is not None and y is not None:
+            if self.use_house_furniture_component(placed, component, int(x), int(y)):
+                return
         if placed in GAME_TABLE_BY_FURNITURE:
             self.use_game_table_furniture(placed, "Home Game Room")
+            return
+        action_x = int(self.state.player_x if x is None else x)
+        action_y = int(self.state.player_y if y is None else y)
+        placed_key = None
+        if x is not None and y is not None:
+            placed_key = self.placed_object_at(action_x, action_y)[0]
+        if self.use_functional_furniture(
+            placed,
+            action_x,
+            action_y,
+            object_key=placed_key,
+        ):
+            return
+        furniture_function = str(
+            INFRASTRUCTURE_DATA.get(placed, {}).get("furniture_function", "")
+        )
+        if furniture_function == "sleep":
+            self.sleep()
+            return
+        if furniture_function == "cook":
+            self.safe_menu(self.show_cooking_menu, "Cooking closed.")
+            return
+        if furniture_function == "craft":
+            self.safe_menu(self.show_crafting_menu, "Crafting closed.")
+            return
+        if furniture_function == "bookshelf":
+            self.show_bookshelf_menu()
+            return
+        if furniture_function == "rest":
+            amount = max(3, min(8, int(INFRASTRUCTURE_DATA.get(placed, {}).get("comfort", 5))))
+            self.restore_stamina_from_house(f"seat_{placed}", amount, placed.lower())
+            return
+        if furniture_function == "bathe":
+            amount = max(6, min(10, int(INFRASTRUCTURE_DATA.get(placed, {}).get("comfort", 8))))
+            self.restore_stamina_from_house(f"bath_{placed}", amount, placed.lower())
+            return
+        if furniture_function == "mirror":
+            self.show_player_color_mirror_menu()
+            return
+        if furniture_function == "hearth":
+            base = int(INFRASTRUCTURE_DATA.get(placed, {}).get("comfort", 7))
+            amount = min(12, base + (3 if self.state.season == "Winter" else 0))
+            self.restore_stamina_from_house(f"hearth_{placed}", amount, placed.lower())
+            return
+        if furniture_function in {"dining", "family_meal"}:
+            if furniture_function == "family_meal" and self.family_meal_menu() == "changed":
+                return
+            self.set_message(f"The {placed.lower()} is ready for meals and conversation.")
+            return
+        if furniture_function == "display_storage":
+            self.set_message("The display counter offers enclosed storage from any visible section.")
+            return
+        if furniture_function == "storage":
+            self.set_message(f"The {placed.lower()} provides organized household storage.")
             return
         if placed == "Bed":
             self.sleep()
@@ -24371,9 +27659,25 @@ class FarmGame(
         self.autosave_with_message(f"Changed player color to {self.state.player_color}.")
 
     def use_house_action(self, x: int, y: int):
-        placed = self.get_placed_object(x, y) if self.in_active_bounds(x, y) else None
+        object_key, placed, _ax, _ay = (
+            self.placed_object_at(x, y)
+            if self.in_active_bounds(x, y)
+            else (None, None, None, None)
+        )
         if placed:
-            self.use_house_furniture(placed)
+            accessible, allowed_label = self.furniture_accessible_from_player(
+                object_key, placed, x, y,
+            )
+            if not accessible:
+                self.set_message(
+                    f"Approach the {placed.lower()} from its {allowed_label} side to use it."
+                )
+                return
+            rotation = self.object_rotation_for_key(object_key, placed)
+            component = furniture_component_at(
+                placed, int(x) - int(_ax), int(y) - int(_ay), rotation,
+            ) if _ax is not None and _ay is not None else ""
+            self.use_house_furniture(placed, component, x, y)
             return
 
         tile = self.active_map()[y][x] if self.in_active_bounds(x, y) else "#"
@@ -24998,6 +28302,11 @@ class FarmGame(
             self.set_message("There is nothing to interact with.")
             return
 
+        temporary_participant = self.temporary_participant_at(x, y)
+        if temporary_participant:
+            self.talk_to_temporary_participant(temporary_participant)
+            return
+
         travel_follower_id = self.travel_follower_at(x, y)
         if travel_follower_id:
             self.travel_follower_menu(travel_follower_id)
@@ -25012,6 +28321,21 @@ class FarmGame(
                 else:
                     self.procedural_town_resident_menu(resident)
                 return
+        component_home = self.on_house() or bool(
+            hasattr(self, "on_player_owned_procedural_residence")
+            and self.on_player_owned_procedural_residence()
+        )
+        if component_home:
+            component_key, component_obj, component_ax, component_ay = self.placed_object_at(x, y)
+            if component_obj and component_ax is not None and component_ay is not None:
+                component = furniture_component_at(
+                    component_obj,
+                    int(x) - int(component_ax), int(y) - int(component_ay),
+                    self.object_rotation_for_key(component_key, component_obj),
+                )
+                if component:
+                    self.use_house_action(x, y)
+                    return
         if self.open_world_container_at(x, y):
             if self.on_wilderness_dungeon() or self.wilderness_field_combat_active():
                 self.advance_dungeon_roguelike_turn("search container")
@@ -25038,6 +28362,9 @@ class FarmGame(
             self.use_town_action(x, y)
             return
 
+        if self.use_town_interior_game_table_action(x, y):
+            return
+
         if self.on_authored_town_residence():
             if self.use_town_room_door_action(x, y):
                 return
@@ -25045,6 +28372,9 @@ class FarmGame(
             return
 
         if self.on_town_interior() and self.use_town_room_door_action(x, y):
+            return
+
+        if self.on_town_interior() and self.use_catalog_furniture_action_at(x, y):
             return
 
         if self.on_general_store():
@@ -25570,15 +28900,15 @@ class FarmGame(
         self.set_message("Nothing to interact with here. Press I to inspect.")
 
     def use_general_store_action(self, x: int, y: int):
-        tile = self.active_map()[y][x] if 0 <= x < WIDTH and 0 <= y < HEIGHT else "#"
+        tile = self.active_map()[y][x] if self.in_active_bounds(x, y) else "#"
         if tile == "D":
             self.transition_from_general_store_to_town(); return
         if tile == "&":
             self.set_message("The shopkeeper greets you and opens the store menu.")
             self.safe_menu(lambda: self.buy_menu(auto_opened=False), "General Store closed."); return
         if tile in ["g", "$"]:
-            self.set_message("The counter is clear; talk to the shopkeeper to browse the store.")
-            return
+            self.set_message("The shopkeeper meets you at the counter and opens the store menu.")
+            self.safe_menu(lambda: self.buy_menu(auto_opened=False), "General Store closed."); return
         if tile == "P":
             rows = [
                 "GENERAL STORE NOTICE",
@@ -25594,20 +28924,20 @@ class FarmGame(
             ]
             self.vertical_panel_view("Store Notice", rows, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
             self.set_message("Read: Store Notice."); return
-        self.set_message("Nothing here needs your attention.")
+        self.inspect_town_interior_fixture(x, y)
 
     def use_blacksmith_interior_action(self, x: int, y: int):
-        tile = self.active_map()[y][x] if 0 <= x < WIDTH and 0 <= y < HEIGHT else "#"
+        tile = self.active_map()[y][x] if self.in_active_bounds(x, y) else "#"
         if tile == "D":
             self.transition_from_blacksmith_to_town(); return
         if tile == "&":
             self.set_message("The blacksmith nods and shows you the forge catalog.")
             self.safe_menu(lambda: self.blacksmith_menu(auto_opened=False), "Blacksmith closed."); return
         if tile in ["x", "$"]:
-            self.set_message("Repair tags and catalog notes are filed here. Talk to the blacksmith for service.")
-            return
+            self.set_message("The blacksmith joins you at the counter and opens the forge catalog.")
+            self.safe_menu(lambda: self.blacksmith_menu(auto_opened=False), "Blacksmith closed."); return
         if tile == "P": self.set_message("The work board lists tool upgrades, mine rumors, and pending repairs."); return
-        self.set_message("Nothing here needs your attention.")
+        self.inspect_town_interior_fixture(x, y)
 
     def basic_known_recipes(self) -> List[str]:
         return ["Field Snack", "Berry Mix", "Garden Salad", "Vegetable Soup", "Grilled Fish", "Jam Toast", "Pickle Plate", "Pantry Stew", "Ancient Dessert"]
@@ -25840,7 +29170,7 @@ class FarmGame(
                 continue
 
     def use_library_action(self, x: int, y: int):
-        tile = self.active_map()[y][x] if 0 <= x < WIDTH and 0 <= y < HEIGHT else "#"
+        tile = self.active_map()[y][x] if self.in_active_bounds(x, y) else "#"
         if tile == "D":
             self.transition_from_library_to_town()
             return
@@ -25861,7 +29191,7 @@ class FarmGame(
         if tile == "A":
             self.show_journal_codex_menu()
             return
-        self.set_message("Nothing here needs your attention.")
+        self.inspect_town_interior_fixture(x, y)
 
 
     def museum_category_data(self) -> Dict[str, Dict[str, str]]:
@@ -26318,7 +29648,7 @@ class FarmGame(
             self.safe_menu(self.museum_desk_menu, "Museum closed.")
             return
         if tile in ["$", "d"]:
-            self.set_message("Donation trays and ledger notes are ready. Talk to the curator to donate or review progress.")
+            self.safe_menu(self.museum_desk_menu, "Museum closed.")
             return
         if tile == "P":
             self.show_journal_codex_menu()
@@ -26338,11 +29668,11 @@ class FarmGame(
             self.vertical_panel_view(str(title), self.museum_exhibit_lines(category), LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
             self.set_message("Inspected the museum exhibit.")
             return
-        self.set_message("Nothing here needs your attention.")
+        self.inspect_town_interior_fixture(x, y)
 
 
     def use_mayor_house_action(self, x: int, y: int):
-        tile = self.active_map()[y][x] if 0 <= x < WIDTH and 0 <= y < HEIGHT else "#"
+        tile = self.active_map()[y][x] if self.in_active_bounds(x, y) else "#"
         if tile == "D":
             self.transition_from_mayor_house_to_town()
             return
@@ -26364,7 +29694,7 @@ class FarmGame(
         if tile == "F":
             self.set_message("Festival routes, supply lists, and crowd plans are pinned in tidy columns.")
             return
-        self.set_message("Nothing here needs your attention.")
+        self.inspect_town_interior_fixture(x, y)
 
     def inn_daily_special(self) -> Dict[str, object]:
         # Deterministic, simple daily special that varies by weekday/season.
@@ -26475,7 +29805,7 @@ class FarmGame(
                 continue
 
     def use_inn_action(self, x: int, y: int):
-        tile = self.active_map()[y][x] if 0 <= x < WIDTH and 0 <= y < HEIGHT else "#"
+        tile = self.active_map()[y][x] if self.in_active_bounds(x, y) else "#"
         if tile == "D":
             self.transition_from_inn_to_town()
             return
@@ -26487,13 +29817,13 @@ class FarmGame(
             self.open_physical_game_table(game_id, "Mae's Inn")
             return
         if tile in ["n", "$"]:
-            self.set_message("The inn counter is tidy and open. Talk to the innkeeper for meals, rooms, and gossip; the game tables are in the common room.")
+            self.safe_menu(self.inn_menu, "Inn services closed.")
             return
         if tile == "P":
             self.vertical_panel_view("Inn Guest Register", self.inn_guest_register_lines(), LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
             self.set_message("Read the inn guest register.")
             return
-        self.set_message("Nothing here needs your attention.")
+        self.inspect_town_interior_fixture(x, y)
 
 
     def use_carpenter_store_action(self, x: int, y: int):
@@ -26506,7 +29836,8 @@ class FarmGame(
             self.safe_menu(lambda: self.carpenter_menu(auto_opened=False), "Carpenter closed.")
             return
         if tile == "$":
-            self.set_message("Project forms are stacked on the counter. Talk to the carpenter to start a build.")
+            self.set_message("The carpenter meets you at the project counter.")
+            self.safe_menu(lambda: self.carpenter_menu(auto_opened=False), "Carpenter closed.")
             return
         if tile == "P":
             rows = [
@@ -26535,10 +29866,10 @@ class FarmGame(
             self.vertical_panel_view("Carpenter Plans", rows, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
             self.set_message("Read: Carpenter Plans.")
             return
-        self.set_message("Nothing here needs your attention.")
+        self.inspect_town_interior_fixture(x, y)
 
     def use_furniture_store_action(self, x: int, y: int):
-        tile = self.active_map()[y][x] if 0 <= x < WIDTH and 0 <= y < HEIGHT else "#"
+        tile = self.active_map()[y][x] if self.in_active_bounds(x, y) else "#"
         if tile == "D":
             self.transition_from_furniture_store_to_town()
             return
@@ -26547,7 +29878,8 @@ class FarmGame(
             self.safe_menu(lambda: self.furniture_store_menu(auto_opened=False), "Furniture Store closed.")
             return
         if tile == "$":
-            self.set_message("Catalog slips and delivery forms sit on the counter. Talk to the clerk to buy furniture.")
+            self.set_message("The furniture clerk meets you at the catalog counter.")
+            self.safe_menu(lambda: self.furniture_store_menu(auto_opened=False), "Furniture Store closed.")
             return
         if tile == "P":
             rows = [
@@ -26565,7 +29897,7 @@ class FarmGame(
             self.vertical_panel_view("Furniture Catalog", rows, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
             self.set_message("Read: Furniture Catalog.")
             return
-        self.set_message("Nothing here needs your attention.")
+        self.inspect_town_interior_fixture(x, y)
 
     def count_wilderness_forage(self) -> int:
         if not hasattr(self, "wilderness_map") or not self.wilderness_map:
@@ -27900,6 +31232,30 @@ class FarmGame(
         if isinstance(reward, dict):
             self.apply_festival_reward(reward)
         self.advance_time(int(activity.get("time", 30)))
+        if hasattr(self, "play_world_event_scene"):
+            participant_id = ""
+            relationships = reward.get("relationships", {}) if isinstance(reward, dict) else {}
+            if isinstance(relationships, dict) and relationships:
+                participant_id = str(next(iter(relationships)))
+            participant = self.npc_record_by_id(participant_id) if participant_id and hasattr(self, "npc_record_by_id") else None
+            steps: List[Dict[str, object]] = [{
+                "type": "narration",
+                "text": f"At {festival.get('location', 'the festival grounds')}, {activity.get('description', 'the activity begins')} The surrounding festival remains visible while people join and leave.",
+            }]
+            if isinstance(participant, dict):
+                steps.append({
+                    "type": "dialogue", "speaker": str(participant.get("name", "Resident")),
+                    "npc_id": str(participant.get("id", "")),
+                    "text": "Good. Stay with the work long enough to understand why the festival needs it, not only long enough to collect a reward.",
+                })
+            steps.extend([
+                {"type": "narration", "text": f"You spend {int(activity.get('time', 30))} minutes contributing alongside residents and visitors."},
+                {"type": "narration", "text": "The result becomes visible in the gathering: supplies are organized, participants have something new to discuss, and the activity closes for this year."},
+            ])
+            self.play_world_event_scene(
+                completion_id, str(activity.get("title", "Festival Activity")), steps,
+                f"Completed {activity.get('title', 'festival activity')} at {festival.get('name', 'the festival')}.",
+            )
         self.autosave_with_message(f"Joined {activity.get('title', 'festival activity')} at {festival.get('name', 'the festival')}.")
         return True
 
@@ -27962,7 +31318,29 @@ class FarmGame(
         for item, qty in (festival.get("reward_items", {}) or {}).items():
             self.state.inventory[item] = self.state.inventory.get(item, 0) + int(qty)
         self.advance_time(90)
-        self.vertical_panel_view(str(festival["name"]), self.festival_detail_lines(festival), LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
+        if hasattr(self, "play_world_event_scene"):
+            residents = [npc for npc in self.active_town_npcs() if isinstance(npc, dict)][:2]
+            steps: List[Dict[str, object]] = [{
+                "type": "narration",
+                "text": f"{festival['name']} spreads through {festival['location']} instead of replacing it. {festival.get('description', '')} The {str(self.state.weather).lower()} conditions alter how people gather.",
+            }]
+            resident_lines = (
+                "You made it. Festivals are easier to remember when familiar people actually cross paths in the middle of them.",
+                "There is always more work behind a gathering than the decorations admit, but today the work belongs to everyone.",
+            )
+            for npc, line in zip(residents, resident_lines):
+                steps.append({
+                    "type": "dialogue", "speaker": str(npc.get("name", "Resident")),
+                    "npc_id": str(npc.get("id", "")), "text": line,
+                })
+            steps.append({
+                "type": "narration",
+                "text": f"After ninety minutes of food, conversation, and shared activity, town relationships improve by {friendship}. The attendance rewards enter your inventory as part of the day, not as a detached results screen.",
+            })
+            self.play_world_event_scene(
+                attendance_id, str(festival["name"]), steps,
+                f"Attended {festival['name']}; friendship improved around town.",
+            )
         self.autosave_with_message(f"Attended {festival['name']}. Friendship improved around town.")
         return True
 
@@ -28519,7 +31897,7 @@ class FarmGame(
             self.safe_menu(self.clinic_menu, "Clinic closed.")
             return
         if tile == "$":
-            self.set_message("Clinic forms and medicine notes are sorted on the counter. Talk to the doctor for treatment.")
+            self.safe_menu(self.clinic_menu, "Clinic closed.")
             return
         if tile == "P":
             self.vertical_panel_view("Clinic Notice", [
@@ -28540,7 +31918,7 @@ class FarmGame(
             ], LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
             self.set_message("Read: Clinic Notice.")
             return
-        self.set_message("Nothing here needs your attention.")
+        self.inspect_town_interior_fixture(x, y)
 
     def use_town_hall_action(self, x: int, y: int):
         tile = self.active_map()[y][x] if self.in_active_bounds(x, y) else "#"
@@ -28551,7 +31929,7 @@ class FarmGame(
             self.safe_menu(self.town_hall_menu, "Town Hall closed.")
             return
         if tile == "$":
-            self.set_message("Public records and civic plans are arranged here. Talk to the clerk for Town Hall services.")
+            self.safe_menu(self.town_hall_menu, "Town Hall closed.")
             return
         if tile == "P":
             self.vertical_panel_view("Town Hall Notice", [
@@ -28573,7 +31951,7 @@ class FarmGame(
             ], LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
             self.set_message("Read: Town Hall Notice.")
             return
-        self.set_message("Nothing here needs your attention.")
+        self.inspect_town_interior_fixture(x, y)
 
     def use_market_row_action(self, x: int, y: int):
         tile = self.active_map()[y][x] if self.in_active_bounds(x, y) else "#"
@@ -28584,13 +31962,13 @@ class FarmGame(
             self.safe_menu(self.market_row_menu, "Market Row closed.")
             return
         if tile == "$":
-            self.set_message("Talk to the vendor to browse today's rotating goods.")
+            self.safe_menu(self.market_row_menu, "Market Row closed.")
             return
         if tile == "P":
             self.vertical_panel_view("Today's Market", self.today_market_notice_lines(), LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
             self.set_message("Read: Today's Market.")
             return
-        self.set_message("Nothing here needs your attention.")
+        self.inspect_town_interior_fixture(x, y)
 
     def use_animal_store_action(self, x: int, y: int):
         tile = self.active_map()[y][x] if self.in_active_bounds(x, y) else "#"
@@ -28601,7 +31979,7 @@ class FarmGame(
             self.safe_menu(self.animal_store_menu, "Animal Store closed.")
             return
         if tile == "$":
-            self.set_message("Livestock forms and care notes are ready. Talk to the animal keeper to buy animals.")
+            self.safe_menu(self.animal_store_menu, "Animal Store closed.")
             return
         if tile == "P":
             rows = [
@@ -28620,7 +31998,7 @@ class FarmGame(
             self.vertical_panel_view("Animal Store Notice", rows, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
             self.set_message("Read: Animal Store Notice.")
             return
-        self.set_message("Nothing here needs your attention.")
+        self.inspect_town_interior_fixture(x, y)
 
     def normalize_farm_animals(self):
         """Backfill new animal fields for older saves."""
@@ -30021,6 +33399,19 @@ class FarmGame(
             rng = random.Random(seed)
             fish_name = rng.choice(pool)
             self.state.inventory[fish_name] = self.state.inventory.get(fish_name, 0) + 1
+            if hasattr(self, "record_quest_event"):
+                fish_tags = ["fish"]
+                if fish_name == "Old Boot":
+                    fish_tags = ["junk", "fishing"]
+                elif any(word in fish_name.lower() for word in ("tuna", "marlin", "mackerel", "sardine", "snapper")):
+                    fish_tags.append("ocean")
+                else:
+                    fish_tags.append("freshwater")
+                self.record_quest_event(
+                    "fish", target_name=fish_name, target_id=fish_name, target_tags=fish_tags,
+                    amount=1, location=str(getattr(self.state, "location", "")),
+                    note=f"Caught {fish_name} while fishing.",
+                )
             self.advance_time(10)
             self.clear_fishing_state()
             price = fish_sell_price(fish_name)
@@ -30287,7 +33678,7 @@ class FarmGame(
             self,
             "Action Menu",
             items,
-            footer="Arrow keys/WASD move | Z/Enter choose | X/Esc/Q close",
+            footer="Arrow keys/WASD move | Z/Enter choose | B/X/Esc/Q/Tab close",
         )
 
         if choice is None or choice.value is None:
@@ -30445,6 +33836,13 @@ class FarmGame(
             harvest_qty += 1
             work_record["crop_bonus_used"] = True
         self.state.inventory[item_name] = self.state.inventory.get(item_name, 0) + harvest_qty
+        if hasattr(self, "record_quest_event"):
+            self.record_quest_event(
+                "harvest", target_name=crop.name, target_id=crop.name,
+                target_names=[item_name], target_tags=["crop", quality.lower()],
+                amount=harvest_qty, location=str(getattr(self.state, "location", "")),
+                note=f"Harvested {harvest_qty} {item_name}.",
+            )
         self.remove_crop(x, y)
         self.set_farm_work_tile(x, y, ",")
         bonus_text = " Rowan's field review produced one extra." if harvest_qty > 1 else ""
@@ -30618,7 +34016,7 @@ class FarmGame(
             selected = menu_select(
                 "SHIPPING BIN",
                 items,
-                footer="Arrow keys/WASD move | Z/Enter choose | X/Esc/Q leave",
+                footer="Arrow keys/WASD move | Z/Enter choose | B/X/Esc/Q/Tab leave",
                 extra_lines=[
                     f"Money now: ${s.money}",
                     f"Pending payout tomorrow: ${s.shipped_today}",
@@ -31354,8 +34752,7 @@ class FarmGame(
             return
 
         ordinary_furniture = [
-            name
-            for name, data in INFRASTRUCTURE_DATA.items()
+            name for name, data in INFRASTRUCTURE_DATA.items()
             if data.get("category") == "furniture"
             and int(data.get("price", 0)) > 0
             and name not in GAME_TABLE_BY_FURNITURE
@@ -31364,61 +34761,122 @@ class FarmGame(
             f"{int(s.year)}:{int(s.month)}:"
             f"{max(0, int(s.day) - 1) // 7}"
         )
-        furniture_names = [
-            *ordinary_furniture,
-            *rotating_game_furniture(rotation_key, count=2),
+
+        def furniture_catalog_group(name: str) -> str:
+            data = INFRASTRUCTURE_DATA.get(name, {})
+            explicit = str(data.get("furniture_group", ""))
+            if explicit:
+                return explicit
+            if data.get("placement_layer") == "floor":
+                return "Rugs"
+            if data.get("placement_surface") == "wall":
+                return "Wall Decor"
+            function = str(data.get("furniture_function", ""))
+            if function == "rest":
+                return "Seating"
+            if function == "sleep":
+                return "Bedroom"
+            if function in {"cook", "prepare"}:
+                return "Kitchen"
+            if function in {"bathe", "mirror"}:
+                return "Bath"
+            if function in {"storage", "bookshelf", "display_storage"}:
+                return "Storage"
+            if function in {"dining", "family_meal", "craft", "social"}:
+                return "Tables & Work"
+            return "Classic Collection"
+
+        stock_by_group: Dict[str, List[str]] = {}
+        for name in ordinary_furniture:
+            stock_by_group.setdefault(furniture_catalog_group(name), []).append(name)
+        stock_by_group["Game Tables"] = list(rotating_game_furniture(rotation_key, count=2))
+        preferred_order = [
+            "Seating", "Tables & Work", "Storage", "Bedroom", "Kitchen", "Bath",
+            "Lighting & Decor", "Wall Decor", "Rugs", "Classic Collection", "Game Tables",
         ]
+        group_names = [group for group in preferred_order if stock_by_group.get(group)]
+        group_names.extend(sorted(set(stock_by_group) - set(group_names)))
 
         while True:
-            items: List[MenuItem] = []
-            for name in furniture_names:
-                data = INFRASTRUCTURE_DATA[name]
-                price = int(data.get("price", 0))
-                affordable = s.money >= price
-                max_qty = s.money // price if price > 0 and affordable else 0
-                hint = f"${price} x{max_qty}" if affordable else f"${price} no"
-                items.append(MenuItem(label=name, value=name, enabled=affordable, hint=hint))
-            items.append(MenuItem(label="Leave", value="leave", enabled=True))
-
-            choice = self.vertical_panel_select(
-                "Furniture Store",
-                items,
+            category_items = [
+                MenuItem(
+                    label=group,
+                    value=group,
+                    enabled=True,
+                    hint=f"{len(stock_by_group[group])} designs",
+                )
+                for group in group_names
+            ]
+            category_items.append(MenuItem(label="Leave", value="leave", enabled=True))
+            category_choice = self.vertical_panel_select(
+                "Furniture Catalog",
+                category_items,
                 LEFT_PANEL_WIDTH,
                 LEFT_PANEL_HEIGHT,
                 return_back=False,
             )
-
-            if choice is None or choice.value == "leave":
+            if category_choice is None or category_choice.value == "leave":
                 if auto_opened:
                     s.shop_menu_suppressed_until_exit = True
                 self.set_message("You left the Furniture Store.")
                 return
-
-            name = str(choice.value)
-            price = int(INFRASTRUCTURE_DATA[name]["price"])
-            max_qty = s.money // price
-            qty = self.vertical_quantity_select(
-                "Buy Furniture",
-                name,
-                price,
-                max_qty=max_qty,
-                start_qty=1,
-                panel_width=LEFT_PANEL_WIDTH,
-                panel_height=LEFT_PANEL_HEIGHT,
-                return_back=True,
-            )
-
-            if qty == MENU_BACK or qty == 0:
-                continue
-
-            qty = int(qty)
-            total = qty * price
-            s.money -= total
-            s.inventory[name] = s.inventory.get(name, 0) + qty
-            if auto_opened:
-                s.shop_menu_suppressed_until_exit = True
-            self.autosave_with_message(f"Bought {qty} {name}(s) for ${total}. Place furniture inside your farmhouse from the Tab menu.")
-            return
+            selected_group = str(category_choice.value)
+            while True:
+                design_items: List[MenuItem] = []
+                for name in sorted(
+                    stock_by_group[selected_group],
+                    key=lambda item: (
+                        str(INFRASTRUCTURE_DATA[item].get("catalog_collection", "")), item,
+                    ),
+                ):
+                    data = INFRASTRUCTURE_DATA[name]
+                    price = int(data.get("price", 0))
+                    affordable = s.money >= price
+                    surface = (
+                        "wall" if data.get("placement_surface") == "wall"
+                        else "rug" if data.get("placement_layer") == "floor"
+                        else self.footprint_label(name)
+                    )
+                    design_items.append(MenuItem(
+                        label=name,
+                        value=name,
+                        enabled=affordable,
+                        hint=f"${price} | {surface}" if affordable else f"${price} | too expensive",
+                    ))
+                design_items.append(MenuItem(label="Back to Categories", value=MENU_BACK, enabled=True))
+                choice = self.vertical_panel_select(
+                    selected_group,
+                    design_items,
+                    LEFT_PANEL_WIDTH,
+                    LEFT_PANEL_HEIGHT,
+                    return_back=True,
+                )
+                if choice is None or choice.value == MENU_BACK:
+                    break
+                name = str(choice.value)
+                price = int(INFRASTRUCTURE_DATA[name]["price"])
+                max_qty = s.money // price
+                qty = self.vertical_quantity_select(
+                    "Buy Furniture", name, price,
+                    max_qty=max_qty,
+                    start_qty=1,
+                    panel_width=LEFT_PANEL_WIDTH,
+                    panel_height=LEFT_PANEL_HEIGHT,
+                    return_back=True,
+                )
+                if qty == MENU_BACK or qty == 0:
+                    continue
+                qty = int(qty)
+                total = qty * price
+                s.money -= total
+                s.inventory[name] = s.inventory.get(name, 0) + qty
+                if auto_opened:
+                    s.shop_menu_suppressed_until_exit = True
+                self.autosave_with_message(
+                    f"Bought {qty} {name}(s) for ${total}. "
+                    "Place furniture inside your farmhouse from the Tab menu."
+                )
+                return
 
     def blacksmith_menu(self, auto_opened: bool = False, service_override: bool = False):
         s = self.state
@@ -32641,14 +36099,14 @@ class FarmGame(
             rows.append(f"> {item.label}{status}")
         if footer_lines:
             rows.extend(footer_lines)
-        rows.extend([" ^ more", " v more", " Z/Enter select", " X/Esc back"])
+        rows.extend([" ^ more", " v more", " Z/Enter select", " B/X/Esc/Q/Tab back"])
         return dynamic_panel_width_for_text(rows, panel_width)
 
     def dynamic_view_panel_width(self, title: str, rows: List[str], panel_width: int = LEFT_PANEL_WIDTH, footer_lines: Optional[List[str]] = None) -> int:
         all_rows = [f" {title} "] + [f" {row}" for row in rows]
         if footer_lines:
             all_rows.extend(footer_lines)
-        all_rows.extend([" ^ more", " v more", " W/S scroll", " X/Esc back"])
+        all_rows.extend([" ^ more", " v more", " W/S/Pg scroll", " B/X/Esc/Q/Tab back"])
         return dynamic_panel_width_for_text(all_rows, panel_width)
 
     def draw_with_left_panel(
@@ -32715,7 +36173,7 @@ class FarmGame(
     ) -> Optional[MenuItem]:
         """
         Vertical sidebar menu with scrolling and dynamic width.
-        If return_back=True, X/Esc/Q/Tab returns a BACK sentinel MenuItem instead of None.
+        If return_back=True, B/X/Esc/Q/Tab returns a BACK sentinel MenuItem instead of None.
         """
         if not items:
             return MenuItem(label="Back", value=MENU_BACK) if return_back else None
@@ -32731,8 +36189,8 @@ class FarmGame(
                 hint="Return to the previous screen without taking an action.",
             ))
 
-        back_label = " B/X/Esc back" if return_back else " B/X/Esc close"
-        select_footer = " Z/Enter select"
+        back_label = " B/X/Esc/Q/Tab back" if return_back else " B/X/Esc/Q/Tab close"
+        select_footer = " Z/Enter select | A/D/Pg page"
         if hotkey_footer:
             select_footer += f" | {hotkey_footer}"
         panel_width = self.dynamic_menu_panel_width(
@@ -32815,10 +36273,14 @@ class FarmGame(
                 selected = (selected - 1) % len(items)
             elif key in ["s", "DOWN"]:
                 selected = (selected + 1) % len(items)
-            elif key in ["a", "LEFT"]:
+            elif key in ["a", "LEFT", "PGUP"]:
                 selected = max(0, selected - visible_rows)
-            elif key in ["d", "RIGHT"]:
+            elif key in ["d", "RIGHT", "PGDN"]:
                 selected = min(len(items) - 1, selected + visible_rows)
+            elif key == "HOME":
+                selected = 0
+            elif key == "END":
+                selected = len(items) - 1
             elif key in MENU_CONFIRM_KEYS:
                 if items[selected].enabled:
                     return items[selected]
@@ -32836,7 +36298,7 @@ class FarmGame(
             title,
             rows,
             panel_width,
-            footer_lines=[" W/S scroll", " B/X/Esc back"],
+            footer_lines=[" W/S/Pg/Home/End scroll", " B/X/Esc/Q/Tab back"],
         )
         inner_width = panel_width - 2
         visible_rows = max(4, panel_height - 6)
@@ -32860,8 +36322,8 @@ class FarmGame(
 
             panel_lines.append("|" + pad_to(" v more" if scroll_top + visible_rows < len(display_rows) else "", inner_width) + "|")
             panel_lines.append(colorize("+" + "-" * inner_width + "+", C.UI_BORDER))
-            panel_lines.append("|" + pad_to(" W/S scroll", inner_width) + "|")
-            panel_lines.append("|" + pad_to(" B/X/Esc back", inner_width) + "|")
+            panel_lines.append("|" + pad_to(" W/S/Pg/Home/End scroll", inner_width) + "|")
+            panel_lines.append("|" + pad_to(" B/X/Esc/Q/Tab back", inner_width) + "|")
             panel_lines.append(colorize("+" + "-" * inner_width + "+", C.UI_BORDER))
 
             self.draw_with_left_panel(panel_lines, panel_width)
@@ -32873,10 +36335,14 @@ class FarmGame(
                 scroll_top = max(0, scroll_top - 1)
             elif key in ["s", "DOWN"]:
                 scroll_top = min(max(0, len(display_rows) - visible_rows), scroll_top + 1)
-            elif key in ["a", "LEFT"]:
+            elif key in ["a", "LEFT", "PGUP"]:
                 scroll_top = max(0, scroll_top - visible_rows)
-            elif key in ["d", "RIGHT"]:
+            elif key in ["d", "RIGHT", "PGDN"]:
                 scroll_top = min(max(0, len(display_rows) - visible_rows), scroll_top + visible_rows)
+            elif key == "HOME":
+                scroll_top = 0
+            elif key == "END":
+                scroll_top = max(0, len(display_rows) - visible_rows)
 
 
     def vertical_quantity_select(
@@ -32909,7 +36375,7 @@ class FarmGame(
             "A/D: -/+ 1",
             "W/S: +/- 5",
             "Z/Enter confirm",
-            "B/X/Esc back",
+            "B/X/Esc/Q/Tab back",
         ])
         panel_width = self.dynamic_view_panel_width(title, base_rows, panel_width)
         inner_width = panel_width - 2
@@ -32944,7 +36410,7 @@ class FarmGame(
 
             panel_lines.append("+" + "-" * inner_width + "+")
             panel_lines.append("|" + pad_to(" Z/Enter confirm", inner_width) + "|")
-            panel_lines.append("|" + pad_to(" B/X/Esc back", inner_width) + "|")
+            panel_lines.append("|" + pad_to(" B/X/Esc/Q/Tab back", inner_width) + "|")
             panel_lines.append("+" + "-" * inner_width + "+")
 
             self.draw_with_left_panel(panel_lines, panel_width)
@@ -33151,6 +36617,7 @@ class FarmGame(
             "detailed_glyphs_enabled": bool(self.state.detailed_glyphs_enabled),
             "show_target_info": bool(self.state.show_target_info),
             "show_control_hints": bool(self.state.show_control_hints),
+            "show_hud_sidebar": bool(getattr(self.state, "show_hud_sidebar", True)),
             "live_time_enabled": bool(self.state.live_time_enabled),
             "time_speed": self.time_speed_key(),
             "wake_hour": self.wake_time_hour(),
@@ -33177,6 +36644,7 @@ class FarmGame(
         )
         self.state.show_target_info = bool(settings.get("show_target_info", self.state.show_target_info))
         self.state.show_control_hints = bool(settings.get("show_control_hints", self.state.show_control_hints))
+        self.state.show_hud_sidebar = bool(settings.get("show_hud_sidebar", getattr(self.state, "show_hud_sidebar", True)))
         self.state.live_time_enabled = bool(settings.get("live_time_enabled", self.state.live_time_enabled))
         speed = str(settings.get("time_speed", getattr(self.state, "time_speed", DEFAULT_TIME_SPEED)))
         self.state.time_speed = speed if speed in TIME_SPEED_OPTIONS else DEFAULT_TIME_SPEED
@@ -33203,6 +36671,7 @@ class FarmGame(
         while True:
             items = [
                 MenuItem(label="Target info line", value="target_info", enabled=True, hint=self.on_off(self.state.show_target_info)),
+                MenuItem(label="Right-side activity feed", value="hud_sidebar", enabled=True, hint=self.on_off(getattr(self.state, "show_hud_sidebar", True))),
                 MenuItem(label="Control hint line", value="control_hints", enabled=True, hint=self.on_off(self.state.show_control_hints)),
                 MenuItem(label="Color display", value="color", enabled=True, hint=self.on_off(self.state.color_enabled)),
                 MenuItem(label="Ambient animation/lighting", value="ambient_visuals", enabled=True, hint=self.on_off(self.state.ambient_visuals_enabled)),
@@ -33219,13 +36688,15 @@ class FarmGame(
             choice = menu_select(
                 "Settings",
                 items,
-                footer="Arrow keys/WASD move | Z/Enter select | X/Esc/Q back",
+                footer="Arrow keys/WASD move | Z/Enter select | B/X/Esc/Q/Tab back",
                 extra_lines=["These settings apply before a new game is created."],
             )
             if choice is None or choice.value == MENU_BACK:
                 return
             if choice.value == "target_info":
                 self.state.show_target_info = not self.state.show_target_info
+            elif choice.value == "hud_sidebar":
+                self.state.show_hud_sidebar = not bool(getattr(self.state, "show_hud_sidebar", True))
             elif choice.value == "control_hints":
                 self.state.show_control_hints = not self.state.show_control_hints
             elif choice.value == "color":
@@ -33305,6 +36776,27 @@ class FarmGame(
             return None
         return int(choice.value)
 
+    def choose_player_origin_menu(self) -> Optional[str]:
+        origins = [
+            ("Elsewhere", "You grew up in or immediately around the starting town."),
+            ("Nearby Farming Country", "You came from the surrounding agricultural region."),
+            ("Wilderness Settlement", "You grew up in a small, isolated regional settlement."),
+            ("Distant City", "You left a larger urban community for farm life."),
+            ("Coastal Community", "Your early life was shaped by boats, fisheries, and sea weather."),
+            ("Mining Village", "You came from a community organized around stone and ore."),
+            ("Traveling Family", "You grew up moving between settlements rather than belonging to one."),
+        ]
+        items = [MenuItem(label=name, value=name, enabled=True, hint=hint) for name, hint in origins]
+        items.append(MenuItem(label="Back", value=MENU_BACK, enabled=True))
+        choice = menu_select(
+            "Where Are You From?",
+            items,
+            footer="NPCs can learn this when you choose to tell them about yourself.",
+        )
+        if choice is None or choice.value == MENU_BACK:
+            return None
+        return str(choice.value)
+
     def draw_birthday_picker_panel(self, view_month: int, cursor_day: int):
         days = days_in_month(view_month, 1)
         first_weekday = self.month_first_weekday_index(view_month, 1)
@@ -33337,7 +36829,7 @@ class FarmGame(
         self.centered_print("|" + pad_to(f"Season: {season_for_month(view_month)}", 50) + "|", 52)
         self.centered_print("+" + "-" * 50 + "+", 52)
         self.centered_print("|" + pad_to("Arrows/WASD move | Q/E month | Enter choose", 50) + "|", 52)
-        self.centered_print("|" + pad_to("Esc/Tab backs out", 50) + "|", 52)
+        self.centered_print("|" + pad_to("B/X/Esc/Tab backs out", 50) + "|", 52)
         self.centered_print("+" + "-" * 50 + "+", 52)
 
     def choose_player_birthday_menu(self) -> Optional[Tuple[int, int]]:
@@ -33347,7 +36839,7 @@ class FarmGame(
             self.draw_birthday_picker_panel(view_month, cursor_day)
             key = normalize_key(read_key())
 
-            if key in ["\t", "\x1b"]:
+            if key in ["\t", "\x1b", "b", "x"]:
                 return None
             if key in ["\r", "\n", " ", "z"]:
                 return view_month, cursor_day
@@ -33424,6 +36916,9 @@ class FarmGame(
         starting_age = self.choose_player_starting_age_menu()
         if starting_age is None:
             return False
+        origin = self.choose_player_origin_menu()
+        if origin is None:
+            return False
         starting_class = self.choose_player_starting_class_menu()
         if starting_class is None:
             return False
@@ -33454,6 +36949,7 @@ class FarmGame(
             f"Color: {colorize('@', dict(PLAYER_COLOR_OPTIONS).get(color, C.PLAYER))} {color}",
             f"Born: {format_date(birthday_month, birthday_day, birth_year)}",
             f"Starting age: {starting_age}",
+            f"Origin: {origin}",
             f"Combat class: {starting_class}",
             f"Run mode: {victory_mode}",
             "",
@@ -33498,6 +36994,7 @@ class FarmGame(
             else 0
         )
         self.state.player_background = "First-Generation Farmer"
+        self.state.player_origin = origin
         self.state.player_starting_class = starting_class
         self.configure_victory_mode(victory_mode, victory_contract)
         self.state.message = f"Welcome, {name}. Press H for help or K for calendar."
@@ -33607,7 +37104,7 @@ class FarmGame(
             choice = menu_select(
                 GAME_TITLE,
                 items,
-                footer="Arrow keys/WASD move | Z/Enter select | X/Esc/Q quit",
+                footer="Arrow keys/WASD move | Z/Enter select | B/X/Esc/Q/Tab quit",
                 extra_lines=[
                     f"Version {GAME_VERSION}",
                     "A terminal life-sim RPG.",
@@ -33658,6 +37155,12 @@ class FarmGame(
         state = "shown" if self.state.show_target_info else "hidden"
         self.autosave_with_message(f"Target info line {state}.")
 
+    def toggle_hud_sidebar_setting(self):
+        self.state.show_hud_sidebar = not bool(getattr(self.state, "show_hud_sidebar", True))
+        state = "enabled" if self.state.show_hud_sidebar else "disabled"
+        self.invalidate_draw_cache()
+        self.autosave_with_message(f"Right-side activity feed {state}.")
+
     def toggle_control_hints_setting(self):
         self.state.show_control_hints = not self.state.show_control_hints
         state = "shown" if self.state.show_control_hints else "hidden"
@@ -33685,6 +37188,7 @@ class FarmGame(
         while True:
             items = [
                 MenuItem(label="Target info line", value="target_info", enabled=True, hint=self.on_off(self.state.show_target_info)),
+                MenuItem(label="Right-side activity feed", value="hud_sidebar", enabled=True, hint=self.on_off(getattr(self.state, "show_hud_sidebar", True))),
                 MenuItem(label="Control hint line", value="control_hints", enabled=True, hint=self.on_off(self.state.show_control_hints)),
                 MenuItem(label="Color display", value="color", enabled=True, hint=self.on_off(self.state.color_enabled)),
                 MenuItem(label="Ambient animation/lighting", value="ambient_visuals", enabled=True, hint=self.on_off(self.state.ambient_visuals_enabled)),
@@ -33712,6 +37216,8 @@ class FarmGame(
 
             if choice.value == "target_info":
                 self.toggle_target_info_setting()
+            elif choice.value == "hud_sidebar":
+                self.toggle_hud_sidebar_setting()
             elif choice.value == "control_hints":
                 self.toggle_control_hints_setting()
             elif choice.value == "color":
@@ -33781,6 +37287,13 @@ class FarmGame(
 
         output_name, output_qty = recipe["output"]
         self.state.inventory[output_name] = self.state.inventory.get(output_name, 0) + output_qty
+        if hasattr(self, "record_quest_event"):
+            self.record_quest_event(
+                "craft", target_id=recipe_name, target_name=output_name,
+                target_tags=["crafted", "bench" if recipe.get("requires_bench") else "handmade"],
+                amount=output_qty, location=str(getattr(self.state, "location", "")),
+                note=f"Crafted {output_qty} {output_name}.",
+            )
         self.autosave_with_message(f"Crafted {output_qty} {output_name}.")
 
     def show_recipe_details(self, recipe_name: str):
@@ -33908,11 +37421,19 @@ class FarmGame(
                 continue
 
     def has_kitchen_access(self) -> bool:
-        """Cooking requires either a kitchen upgrade or a placed Kitchen Counter."""
+        """Cooking requires an upgrade or functional cooking furniture."""
         if any(upgrade in self.state.house_upgrades for upgrade in ["Kitchen Addition", "Bedroom Expansion", "Deluxe Farmhouse"]):
             return True
+        current_scope = self.current_object_location_key()
         for key, obj_name in self.state.placed_objects.items():
-            if isinstance(key, str) and key.startswith("HouseInterior:") and obj_name == "Kitchen Counter":
+            if (
+                isinstance(key, str)
+                and (
+                    key.startswith("HouseInterior:")
+                    or key.startswith(f"{current_scope}:")
+                )
+                and str(INFRASTRUCTURE_DATA.get(obj_name, {}).get("furniture_function", "")) == "cook"
+            ):
                 return True
         if self.on_procedural_town_interior():
             plan = self.current_procedural_town_plan()
@@ -33996,8 +37517,23 @@ class FarmGame(
                 self.set_message(f"Missing {ingredient_name}.")
                 return False
         output_name, output_qty = recipe["output"]
-        self.state.inventory[output_name] = self.state.inventory.get(output_name, 0) + output_qty
-        self.autosave_with_message(f"Cooked {output_qty} {output_name}.")
+        cooking_context = getattr(self, "_active_cooking_furniture", None)
+        furniture_bonus = (
+            max(0, int(cooking_context.get("bonus", 0) or 0))
+            if isinstance(cooking_context, dict) else 0
+        )
+        bonus_output = 1 if furniture_bonus >= 4 else 0
+        produced = int(output_qty) + bonus_output
+        self.state.inventory[output_name] = self.state.inventory.get(output_name, 0) + produced
+        time_cost = max(5, 15 - furniture_bonus) if isinstance(cooking_context, dict) else 0
+        if time_cost:
+            self.advance_time(time_cost)
+        station = str(cooking_context.get("name", "kitchen")) if isinstance(cooking_context, dict) else ""
+        extra = " including one bonus serving" if bonus_output else ""
+        context_text = f" at the {station.lower()} in {time_cost} minutes" if station else ""
+        self.autosave_with_message(
+            f"Cooked {produced} {output_name}{extra}{context_text}."
+        )
         return True
 
     def show_cooking_menu(self):
@@ -34860,68 +38396,25 @@ class FarmGame(
                 return MENU_BACK
             if choice.value == "checkin":
                 line, gained = self.check_in_with_travel_follower(follower_id)
-                lines = [
-                    str(data.get("name", "Follower")),
-                    "",
-                    line,
-                    "",
-                    (
-                        f"Bond +{gained}. Daily connection rewards also strengthened the underlying relationship."
-                        if gained
-                        else "You have already received today's connection reward, but the conversation still matters."
-                    ),
-                    f"Current bond: {self.travel_follower_bond_rank(follower_id)} "
-                    f"({self.travel_follower_bond_points(follower_id)}/999)",
-                ]
-                self.vertical_panel_view(
-                    f"Check In - {data.get('name', 'Follower')}",
-                    lines,
-                    LEFT_PANEL_WIDTH,
-                    LEFT_PANEL_HEIGHT,
-                )
                 response_npc = {
+                    "id": str(follower_id),
                     "name": str(data.get("name", "Follower")),
                     "role": str(data.get("role", "Companion")),
                     "personality": self.travel_follower_personality_label(follower_id),
+                    "bond": self.travel_follower_bond_points(follower_id),
+                    "activity": str(data.get("activity", "traveling with you")),
                 }
-                response = self.npc_dialogue_response_choice(
+                self.run_unified_npc_conversation(
                     response_npc,
-                    influence_available=not checked_in,
-                    title=f"Respond to {data.get('name', 'Them')}",
+                    kind="companion",
+                    first_meeting=False,
+                    repeated_today=checked_in,
+                    agenda_override=str(line),
                 )
-                response_effect = int(response.get("effect", 0) or 0) if not checked_in else 0
-                if response_effect:
-                    self.adjust_travel_follower_bond(follower_id, response_effect)
-                    kind, source_id = self.travel_follower_identity_kind(follower_id)
-                    if kind == "child":
-                        child = self.travel_follower_child(follower_id)
-                        if child:
-                            self.adjust_child_affection(child, response_effect)
-                    else:
-                        npc_id = str(data.get("npc_id", source_id))
-                        if npc_id:
-                            self.adjust_town_npc_relationship(npc_id, response_effect)
-                        if kind == "spouse":
-                            self.adjust_family_bond(response_effect)
-                self.vertical_panel_view(
-                    f"{data.get('name', 'Follower')} Responds",
-                    [
-                        str(response.get("reaction", "Your companion turns their attention back to the road.")),
-                        "",
-                        f"Bond influence: {response_effect:+}"
-                        if response_effect
-                        else "You already had a meaningful check-in today."
-                        if checked_in
-                        else "No bond change.",
-                    ],
-                    LEFT_PANEL_WIDTH,
-                    LEFT_PANEL_HEIGHT,
+                self.autosave_with_message(
+                    f"Checked in with {data.get('name', 'your follower')}."
+                    + (f" Bond +{gained}." if gained else "")
                 )
-                if response_effect:
-                    self.autosave_with_message(
-                        f"Checked in with {data.get('name', 'your follower')}. "
-                        f"Bond influence {response_effect:+}."
-                    )
                 continue
             if choice.value == "moment":
                 changed, detail = self.share_travel_follower_moment(follower_id)
@@ -38952,7 +42445,7 @@ class FarmGame(
         ])
         return lines
 
-    def journal_quest_lines(self) -> List[str]:
+    def journal_legacy_quest_lines(self) -> List[str]:
         lines = ["QUEST JOURNAL", ""]
         lines.extend(self.resident_requests_overview_lines())
         lines.extend(["", "-" * 18, ""])
@@ -38977,6 +42470,215 @@ class FarmGame(
         lines.extend(["", "-" * 18, ""])
         lines.extend(self.combat_mission_board_lines())
         return lines
+
+    def legacy_unified_quest_snapshots(self) -> List[Dict[str, object]]:
+        """Expose older obligation systems to the unified tracker without owning their rewards."""
+        snapshots: List[Dict[str, object]] = []
+
+        def manual_objective(text: str, ready: bool, destination: Optional[Dict[str, object]] = None) -> List[Dict[str, object]]:
+            return [{
+                "id": "legacy_progress", "kind": "manual", "target": 1,
+                "current": 1 if ready else 0, "complete": bool(ready),
+                "description": str(text or "Complete the original obligation."),
+                "destination": dict(destination or {}),
+            }]
+
+        def chunk_destination(chunk_x: int, chunk_y: int, label: str) -> Dict[str, object]:
+            destination: Dict[str, object] = {
+                "location": "Wilderness", "chunk_x": int(chunk_x), "chunk_y": int(chunk_y),
+                "label": str(label),
+            }
+            if hasattr(self, "wilderness_world_coords"):
+                world_x, world_y = self.wilderness_world_coords(int(chunk_x), int(chunk_y), 43, 19)
+                destination.update({"world_x": int(world_x), "world_y": int(world_y)})
+            return destination
+
+        for request_id, request in self.resident_request_data().items():
+            source_status = self.resident_request_status(request_id)
+            ready = source_status in {"Ready", "Complete"}
+            npc_id = str(request.get("npc_id", "") or "")
+            requirements = "; ".join(self.quest_requirement_lines(request.get("requirements", {}) or {}, npc_id))
+            snapshots.append({
+                "id": f"legacy:resident:{request_id}", "title": str(request.get("title", request_id)),
+                "category": "Town", "description": str(request.get("description", "")),
+                "status": "completed" if source_status == "Complete" else "ready" if source_status == "Ready" else "active",
+                "giver_id": npc_id, "giver_name": self.request_npc_name(npc_id),
+                "objectives": manual_objective(requirements, ready), "turn_in": {},
+                "rewards": dict(request.get("rewards", {}) or {}),
+                "legacy_source": "resident", "legacy_source_id": str(request_id),
+                "legacy_direct_turn_in": True,
+            })
+
+        for companion_id in FARMSTEAD_COMPANION_DATA:
+            companion_name = str(FARMSTEAD_COMPANION_DATA[companion_id].get("name", companion_id))
+            npc_id = self.companion_quest_npc_id(companion_id)
+            for quest in COMPANION_QUEST_DATA.get(companion_id, []) or []:
+                quest_id = str(quest.get("id", "") or "")
+                source_status = self.companion_quest_status(companion_id, quest)
+                ready = source_status in {"Ready", "Complete"}
+                requirements = "; ".join(self.quest_requirement_lines(quest.get("requirements", {}) or {}, npc_id))
+                snapshots.append({
+                    "id": f"legacy:companion:{companion_id}:{quest_id}",
+                    "title": f"{companion_name}: {quest.get('title', quest_id)}",
+                    "category": "Relationships", "description": str(quest.get("description", "")),
+                    "status": "completed" if source_status == "Complete" else "ready" if source_status == "Ready" else "active",
+                    "giver_id": npc_id, "giver_name": companion_name,
+                    "objectives": manual_objective(requirements, ready), "turn_in": {},
+                    "rewards": dict(quest.get("rewards", {}) or {}),
+                    "legacy_source": "companion", "legacy_source_id": quest_id,
+                    "legacy_owner_id": str(companion_id), "legacy_direct_turn_in": True,
+                })
+
+        for job in self.today_bulletin_jobs():
+            completed = bool(job.get("completed", False))
+            ready = completed or self.can_complete_bulletin_job(job)
+            snapshots.append({
+                "id": f"legacy:bulletin:{job.get('id')}", "title": str(job.get("title", "Bulletin Job")),
+                "category": "Town", "description": str(job.get("note", "")),
+                "status": "completed" if completed else "ready" if ready else "active",
+                "giver_name": "Town Bulletin Board",
+                "objectives": manual_objective(
+                    f"Deliver {int(job.get('qty', 1))} {job.get('item', 'requested goods')} to the physical town bulletin board.", ready
+                ),
+                "turn_in": {}, "rewards": {"money": int(job.get("reward", 0) or 0)},
+                "legacy_source": "bulletin", "legacy_source_id": str(job.get("id", "")),
+                "legacy_direct_turn_in": False,
+            })
+
+        for contract in self.regional_contracts(("active", "completed")):
+            contract_id = str(contract.get("id", "") or "")
+            completed = str(contract.get("status", "")) == "completed"
+            ready, reason = (True, "Contract completed.") if completed else self.can_complete_regional_contract(contract)
+            destination: Dict[str, object] = {}
+            plan = self.civic_plan_for_key(str(contract.get("town_key", "")))
+            if isinstance(plan, dict) and "chunk_x" in plan and "chunk_y" in plan:
+                destination = chunk_destination(int(plan["chunk_x"]), int(plan["chunk_y"]), str(plan.get("name", "destination town")))
+            snapshots.append({
+                "id": f"legacy:contract:{contract_id}", "title": str(contract.get("title", "Regional Contract")),
+                "category": "Business", "description": str(contract.get("description", contract.get("summary", ""))),
+                "status": "completed" if completed else "ready" if ready else "active",
+                "giver_name": "Regional Contract Board",
+                "objectives": manual_objective(str(reason), ready, destination),
+                "turn_in": destination, "rewards": {"money": int(contract.get("reward", 0) or 0)},
+                "legacy_source": "contract", "legacy_source_id": contract_id,
+                "legacy_direct_turn_in": True,
+            })
+
+        bounty_rows = list(self.active_bounty_records()) + [
+            row for row in (getattr(self.state, "completed_bounty_log", []) or []) if isinstance(row, dict)
+        ][-30:]
+        seen_bounties: set[str] = set()
+        for bounty in bounty_rows:
+            bounty_id = str(bounty.get("id", "") or "")
+            if not bounty_id or bounty_id in seen_bounties:
+                continue
+            seen_bounties.add(bounty_id)
+            source_status = str(bounty.get("status", "accepted"))
+            completed = source_status == "claimed"
+            ready = completed or source_status == "defeated" or bool(bounty.get("target_defeated", False))
+            destination = {} if ready else chunk_destination(
+                int(bounty.get("chunk_x", 0) or 0), int(bounty.get("chunk_y", 0) or 0),
+                f"Bounty target: {bounty.get('target_name', 'wanted target')}",
+            )
+            snapshots.append({
+                "id": f"legacy:bounty:{bounty_id}", "title": str(bounty.get("title", "Wanted Target")),
+                "category": "Bounties", "description": str(bounty.get("description", "")),
+                "status": "completed" if completed else "ready" if ready else "active",
+                "giver_name": str(bounty.get("posted_town_name", "Sheriff Office")),
+                "objectives": manual_objective(
+                    "Return to a physical bounty board to claim the reward." if ready else
+                    f"Defeat {bounty.get('target_name', 'the wanted target')} in chunk ({bounty.get('chunk_x', 0)},{bounty.get('chunk_y', 0)}).",
+                    ready, destination,
+                ),
+                "turn_in": {}, "rewards": {"money": int(bounty.get("reward_money", 0) or 0)},
+                "legacy_source": "bounty", "legacy_source_id": bounty_id,
+                "legacy_direct_turn_in": False,
+            })
+
+        completed_missions = {str(value) for value in getattr(self.state, "completed_combat_mission_ids", []) or []}
+        for preset in self.all_tactical_mission_presets():
+            mission_name = str(preset.get("name", "Combat Mission") or "Combat Mission")
+            mission_id = self.tactical_slug(mission_name, "combat-mission")
+            completed = mission_id in completed_missions
+            snapshots.append({
+                "id": f"legacy:mission:{mission_id}", "title": mission_name,
+                "category": "Wilderness", "description": str(preset.get("theme", preset.get("objective", "Tactical mission"))),
+                "status": "completed" if completed else "offered", "giver_name": "Combat Mission Board",
+                "objectives": manual_objective(str(preset.get("objective", "Defeat all enemies.")), completed),
+                "turn_in": {}, "rewards": {}, "legacy_source": "mission",
+                "legacy_source_id": mission_id, "legacy_direct_turn_in": False,
+            })
+        return snapshots
+
+    def legacy_unified_quest_detail_lines(self, quest: Dict[str, object]) -> List[str]:
+        source, source_id = str(quest.get("legacy_source", "")), str(quest.get("legacy_source_id", ""))
+        if source == "resident":
+            return self.resident_request_lines(source_id)
+        if source == "companion":
+            entry = self.companion_quest_entry(str(quest.get("legacy_owner_id", "")), source_id)
+            if entry:
+                return self.companion_quest_lines(str(quest.get("legacy_owner_id", "")), entry)
+        if source == "bulletin":
+            job = next((row for row in self.today_bulletin_jobs() if str(row.get("id", "")) == source_id), None)
+            if job:
+                return self.bulletin_job_lines(job)
+        if source == "contract":
+            contract = next((row for row in self.regional_contracts() if str(row.get("id", "")) == source_id), None)
+            if contract:
+                ready, reason = self.can_complete_regional_contract(contract) if contract.get("status") == "active" else (True, "Completed")
+                return [str(contract.get("title", "Regional Contract")), "", str(contract.get("description", "")), "", f"Status: {contract.get('status', 'unknown')}", f"Objective: {reason}", f"Reward: {int(contract.get('reward', 0))}g"]
+        if source == "bounty":
+            bounty = self.state.active_bounties.get(source_id)
+            if not isinstance(bounty, dict):
+                bounty = next((row for row in getattr(self.state, "completed_bounty_log", []) or [] if isinstance(row, dict) and str(row.get("id", "")) == source_id), None)
+            if isinstance(bounty, dict):
+                return self.bounty_detail_lines(bounty)
+        if source == "mission":
+            preset = next((row for row in self.all_tactical_mission_presets() if self.tactical_slug(str(row.get("name", "")), "combat-mission") == source_id), None)
+            if preset:
+                return self.combat_mission_lines(preset)
+        return self.quest_detail_lines(quest)
+
+    def complete_legacy_unified_quest(self, quest: Dict[str, object]) -> bool:
+        source, source_id = str(quest.get("legacy_source", "")), str(quest.get("legacy_source_id", ""))
+        if source == "resident":
+            return self.complete_resident_request(source_id)
+        if source == "companion":
+            return self.complete_companion_quest(str(quest.get("legacy_owner_id", "")), source_id)
+        if source == "contract":
+            return self.complete_regional_contract(source_id)
+        self.set_message("This obligation must be completed at its physical board or encounter.")
+        return False
+
+    def open_legacy_unified_quest_source(self, quest: Dict[str, object]) -> None:
+        source = str(quest.get("legacy_source", ""))
+        if source == "resident":
+            self.resident_requests_menu()
+        elif source == "companion":
+            self.companion_quests_menu()
+        elif source == "contract":
+            self.show_regional_contract_menu()
+        elif source == "bounty":
+            self.show_active_bounties_menu()
+        elif source == "bulletin":
+            self.vertical_panel_view("Bulletin Jobs", self.bulletin_jobs_overview_lines(), LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
+            self.set_message("Visit the physical town bulletin board to turn in a ready job.")
+        elif source == "mission":
+            self.vertical_panel_view("Combat Mission Board", self.combat_mission_board_lines(), LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
+            self.set_message("Visit a combat mission board to launch the selected contract.")
+
+    def journal_quest_lines(self) -> List[str]:
+        return [
+            "QUEST JOURNAL",
+            "",
+            *self.unified_quest_journal_lines(),
+            "",
+            "-" * 18,
+            "",
+            "OTHER OBLIGATIONS",
+            "",
+            *self.journal_legacy_quest_lines()[2:],
+        ]
 
     def journal_land_claim_lines(self) -> List[str]:
         claims = self.state.owned_wilderness_claims if isinstance(self.state.owned_wilderness_claims, dict) else {}
@@ -39267,10 +42969,48 @@ class FarmGame(
             title, lines_fn = views[str(choice.value)]
             self.vertical_panel_view(title, lines_fn(), LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
 
+    def show_hud_activity_log_menu(self):
+        labels = {
+            "all": "All activity",
+            "combat": "Combat",
+            "gain": "Items and gains",
+            "money": "Money and trade",
+            "social": "Relationships and reputation",
+            "dialogue": "Dialogue",
+            "warning": "Warnings and failures",
+            "travel": "Travel and discoveries",
+            "general": "General activity",
+        }
+        while True:
+            entries = [entry for entry in (getattr(self.state, "hud_activity_log", []) or []) if isinstance(entry, dict)]
+            items = []
+            for category, label in labels.items():
+                count = len(entries) if category == "all" else sum(
+                    1 for entry in entries if str(entry.get("category", "general")) == category
+                )
+                items.append(MenuItem(label=label, value=category, enabled=count > 0, hint=f"{count} recorded"))
+            items.append(MenuItem(label="Back", value=MENU_BACK, enabled=True))
+            choice = self.vertical_panel_select(
+                "Activity Log", items, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT, return_back=True,
+            )
+            if choice is None or choice.value == MENU_BACK:
+                return MENU_BACK
+            category = str(choice.value)
+            self.vertical_panel_view(
+                labels.get(category, "Activity Log"),
+                self.hud_activity_log_lines(category),
+                LEFT_PANEL_WIDTH,
+                LEFT_PANEL_HEIGHT,
+            )
+
     def show_journal_codex_menu(self):
         while True:
             items = [
                 MenuItem(label="Today", value="today", enabled=True),
+                MenuItem(
+                    label="Activity Log", value="activity", enabled=True,
+                    hint=f"{len(getattr(self.state, 'hud_activity_log', []) or [])} recent events",
+                ),
                 MenuItem(label="Quests", value="quests", enabled=True),
                 MenuItem(label="Calendar & Birthdays", value="calendar", enabled=True),
                 MenuItem(label="Progress Goals", value="progress", enabled=True),
@@ -39290,6 +43030,9 @@ class FarmGame(
             if choice.value == "today":
                 self.vertical_panel_view("Today", self.journal_overview_lines(), LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
                 continue
+            if choice.value == "activity":
+                self.show_hud_activity_log_menu()
+                continue
             if choice.value == "progress":
                 self.vertical_panel_view("Progress Goals", self.journal_progression_lines(), LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
                 continue
@@ -39302,7 +43045,7 @@ class FarmGame(
                 )
                 continue
             if choice.value == "quests":
-                self.vertical_panel_view("Quest Journal", self.journal_quest_lines(), LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
+                self.show_unified_quest_log_menu()
                 continue
             if choice.value == "calendar":
                 self.show_journal_calendar_menu()
@@ -39944,6 +43687,7 @@ class FarmGame(
         if public_occasion:
             events.append(public_occasion)
         events.extend(self.regional_circulation_calendar_events_for_date(month, day, year))
+        events.extend(self.planned_event_calendar_lines(month, day, year))
         mine_hazard = self.mine_hazard_label_for_date(month, day, year)
         if mine_hazard:
             events.append(f"Mine hazard day: {mine_hazard}")
@@ -40234,7 +43978,7 @@ class FarmGame(
             self.centered_print("|" + pad_to(line, 50) + "|", 52)
 
         self.centered_print("+" + "-" * 50 + "+", 52)
-        self.centered_print("|" + pad_to("Arrows/WASD move | Q/E month | X/Esc/Tab/K closes", 50) + "|", 52)
+        self.centered_print("|" + pad_to("Move arrows/WASD | Month Q/E | Close B/X/Esc/Tab/K", 50) + "|", 52)
         self.centered_print("+" + "-" * 50 + "+", 52)
 
     def move_calendar_cursor(self, day: int, delta: int, view_month: Optional[int] = None, view_year: Optional[int] = None) -> int:
@@ -40254,7 +43998,7 @@ class FarmGame(
             self.draw_calendar_panel(view_month, view_year, cursor_day)
             key = normalize_key(read_key())
 
-            if key in ["\t", "\x1b", "k", "x"]:
+            if key in ["\t", "\x1b", "k", "x", "b"]:
                 self.set_message("Closed calendar.")
                 return
 
@@ -40344,6 +44088,7 @@ class FarmGame(
         print("  I                  Inspect target tile")
         print("  T                  Toggle targeting: front tile / standing tile")
         print("  L                  Look cursor")
+        print("  J                  Open/close the full-screen Activity History")
         print("  V                  Open persistent combat, support, and world abilities")
         print("  Y                  Quick-cast the last successful world ability")
         print("  Tab                Menu: Backpack, Farm & Home, People, Adventure, Journal, System")
@@ -40351,7 +44096,7 @@ class FarmGame(
         print("  K                  Calendar")
         print("  B                  Reopen shop menu while already standing in shop")
         print("  N                  Sleep when inside farmhouse")
-        print("  Menus              Arrow keys/WASD/numpad move, Z/Enter select, X/Esc/Q cancel/back")
+        print("  Menus              Arrow keys/WASD/numpad move, Z/Enter select, B/X/Esc/Q/Tab cancel/back")
         print("  Tip                Press T if you prefer old-style standing-tile tool use.")
         print("  Tip                Face the shipping bin and press Z/Enter to ship crops.")
         print("  X                  Quick-pick simple front object / store held object")
@@ -40378,7 +44123,7 @@ class FarmGame(
         print("  Buy infrastructure at the store, then open Tab > Farm & Home > Build Mode.")
         print("  Build Mode has an independent scrolling cursor for placing, moving, and storing objects.")
         print("  Keep an item selected and press Z/Enter repeatedly to build paths, pipes, fences, and machine rows.")
-        print("  Build controls: P palette, Z/Enter place/pick/move, X store, C cancel, I inspect.")
+        print("  Build controls: P palette, Z/Enter place/pick/move, R rotate, F finish, X store, C cancel, I inspect.")
         print("  Press X while facing a simple placed object for the older quick pickup shortcut.")
         print("  Press R to area sow selected seeds around you.")
         print()
@@ -40452,6 +44197,9 @@ class FarmGame(
         if self.state.active_scene_id:
             self.handle_scene_key(key)
             return
+        if key == "j":
+            self.safe_menu(self.show_fullscreen_activity_log, "Activity history closed.")
+            return
         if self.on_wilderness_overworld():
             self.handle_overworld_key(key)
             return
@@ -40484,7 +44232,9 @@ class FarmGame(
             self.set_message("You wait in place while the world continues around you.")
             return
 
-        if key == "e":
+        if key == "r" and self.state.held_object:
+            self.rotate_held_object()
+        elif key == "e":
             self.cycle_tool(1)
         elif key in ["z", "\r", "\n"]:
             if self.state.fishing_active:
@@ -40531,7 +44281,10 @@ class FarmGame(
         elif key == "h":
             self.safe_menu(self.show_help, "Help closed.")
         elif key == "c":
-            self.toggle_color_setting()
+            if self.state.held_object:
+                self.cycle_held_object_finish()
+            else:
+                self.toggle_color_setting()
         elif key == "o":
             self.toggle_auto_open_setting()
         elif key == "u":

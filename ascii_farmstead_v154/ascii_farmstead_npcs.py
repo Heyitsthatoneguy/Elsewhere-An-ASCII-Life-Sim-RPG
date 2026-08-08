@@ -412,6 +412,14 @@ class NpcMixin:
             and str(npc.get("social_activity", ""))
         ):
             return str(npc.get("social_activity"))
+        story_outcome = npc.get("story_outcome", {})
+        if (
+            isinstance(story_outcome, dict)
+            and str(story_outcome.get("activity", ""))
+            and int(story_outcome.get("visible_until_day", 0) or 0) >= int(self.absolute_game_day())
+            and self.town_npc_current_routine_phase(npc) != "late"
+        ):
+            return str(story_outcome["activity"])
         role = str(npc.get("role", "Villager"))
         phase = self.town_npc_current_routine_phase(npc)
         if phase == "late" and not self.town_npc_is_indoor(npc):
@@ -912,11 +920,12 @@ class NpcMixin:
             return str(scene)
         return f"You spend quiet time with {npc.get('name')}, away from the usual errands."
 
-    def court_town_npc(self, npc: Dict[str, object]) -> bool:
+    def court_town_npc(self, npc: Dict[str, object], present: bool = True) -> bool:
         npc_id = str(npc.get("id", ""))
         ok, reason = self.can_court_town_npc(npc)
         if not ok:
-            self.vertical_panel_view(f"{npc.get('name', 'Villager')} Courtship", self.town_npc_romance_lines(npc) + ["", reason], LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
+            if present:
+                self.vertical_panel_view(f"{npc.get('name', 'Villager')} Courtship", self.town_npc_romance_lines(npc) + ["", reason], LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
             self.set_message(reason)
             return False
 
@@ -944,7 +953,8 @@ class NpcMixin:
             rows.extend(["", f"{npc.get('name')} is now dating you."])
         if self.state.spouse_npc_id == npc_id:
             rows.extend(["", "It feels less like impressing each other and more like keeping the home fires noticed."])
-        self.vertical_panel_view(f"{npc.get('name')} Courtship", rows, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
+        if present:
+            self.vertical_panel_view(f"{npc.get('name')} Courtship", rows, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
         self.autosave_with_message(f"Spent time with {npc.get('name')}. Relationship {actual_gain:+}.")
         return True
 
@@ -1064,11 +1074,12 @@ class NpcMixin:
             return None
         return self.date_after_days(int(choice.value))
 
-    def propose_to_town_npc(self, npc: Dict[str, object]) -> bool:
+    def propose_to_town_npc(self, npc: Dict[str, object], present: bool = True) -> bool:
         npc_id = str(npc.get("id", ""))
         ok, reason = self.can_propose_to_town_npc(npc)
         if not ok:
-            self.vertical_panel_view(f"Proposal to {npc.get('name', 'Villager')}", self.proposal_status_lines(npc), LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
+            if present:
+                self.vertical_panel_view(f"Proposal to {npc.get('name', 'Villager')}", self.proposal_status_lines(npc), LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
             self.set_message(reason)
             return False
 
@@ -1116,21 +1127,15 @@ class NpcMixin:
 
         vow = self.romance_data_for_npc(npc).get("vow", f"{npc.get('name')} promises to build a life beside you.")
         rows = [
-            f"Proposal to {npc.get('name')}",
-            "",
-            f"You offer the {WEDDING_RING_ITEM}.",
-            "",
-            str(vow),
-            "",
-            f"{npc.get('name')} accepts.",
-            "",
+            f"Proposal to {npc.get('name')}", "",
+            f"You offer the {WEDDING_RING_ITEM}.", "", str(vow), "",
+            f"{npc.get('name')} accepts.", "",
             f"Wedding date: {self.wedding_date_label()}",
             "The date has been marked on the calendar. The marriage begins when the ceremony occurs.",
         ]
-        if self.state.inventory.get(personal_item, 0) > 0:
-            rows.append(
-                f"You also have {personal_item}, something especially meaningful to them."
-            )
+        has_personal_item = self.state.inventory.get(personal_item, 0) > 0
+        if has_personal_item:
+            rows.append(f"You also have {personal_item}, something especially meaningful to them.")
         self.record_family_event(
             "Engagement",
             f"Became engaged to {npc.get('name')}; wedding scheduled for "
@@ -1140,7 +1145,37 @@ class NpcMixin:
                 f"{self.state.month}:{self.state.day}"
             ),
         )
-        self.vertical_panel_view(f"Proposal to {npc.get('name')}", rows, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
+        if present:
+            if hasattr(self, "play_world_event_scene"):
+                steps: List[Dict[str, object]] = [
+                    {
+                        "type": "narration",
+                        "text": f"You offer {npc.get('name')} the {WEDDING_RING_ITEM}. The place around you does not disappear while you wait for an answer.",
+                    },
+                ]
+                if has_personal_item:
+                    steps.append({
+                        "type": "narration",
+                        "text": f"The {personal_item} you brought makes the proposal unmistakably personal to them.",
+                    })
+                steps.extend([
+                    {
+                        "type": "dialogue", "speaker": str(npc.get("name", "Partner")),
+                        "npc_id": npc_id, "text": str(vow),
+                    },
+                    {
+                        "type": "narration",
+                        "text": f"{npc.get('name')} accepts. Your wedding is set for {self.wedding_date_label()}, now marked on the household calendar.",
+                    },
+                ])
+                self.play_world_event_scene(
+                    f"proposal:{npc_id}:{self.state.year}:{self.state.month}:{self.state.day}",
+                    f"A Proposal to {npc.get('name')}",
+                    steps,
+                    f"{npc.get('name')} accepted. Wedding: {self.wedding_date_label()}.",
+                )
+            else:
+                self.vertical_panel_view(f"Proposal to {npc.get('name')}", rows, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
         self.autosave_with_message(
             f"{npc.get('name')} accepted. Wedding: {self.wedding_date_label()}."
         )
@@ -1298,11 +1333,32 @@ class NpcMixin:
             ),
         )
         if interactive:
-            self.vertical_panel_view(
-                "Wedding Day",
-                self.wedding_ceremony_lines(npc),
-                LEFT_PANEL_WIDTH,
-                LEFT_PANEL_HEIGHT,
+            plan = self.ensure_family_world_state().get("wedding_plan", {}) if hasattr(self, "ensure_family_world_state") else {}
+            venue = str(plan.get("venue", "Town Hall"))
+            style = str(plan.get("style", "Community"))
+            guests = str(plan.get("guest_focus", "Friends and family"))
+            weather = str(getattr(self.state, "weather", "Clear"))
+            name = str(npc.get("name", "your partner"))
+            vow = str(self.romance_data_for_npc(npc).get("vow", f"{name} promises to build a life beside you."))
+            venue_line = {
+                "Town Hall": "The Town Hall doors stand open toward the streets that shaped both of your daily lives.",
+                "Farm Meadow": "An aisle crosses the farm meadow between crops, lanterns, and the tools of your shared future.",
+                "Lakeside": "Guests gather beside moving water, leaving every pause in the vows audible.",
+                "Wilderness Shrine": "A restored wilderness shrine marks the threshold between separate roads and a shared one.",
+            }.get(venue, f"The ceremony gathers at {venue}, a place chosen together.")
+            self.play_world_event_scene(
+                f"wedding:{npc_id}:{self.state.year}:{self.state.month}:{self.state.day}",
+                f"Wedding of {self.state.player_name} and {name}",
+                [
+                    {"type": "narration", "text": f"At {venue}, {venue_line} The {weather.lower()} weather and {style.lower()} preparations remain visible around the gathering."},
+                    {"type": "narration", "text": f"{guests} gather in the space instead of disappearing behind a separate ceremony screen."},
+                    {"type": "dialogue", "speaker": "Town Clerk", "text": "You are here to choose a household, not merely sign one into a ledger. Speak plainly, and let everyone present remember what you mean."},
+                    {"type": "dialogue", "speaker": name, "npc_id": npc_id, "text": vow},
+                    {"type": "dialogue", "speaker": str(self.state.player_name), "text": "I choose the work, uncertainty, ordinary days, and future we will build together."},
+                    {"type": "narration", "text": "You exchange rings and vows. Conversation, shared food, and the practical joy of combining two lives spread through the gathering."},
+                    {"type": "narration", "text": f"The household ledger records the marriage on {format_date(self.state.month, self.state.day, self.state.year)}."},
+                ],
+                f"Wedding day complete: married {name}.",
             )
         return f" Wedding day: you married {npc.get('name')}."
 
@@ -1886,10 +1942,55 @@ class NpcMixin:
         if not scene_key:
             self.set_message("No new marriage scene is ready.")
             return False
-        rows = self.marriage_scene_lines(npc, scene_key, scene_title)
+        name = str(npc.get("name", "your spouse"))
+        transcript: List[Dict[str, str]] = []
+        narrator = {"id": f"marriage_scene:{scene_key}", "name": "Narrator", "role": scene_title, "_dialogue_kind": "scene"}
+        if scene_key.startswith("anniversary:"):
+            narration = f"You and {name} pause where your ordinary routes have crossed, with the surrounding home still visible around you."
+            opening = "I don't want our anniversary to be only a date we noticed. What should we make room for in the year ahead?"
+            choices = [
+                ("Togetherness", "Protect time together", "Shared meals, conversations, and time at home."),
+                ("Adventure", "Seek more adventures together", "Travel, fishing, outings, and exploration."),
+                ("Prosperity", "Build greater security together", "Coordinate work, property, supplies, and practical goals."),
+            ]
+        elif scene_key.startswith("first_household_conflict:"):
+            narration = f"A small disagreement with {name} follows both of you through the room until neither can honestly call it unimportant."
+            opening = "I don't need us to agree instantly. I need us to decide how we handle work, space, and exhaustion when neither of us has much patience left."
+            choices = [
+                ("Togetherness", "Set aside time to check in", "Prioritize regular conversation before resentment accumulates."),
+                ("Prosperity", "Divide responsibilities clearly", "Coordinate chores, work, and practical expectations."),
+                ("Rest", "Protect each other's recovery time", "Reduce pressure and leave room for unstructured rest."),
+            ]
+        else:
+            narration = f"You and {name} stand over the household calendar and farm ledger instead of allowing another season to choose your priorities by accident."
+            opening = "Let's choose one honest priority for this week. We can change it later, but I want the choice to belong to both of us."
+            choices = [
+                ("Togetherness", "Prioritize time together", "Shared meals, conversation, and home life."),
+                ("Prosperity", "Prioritize household prosperity", "Work, errands, supplies, and practical goals."),
+                ("Learning", "Prioritize learning", "Lessons, libraries, and children's interests."),
+                ("Adventure", "Prioritize adventure", "Outings, travel, fishing, and exploration."),
+                ("Rest", "Prioritize rest", "Recovery and a calmer household schedule."),
+            ]
+        if not self.dialogue_say(narrator, narration, f"scene · {scene_title}", transcript):
+            return False
+        if not self.dialogue_say(npc, opening, "marriage", transcript):
+            return False
+        priority = self.dialogue_choose(npc, "How do you answer?", "shared decision", choices, transcript)
+        if not priority or priority == "goodbye":
+            return False
+        if hasattr(self, "set_family_weekly_priority"):
+            self.set_family_weekly_priority(priority)
+        response = {
+            "Togetherness": "Then we protect time for one another before the week fills every open space.",
+            "Prosperity": "Then we make the practical work visible and divide it before either of us silently carries too much.",
+            "Learning": "Then we make questions, books, and the children's interests part of the household rhythm.",
+            "Adventure": "Then we leave room for the road and make memories somewhere beyond our usual routine.",
+            "Rest": "Then rest counts as something we protect, not something either of us has to earn by collapsing.",
+        }.get(priority, "Then we will treat that as our shared priority and revisit it honestly.")
+        if not self.dialogue_say(npc, response, "resolution", transcript):
+            return False
         self.record_family_event(scene_title, f"Shared with {npc.get('name', 'your spouse')}.", flag=scene_key)
         self.adjust_town_npc_relationship(str(npc.get("id", "")), 3)
-        self.vertical_panel_view(scene_title, rows, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
         self.autosave_with_message(f"Shared a marriage scene with {npc.get('name', 'your spouse')}.")
         return True
 
@@ -2876,10 +2977,11 @@ class NpcMixin:
     def child_milestone_key(self, child: Dict[str, object], stage: Optional[str] = None) -> str:
         return f"child:{child.get('id', '?')}:{stage or self.household_child_stage(child)}"
 
-    def record_child_milestones_overnight(self) -> str:
+    def record_child_milestones_overnight(self, interactive: bool = False) -> str:
         if not isinstance(self.state.child_milestone_flags, list):
             self.state.child_milestone_flags = []
         notes: List[str] = []
+        milestones: List[Tuple[Dict[str, object], str]] = []
         for child in self.state.children:
             self.ensure_child_profile_fields(child)
             stage = self.household_child_stage(child)
@@ -2892,11 +2994,42 @@ class NpcMixin:
             name = str(child.get("name", "Your child"))
             self.record_family_event("Child Milestone", f"{name} reached the {stage} stage.", flag=key)
             notes.append(f" {name} is now a {stage}.")
+            milestones.append((child, stage))
+        if interactive and milestones and hasattr(self, "play_world_event_scene"):
+            stage_notes = {
+                "Toddler": "They now explore the household under their own power, turning familiar rooms into a much larger world.",
+                "Young Child": "Their questions, games, and first responsibilities begin to shape the household routine.",
+                "Child": "Lessons, chores, friendships, and family outings now leave clearer marks on who they are becoming.",
+                "Teen": "They can take on serious errands, accompany safer expeditions, and begin choosing skills of their own.",
+                "Young Adult": "Their upbringing now resolves into adult abilities, confidence, specialties, and a life path they can carry forward.",
+                "Adult": "They have entered full adulthood, carrying the accumulated consequences of family life into the wider world.",
+            }
+            steps: List[Dict[str, object]] = []
+            for child, stage in milestones:
+                name = str(child.get("name", "Your child"))
+                steps.extend([
+                    {"type": "narration", "text": f"The household wakes to a change that has been arriving a little at a time: {name} is now a {stage}."},
+                    {"type": "narration", "text": stage_notes.get(stage, "A new stage brings different routines, opportunities, and responsibilities.")},
+                ])
+            milestone_key = ":".join(
+                f"{child.get('id', '?')}-{stage.replace(' ', '_')}"
+                for child, stage in milestones
+            )
+            title = (
+                f"{milestones[0][0].get('name', 'A Child')} Grows"
+                if len(milestones) == 1 else "The Household Grows"
+            )
+            self.play_world_event_scene(
+                f"child_milestone:{self.state.year}:{self.state.month}:{self.state.day}:{milestone_key}",
+                title,
+                steps,
+                "The family's new life stage has been recorded.",
+            )
         return "".join(notes)
 
     def update_family_overnight(self, interactive: bool = False) -> str:
         if not self.pregnancy_due_reached():
-            return self.record_child_milestones_overnight()
+            return self.record_child_milestones_overnight(interactive=interactive)
 
         rng = random.Random(self.state.year * 10000 + self.state.month * 100 + self.state.day + int(self.state.next_child_id) * 37)
         sex = "Female" if rng.random() < 0.5 else "Male"
@@ -2940,6 +3073,26 @@ class NpcMixin:
         self.state.pregnancy_due_year = 0
         self.state.pregnancy_checkup_months_seen = []
         home = self.family_household_home_label() if hasattr(self, "family_household_home_label") else "the farmhouse"
+        if interactive and hasattr(self, "play_world_event_scene"):
+            parent = self.npc_record_by_id(str(parent_id)) if parent_id else None
+            parent_name = str(parent.get("name", "your spouse")) if isinstance(parent, dict) else "your family"
+            parent_step: Dict[str, object] = {
+                "type": "dialogue", "speaker": parent_name,
+                "text": f"Welcome, {child_name}. We do not know who you will become yet, and that is part of the promise.",
+            }
+            if isinstance(parent, dict):
+                parent_step["npc_id"] = str(parent.get("id", ""))
+            self.play_world_event_scene(
+                f"birth:{child.get('id')}:{self.state.year}:{self.state.month}:{self.state.day}",
+                f"{child_name} Is Born",
+                [
+                    {"type": "narration", "text": f"Morning reaches {home} differently. The household's routes, sleep, meals, and plans now bend around a newborn child."},
+                    parent_step,
+                    {"type": "narration", "text": f"{child_name}'s birthday is {format_birthday(self.state.month, self.state.day)}. Their {profile_fields['personality_trait'].lower()} temperament is only a first hint, not a finished destiny."},
+                    {"type": "narration", "text": f"The family record notes a starting class of {profile_fields.get('starting_class', 'Vanguard')}, which can still be reshaped by learning, chores, affection, and future outings."},
+                ],
+                f"{child_name} was born and joined the household.",
+            )
         return f" {child_name} was born and now lives at {home}. Starting class: {profile_fields.get('starting_class', 'Vanguard')}."
 
     def household_help_candidate_children(self) -> List[Dict[str, object]]:
@@ -3309,7 +3462,23 @@ class NpcMixin:
             f"Location: {occasion.get('location', 'Town')}",
             "Residents and regional visitors follow this occasion through their real schedules.",
         ]
-        self.vertical_panel_view(str(feature.get("name", "Public Occasion")), lines, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
+        if hasattr(self, "play_world_event_scene"):
+            title = str(feature.get("name", "Public Occasion"))
+            event_key = f"public_occasion:{occasion.get('kind', 'notice')}:{self.state.year}:{self.state.month}:{self.state.day}:{title}"
+            played = self.play_world_event_scene(
+                event_key, title,
+                [
+                    {"type": "narration", "text": str(feature.get("description", "The town has prepared this space for today's gathering."))},
+                    {"type": "narration", "text": f"{occasion.get('name', 'The occasion')} occupies {occasion.get('location', 'the town')} physically. Residents and regional visitors reach it through their real schedules."},
+                    {"type": "dialogue", "speaker": "Event Steward", "text": "Nothing here happens because a sign claims it did. Follow the tables, stalls, performers, and people if you want to understand the gathering."},
+                ],
+                f"Observed {title} during {occasion.get('name', 'the public occasion')}.",
+            )
+            if not played:
+                self.set_message(str(feature.get("description", "You inspect the public gathering.")))
+                return
+        else:
+            self.vertical_panel_view(str(feature.get("name", "Public Occasion")), lines, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
         self.set_message(str(feature.get("description", "You inspect the public gathering.")))
 
     def ensure_regional_town_visitors(self) -> List[Dict[str, object]]:
@@ -5552,8 +5721,21 @@ class NpcMixin:
             if not parsed:
                 continue
             location, ax, ay = parsed
-            if location == "HouseInterior" and (x, y) in self.object_footprint_tiles(str(obj_name), ax, ay):
-                return False
+            rotation = (
+                self.object_rotation_for_key(str(key))
+                if hasattr(self, "object_rotation_for_key")
+                else 0
+            )
+            if location == "HouseInterior" and (x, y) in self.object_footprint_tiles(
+                str(obj_name), ax, ay, rotation,
+            ):
+                if not (
+                    hasattr(self, "object_cell_walkable")
+                    and self.object_cell_walkable(
+                        str(obj_name), x, y, ax, ay, rotation,
+                    )
+                ):
+                    return False
         return True
 
     def household_child_positions(self) -> Dict[int, Tuple[int, int]]:
@@ -5710,61 +5892,28 @@ class NpcMixin:
                 self.set_message(f"Stopped checking on {child.get('name', 'the child')}.")
                 return
             if choice.value == "talk":
-                topic_items = [
-                    MenuItem(label="Ask How They're Feeling", value="feelings", enabled=True, hint=self.child_affection_rank(child)),
-                    MenuItem(label="Ask What They're Doing", value="activity", enabled=True, hint=self.household_child_activity_label(child)),
-                    MenuItem(label="Ask What They're Learning", value="learning", enabled=True, hint=self.child_top_learning_topic(child)[0] or "No focus yet"),
-                    MenuItem(label="Ask About Their Chore", value="chores", enabled=True, hint=self.child_chore_assignment(child)),
-                    MenuItem(label="Ask About the Family", value="family", enabled=True, hint="Home, outings, and time together"),
-                    MenuItem(label="Back", value=MENU_BACK, enabled=True),
-                ]
-                topic_choice = self.vertical_panel_select(
-                    f"Talk with {child.get('name', 'Child')}",
-                    topic_items,
-                    LEFT_PANEL_WIDTH,
-                    LEFT_PANEL_HEIGHT,
-                    return_back=True,
-                )
-                if not topic_choice or topic_choice.value == MENU_BACK:
-                    continue
-                self.vertical_panel_view(
-                    str(child.get("name", "Child")),
-                    self.household_child_talk_lines(child, str(topic_choice.value)),
-                    LEFT_PANEL_WIDTH,
-                    LEFT_PANEL_HEIGHT,
-                )
                 today = self.town_npc_day_key()
                 influence_available = str(child.get("last_conversation_day", "")) != today
-                child_npc = {
-                    "name": str(child.get("name", "Child")),
-                    "role": self.household_child_stage(child),
-                    "personality": str(self.ensure_child_profile_fields(child).get("personality_trait", "Curious")),
-                }
-                response = self.npc_dialogue_response_choice(
-                    child_npc,
-                    influence_available=influence_available,
-                    title=f"Respond to {child.get('name', 'Them')}",
+                child["role"] = self.household_child_stage(child)
+                child["personality"] = str(
+                    self.ensure_child_profile_fields(child).get("personality_trait", "Curious")
                 )
-                response_effect = int(response.get("effect", 0) or 0) if influence_available else 0
+                feeling_lines = self.household_child_talk_lines(child, "feelings")
+                agenda = next(
+                    (str(line).strip().strip('"“”') for line in feeling_lines if str(line).strip().startswith(('"', '“'))),
+                    f"I wanted to tell you what has been happening in my day.",
+                )
+                self.run_unified_npc_conversation(
+                    child,
+                    kind="child",
+                    first_meeting=False,
+                    repeated_today=not influence_available,
+                    agenda_override=agenda,
+                )
                 total_gain = 0
                 if influence_available:
                     child["last_conversation_day"] = today
                     total_gain += self.adjust_child_affection(child, 1)
-                    total_gain += self.adjust_child_affection(child, response_effect)
-                self.vertical_panel_view(
-                    str(child.get("name", "Child")),
-                    [
-                        str(response.get("reaction", "The moment settles into the household's day.")),
-                        "",
-                        f"Bond influence: {total_gain:+}"
-                        if influence_available and total_gain
-                        else "You already made time for a meaningful check-in today."
-                        if not influence_available
-                        else "No bond change.",
-                    ],
-                    LEFT_PANEL_WIDTH,
-                    LEFT_PANEL_HEIGHT,
-                )
                 self.autosave_with_message(
                     f"Checked in on {child.get('name', 'the child')}."
                     + (f" Bond {total_gain:+}." if total_gain else "")
@@ -5827,6 +5976,37 @@ class NpcMixin:
                 or (allow_closed_doors and grid[y][x] == "_")
             )
         )
+
+    def authored_town_interior_entry_tile(
+        self, location: str
+    ) -> Tuple[int, int]:
+        """Return the walkable landing immediately inside an authored door."""
+        grid = self.authored_town_interior_grid(location)
+        doors = [
+            (x, y)
+            for y, row in enumerate(grid)
+            for x, tile in enumerate(row)
+            if tile == "D"
+        ]
+        for door_x, door_y in doors:
+            candidates = [
+                (door_x + dx, door_y + dy)
+                for dx, dy in ((0, -1), (0, 1), (-1, 0), (1, 0))
+                if self.authored_town_interior_passable(
+                    location, door_x + dx, door_y + dy
+                )
+                and grid[door_y + dy][door_x + dx] != "D"
+            ]
+            if candidates:
+                return candidates[0]
+        if grid:
+            return self.town_npc_nearest_interior_tile(
+                location,
+                len(grid[0]) // 2 if grid[0] else 0,
+                len(grid) // 2,
+                radius_limit=max(len(grid), len(grid[0]) if grid[0] else 0),
+            )
+        return 27, 18
 
     def town_npc_nearest_interior_tile(
         self,
@@ -5960,37 +6140,29 @@ class NpcMixin:
             npc["facing"] = "UP"
 
     def indoor_npc_base_position(self, location: str) -> Tuple[int, int]:
-        if self.town_routine_phase() in ["wake", "late"]:
-            return {
-                "HouseInterior": self.spouse_farmhouse_position(),
-                "GeneralStoreInterior": (27, 9),
-                "BlacksmithInterior": (27, 9),
-                "LibraryInterior": (27, 9),
-                "MayorHouseInterior": (27, 9),
-                "InnInterior": (27, 9),
-                "FurnitureStoreInterior": (27, 9),
-                "CarpenterStoreInterior": (27, 9),
-                "AnimalStoreInterior": (27, 9),
-                "ClinicInterior": (27, 9),
-                "TownHallInterior": (27, 9),
-                "MarketRowInterior": (27, 9),
-                "MuseumInterior": (27, 9),
-            }.get(location, (27, 9))
-        return {
-            "HouseInterior": self.spouse_farmhouse_position(),
-            "GeneralStoreInterior": (27, 8),
-            "BlacksmithInterior": (27, 8),
-            "LibraryInterior": (27, 9),
-            "MayorHouseInterior": (27, 10),
-            "InnInterior": (24, 9),
-            "FurnitureStoreInterior": (27, 9),
-            "CarpenterStoreInterior": (27, 9),
-            "AnimalStoreInterior": (27, 9),
-            "ClinicInterior": (27, 9),
-            "TownHallInterior": (27, 9),
-            "MarketRowInterior": (27, 12),
-            "MuseumInterior": (27, 9),
-        }.get(location, (27, 9))
+        if location == "HouseInterior":
+            return self.spouse_farmhouse_position()
+        phase = self.town_routine_phase()
+        preferred_symbols = (
+            ({"B"}, {"k", "t"}, {"&"})
+            if phase in {"wake", "late"}
+            else ({"&"}, {"t", "T", "c"}, {"P", "d"})
+        )
+        for symbols in preferred_symbols:
+            approaches = self.town_npc_fixture_approaches(location, symbols)
+            if approaches:
+                return approaches[0]
+        grid = self.authored_town_interior_grid(location)
+        if grid:
+            center_x = len(grid[0]) // 2 if grid[0] else 27
+            center_y = len(grid) // 2
+            return self.town_npc_nearest_interior_tile(
+                location,
+                center_x,
+                center_y,
+                radius_limit=max(len(grid), len(grid[0]) if grid[0] else 0),
+            )
+        return 27, 18
 
     def town_indoor_npc_positions(self, normalize: bool = True) -> Dict[str, Tuple[int, int]]:
         if not self.on_town_interior():
@@ -6027,6 +6199,22 @@ class NpcMixin:
         return positions
 
     def town_npc_position_lookup(self) -> Dict[Tuple[int, int], Dict[str, object]]:
+        temporary_ids = (
+            set(self.temporary_participant_actor_ids())
+            if hasattr(self, "temporary_participant_actor_ids")
+            else set()
+        )
+
+        def without_temporary(
+            lookup: Dict[Tuple[int, int], Dict[str, object]]
+        ) -> Dict[Tuple[int, int], Dict[str, object]]:
+            if not temporary_ids:
+                return lookup
+            return {
+                position: npc for position, npc in lookup.items()
+                if str(npc.get("id", "")) not in temporary_ids
+            }
+
         if (
             hasattr(self, "procedural_town_resident_position_lookup")
             and (
@@ -6039,7 +6227,7 @@ class NpcMixin:
         ):
             procedural_lookup = self.procedural_town_resident_position_lookup()
             if procedural_lookup:
-                return procedural_lookup
+                return without_temporary(procedural_lookup)
         seamless_farm = bool(
             hasattr(self, "in_seamless_farm_district") and self.in_seamless_farm_district()
         )
@@ -6047,7 +6235,7 @@ class NpcMixin:
             hasattr(self, "in_seamless_town_district") and self.in_seamless_town_district()
         )
         if self.on_farm() or self.on_mine() or seamless_farm:
-            return self.home_region_destination_npc_positions()
+            return without_temporary(self.home_region_destination_npc_positions())
         if not (self.on_town() or self.on_town_interior() or self.on_house() or seamless_town):
             return {}
         self.normalize_town_npcs()
@@ -6089,7 +6277,7 @@ class NpcMixin:
                             min(16, position[1] + 1),
                         )
                     lookup[position] = relative
-            return lookup
+            return without_temporary(lookup)
 
         if self.on_town_interior():
             positions = self.town_indoor_npc_positions(normalize=False)
@@ -6103,9 +6291,9 @@ class NpcMixin:
             for position, visitor in self.regional_visitor_position_lookup().items():
                 if position not in lookup:
                     lookup[position] = visitor
-            return lookup
+            return without_temporary(lookup)
 
-        return self.authored_town_exterior_npc_positions(normalize=False)
+        return without_temporary(self.authored_town_exterior_npc_positions(normalize=False))
 
     def authored_town_exterior_npc_positions(
         self, *, normalize: bool = True,
@@ -6267,6 +6455,9 @@ class NpcMixin:
     def town_npc_move_interior_toward(self, npc: Dict[str, object], location: str, target: Tuple[int, int]) -> bool:
         npc_id = str(npc.get("id", ""))
         start = (int(npc.get("interior_x", 27)), int(npc.get("interior_y", 18)))
+        if not self.authored_town_interior_passable(location, *start):
+            start = self.authored_town_interior_entry_tile(location)
+            npc["interior_x"], npc["interior_y"] = start
         self.town_npc_close_used_interior_door(npc, location, start)
         if start == target:
             npc["route_blocked"] = False
@@ -6498,6 +6689,9 @@ class NpcMixin:
                     subject["social_activity"] = activity
                     subject["social_day_key"] = day_key
                     subject["social_phase"] = phase
+                if hasattr(self, "dialogue_propagate_knowledge"):
+                    self.dialogue_propagate_knowledge(npc, "authored", other, "authored")
+                    self.dialogue_propagate_knowledge(other, "authored", npc, "authored")
 
     def update_town_npcs(self, force_reanchor: bool = False):
         if not (
@@ -6550,7 +6744,7 @@ class NpcMixin:
                 if self.on_town_interior() and actual == "Town":
                     if desired == observed_location:
                         npc["runtime_location"] = desired
-                        npc["interior_x"], npc["interior_y"] = self.town_npc_nearest_interior_tile(desired, 27, 18)
+                        npc["interior_x"], npc["interior_y"] = self.authored_town_interior_entry_tile(desired)
                         npc["runtime_transition"] = "entering_building"
                         anchor = self.town_npc_interior_anchor(npc, desired)
                         self.town_npc_move_interior_toward(npc, desired, anchor)
@@ -6594,7 +6788,7 @@ class NpcMixin:
                             npc["runtime_transition"] = ""
                         continue
 
-                    landing = self.town_npc_nearest_interior_tile(actual, 27, 18)
+                    landing = self.authored_town_interior_entry_tile(actual)
                     if observed_location == actual:
                         npc["runtime_transition"] = "leaving_building"
                         if not self.town_npc_move_interior_toward(npc, actual, landing):
@@ -7964,7 +8158,83 @@ class NpcMixin:
                     "steps": steps,
                 }
         scenes.update(self.life_event_scene_catalog())
+        special = getattr(self.state, "special_event_scenes", {})
+        if isinstance(special, dict):
+            scenes.update({
+                str(scene_id): scene for scene_id, scene in special.items()
+                if isinstance(scene, dict)
+            })
         return scenes
+
+    def register_special_event_scene(
+        self,
+        event_id: str,
+        title: str,
+        steps: List[Dict[str, object]],
+        completion_message: str = "",
+    ) -> Dict[str, object]:
+        scene_id = str(event_id or "world_event")
+        if not scene_id.startswith("special:"):
+            scene_id = f"special:{scene_id}"
+        valid_types = {
+            "dialogue", "narration", "text", "relationship", "give_item",
+            "remove_item", "set_flag", "set_npc_milestone", "unlock_recipe",
+            "message", "position",
+        }
+        clean_steps = [
+            dict(step) for step in steps
+            if isinstance(step, dict) and str(step.get("type", "")) in valid_types
+        ][:60]
+        if not any(self.step_is_visible_scene_text(step) for step in clean_steps):
+            clean_steps.insert(0, {"type": "narration", "text": str(title or "A world event occurs.")})
+        clean_steps.extend([
+            {"type": "set_flag", "flag": f"world_event:{scene_id}"},
+            {"type": "message", "text": str(completion_message or f"{title} recorded.")},
+        ])
+        scene = {
+            "id": scene_id, "title": str(title or "World Event"),
+            "completion_flag": scene_id, "repeatable": False,
+            "priority": 200, "trigger": {}, "steps": clean_steps,
+            "registered_day": int(self.absolute_game_day()) if hasattr(self, "absolute_game_day") else 0,
+        }
+        if not isinstance(getattr(self.state, "special_event_scenes", None), dict):
+            self.state.special_event_scenes = {}
+        self.state.special_event_scenes[scene_id] = scene
+        while len(self.state.special_event_scenes) > 40:
+            removable = next((
+                key for key in self.state.special_event_scenes
+                if key != str(getattr(self.state, "active_scene_id", ""))
+            ), None)
+            if removable is None:
+                break
+            self.state.special_event_scenes.pop(removable, None)
+        return scene
+
+    def play_world_event_scene(
+        self,
+        event_id: str,
+        title: str,
+        steps: List[Dict[str, object]],
+        completion_message: str = "",
+    ) -> bool:
+        scene = self.register_special_event_scene(event_id, title, steps, completion_message)
+        if self.scene_is_completed(scene):
+            return False
+        return self.play_scene(scene)
+
+    def world_event_steps_from_lines(
+        self, lines: List[str], speaker: str = "Narrator"
+    ) -> List[Dict[str, object]]:
+        steps: List[Dict[str, object]] = []
+        for line in lines:
+            text = " ".join(str(line or "").strip().split())
+            if not text:
+                continue
+            steps.append({
+                "type": "narration" if speaker == "Narrator" else "dialogue",
+                "speaker": str(speaker), "text": text,
+            })
+        return steps
 
     def life_event_scene_catalog(self) -> Dict[str, Dict[str, object]]:
         scenes: Dict[str, Dict[str, object]] = {}
@@ -8487,28 +8757,53 @@ class NpcMixin:
         scene = self.current_scene()
         step = self.current_scene_step()
         self.invalidate_draw_cache()
-        clear_screen()
         title = str(scene.get("title", "Scene"))
         step_type = str(step.get("type", "narration"))
         speaker = str(step.get("speaker", "Narrator" if step_type != "dialogue" else ""))
         text = str(step.get("text", ""))
-        width = 68
-        self.centered_print("+" + "-" * width + "+", width + 2)
-        self.centered_print("|" + pad_to(title.center(width), width) + "|", width + 2)
-        self.centered_print("+" + "-" * width + "+", width + 2)
-        if speaker:
-            self.centered_print("|" + pad_to(speaker, width) + "|", width + 2)
-            self.centered_print("+" + "-" * width + "+", width + 2)
-        for line in textwrap.wrap(text, width=width - 4) or [""]:
-            self.centered_print("|" + pad_to("  " + line, width) + "|", width + 2)
-        self.centered_print("+" + "-" * width + "+", width + 2)
-        self.centered_print("|" + pad_to("Enter/Space/E/Z continue", width) + "|", width + 2)
-        self.centered_print("+" + "-" * width + "+", width + 2)
+        trigger = dict(scene.get("trigger", {}) or {})
+        npc_id = str(step.get("npc_id", trigger.get("npc_id", "")) or "")
+        npc = self.npc_record_by_id(npc_id) if npc_id else None
+        if step_type == "dialogue" and isinstance(npc, dict):
+            actor = dict(npc)
+            actor["name"] = speaker or str(npc.get("name", "Speaker"))
+        else:
+            actor = {"id": f"scene:{scene.get('id', '')}", "name": speaker or "Narrator", "role": title}
+        actor["_dialogue_kind"] = "scene"
+        transcript = []
+        steps = list(scene.get("steps", []) or [])
+        for prior in steps[: int(self.state.active_scene_step_index) + 1]:
+            if not isinstance(prior, dict) or not self.step_is_visible_scene_text(prior):
+                continue
+            prior_type = str(prior.get("type", "narration"))
+            transcript.append({
+                "speaker": str(prior.get("speaker", "Narrator" if prior_type != "dialogue" else "")),
+                "text": str(prior.get("text", "")), "phase": title,
+            })
+        log_key = (str(scene.get("id", "")), int(self.state.active_scene_step_index))
+        if getattr(self, "_last_logged_scene_step", None) != log_key and hasattr(self, "add_hud_activity"):
+            self._last_logged_scene_step = log_key
+            self.add_hud_activity(f"{speaker or 'Narrator'}: {text}", "dialogue")
+        self._draw_dialogue_frame(actor, text, f"scene · {title}", transcript)
+
+    def skip_active_scene(self) -> bool:
+        if not self.state.active_scene_id:
+            return False
+        title = str(self.current_scene().get("title", "Scene"))
+        guard = 0
+        while self.state.active_scene_id and guard < 512:
+            self.advance_scene()
+            guard += 1
+        self.set_message(f"Skipped {title}; its outcomes were still applied.")
+        return True
 
     def handle_scene_key(self, key: str) -> bool:
         key = normalize_key(key)
         if key in MENU_CONFIRM_KEYS:
             return self.advance_scene()
+        if key in {"b", "x", "\x1b", "q", "\t"}:
+            self.skip_active_scene()
+            return False
         return True
 
     def play_scene(self, scene_or_id: object) -> bool:
@@ -8518,7 +8813,8 @@ class NpcMixin:
             if not self.advance_scene_to_visible_step():
                 continue
             self.draw_scene()
-            self.handle_scene_key(read_key())
+            if not self.handle_scene_key(read_key()):
+                break
         self.invalidate_draw_cache()
         return True
 
@@ -8834,25 +9130,18 @@ class NpcMixin:
             if choice.value == "talk":
                 today = self.town_npc_day_key()
                 last_talk = life.setdefault("visitor_last_talk_day", {}).get(visitor_id, "")
-                gain = 0
-                topic_items = [
-                    MenuItem(label="Ask What They're Doing", value="work", enabled=True, hint=str(visitor.get("activity", "Visiting town"))),
-                    MenuItem(label="Ask About Their Origin", value="origin", enabled=True, hint=str(visitor.get("origin", "Regional roads"))),
-                    MenuItem(label="Ask What They Notice Here", value="town", enabled=True, hint="Elsewhere through a visitor's eyes"),
-                    MenuItem(label="Ask for Regional News", value="news", enabled=True, hint=str(visitor.get("route_condition", "Open route"))),
-                    MenuItem(label="Ask Something Personal", value="personal", enabled=bond >= 2, hint="Requires Recognized Visitor" if bond < 2 else self.regional_visitor_bond_label(bond)),
-                    MenuItem(label="Back", value=MENU_BACK, enabled=True),
-                ]
-                topic_choice = self.vertical_panel_select(
-                    f"Talk with {visitor.get('name', 'Traveler')}",
-                    topic_items,
-                    LEFT_PANEL_WIDTH,
-                    LEFT_PANEL_HEIGHT,
-                    return_back=True,
+                visitor["bond"] = bond
+                agenda = self.regional_visitor_conversation_lines(visitor, "work", bond)[0].strip('"')
+                result = self.run_unified_npc_conversation(
+                    visitor,
+                    kind="regional_visitor",
+                    first_meeting=bond <= 0,
+                    repeated_today=last_talk == today,
+                    agenda_override=agenda,
                 )
-                if not topic_choice or topic_choice.value == MENU_BACK:
+                if not result.get("completed") and not result.get("transcript"):
                     continue
-                influence_available = last_talk != today
+                gain = 0
                 if last_talk != today:
                     gain = 1
                     life["visitor_bonds"][visitor_id] = min(250, bond + gain)
@@ -8861,41 +9150,9 @@ class NpcMixin:
                     memories = life.setdefault("visitor_memories", {}).setdefault(visitor_id, [])
                     memories.append(memory)
                     life["visitor_memories"][visitor_id] = memories[-8:]
-                current_bond = int(life["visitor_bonds"].get(visitor_id, bond + gain) or 0)
-                self.vertical_panel_view(
-                    str(visitor.get("name", "Traveler")),
-                    self.regional_visitor_conversation_lines(visitor, str(topic_choice.value), current_bond),
-                    LEFT_PANEL_WIDTH,
-                    LEFT_PANEL_HEIGHT,
-                )
-                response = self.npc_dialogue_response_choice(
-                    visitor,
-                    influence_available=influence_available,
-                    title=f"Respond to {visitor.get('name', 'Them')}",
-                )
-                response_effect = int(response.get("effect", 0) or 0) if influence_available else 0
-                if response_effect:
-                    life["visitor_bonds"][visitor_id] = max(
-                        0,
-                        min(250, int(life["visitor_bonds"].get(visitor_id, 0) or 0) + response_effect),
-                    )
-                self.vertical_panel_view(
-                    str(visitor.get("name", "Traveler")),
-                    [
-                        str(response.get("reaction", "The visitor turns back toward town.")),
-                        "",
-                        f"Connection influence: {response_effect:+}"
-                        if response_effect
-                        else "No further connection influence today."
-                        if not influence_available
-                        else "No connection change.",
-                    ],
-                    LEFT_PANEL_WIDTH,
-                    LEFT_PANEL_HEIGHT,
-                )
                 self.autosave_with_message(
                     f"Talked with {visitor.get('name', 'a regional visitor')}."
-                    + (f" Connection {gain + response_effect:+}." if influence_available else "")
+                    + (f" Connection +{gain}." if gain else "")
                 )
                 continue
             if choice.value == "journey":
@@ -8967,31 +9224,9 @@ class NpcMixin:
         ):
             self.dynasty_kin_menu(npc)
             return
-        if (
-            self.is_procedural_npc(npc)
-            and str(npc.get("id", ""))
-            == str(getattr(self.state, "spouse_npc_id", ""))
-            and hasattr(self, "procedural_household_spouse_menu")
-        ):
-            self.procedural_household_spouse_menu(npc)
-            return
         while True:
             npc_id = str(npc.get("id", npc.get("name", "npc")))
-            today = self.town_npc_day_key()
-            talked_today = self.state.town_npc_last_talk_day.get(npc_id) == today
-            gifted_today = self.state.town_npc_last_gift_day.get(npc_id) == today
-            errand = self.errand_for_npc(npc)
-            errand_hint = "done" if errand.get("completed") else ("ready" if self.can_complete_errand(errand) else f"needs {errand.get('item')}")
-            court_ok, _court_reason = self.can_court_town_npc(npc) if self.is_marriageable_npc(npc) else (False, "not romanceable")
-            proposal_ok, proposal_reason = self.can_propose_to_town_npc(npc) if self.is_marriageable_npc(npc) else (False, "not romanceable")
-            court_menu_hint = "Available" if court_ok else "Build friendship first"
-            proposal_menu_hint = "Ready" if proposal_ok else proposal_reason
-            items = [
-                MenuItem(label="Talk", value="talk", enabled=True),
-                MenuItem(label="Give Gift", value="gift", enabled=not gifted_today, hint="Choose a carried item" if not gifted_today else "Already gave a gift today"),
-                MenuItem(label="Ask Rumor", value="rumor", enabled=True),
-                MenuItem(label="Errand", value="errand", enabled=True, hint=errand_hint),
-            ]
+            items = [MenuItem(label="Talk", value="talk", enabled=True, hint="conversation, work, relationships, gifts, and plans")]
             service_spec = self.authored_town_service_spec(npc)
             if service_spec and self.town_npc_work_service_available(npc):
                 items.append(
@@ -9012,90 +9247,6 @@ class NpcMixin:
                         hint=local_work_reason,
                     )
                 )
-            if self.is_marriageable_npc(npc):
-                items.append(
-                    MenuItem(
-                        label="Courtship",
-                        value="courtship",
-                        enabled=True,
-                        hint=court_menu_hint,
-                    )
-                )
-                if str(getattr(self.state, "engaged_npc_id", "")) == npc_id:
-                    items.append(
-                        MenuItem(
-                            label="Wedding plans",
-                            value="wedding_plans",
-                            enabled=True,
-                            hint=self.wedding_date_label(),
-                        )
-                    )
-                else:
-                    items.append(
-                        MenuItem(
-                            label="Propose",
-                            value="proposal",
-                            enabled=True,
-                            hint=proposal_menu_hint,
-                        )
-                    )
-            if self.state.spouse_npc_id == npc_id:
-                move_ok, move_reason = self.can_invite_spouse_to_farm(npc)
-                family_ok, family_reason = self.can_start_pregnancy_with_spouse(npc)
-                scene_key, scene_title = self.available_marriage_scene(npc)
-                items.append(MenuItem(
-                    label="Household dashboard",
-                    value="household_dashboard",
-                    enabled=True,
-                    hint=self.family_weekly_priority() if hasattr(self, "family_weekly_priority") else self.family_bond_rank(),
-                ))
-                items.append(MenuItem(
-                    label="Move in together",
-                    value="move_spouse",
-                    enabled=move_ok,
-                    hint=move_reason,
-                ))
-                items.append(MenuItem(
-                    label="Marriage event",
-                    value="marriage_scene",
-                    enabled=bool(scene_key),
-                    hint=scene_title if scene_title else "none ready",
-                ))
-                items.append(MenuItem(label="Family memories", value="family_memories", enabled=True, hint=f"{len(self.state.family_event_log or [])} logged"))
-                items.append(MenuItem(
-                    label="Plan family",
-                    value="plan_family",
-                    enabled=True,
-                    hint=family_reason,
-                ))
-                if self.state.pregnancy_active:
-                    items.append(MenuItem(
-                        label="Pregnancy check-in",
-                        value="pregnancy_checkup",
-                        enabled=True,
-                        hint="ready" if self.pregnancy_checkup_available() else "view",
-                    ))
-                family_hint = "pregnancy active" if self.state.pregnancy_active else f"{len(self.state.children)} child(ren)"
-                items.append(MenuItem(label="Family status", value="family_status", enabled=True, hint=family_hint))
-                meal_ok, meal_reason = self.family_meal_available()
-                items.append(MenuItem(
-                    label="Family meal",
-                    value="family_meal",
-                    enabled=True,
-                    hint="ready" if meal_ok else meal_reason,
-                ))
-                items.append(MenuItem(
-                    label="Spouse support",
-                    value="spouse_support",
-                    enabled=self.state.spouse_moved_to_farm,
-                    hint=self.spouse_support_mode(),
-                ))
-                items.append(MenuItem(
-                    label="Household help",
-                    value="household_help",
-                    enabled=True,
-                    hint="enabled" if self.state.family_help_enabled else "disabled",
-                ))
             items.extend([
                 MenuItem(label="Profile", value="profile", enabled=True),
                 MenuItem(label="Status", value="status", enabled=True),

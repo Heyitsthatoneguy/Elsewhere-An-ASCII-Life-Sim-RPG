@@ -48,6 +48,7 @@ from ascii_farmstead_data import (
     VALID_PLAYER_SEXES,
 )
 from ascii_farmstead_game_tables import normalized_game_ids
+from ascii_farmstead_furniture import FURNITURE_FINISHES, normalize_furniture_finish
 from ascii_farmstead_helpers import (
     days_in_month,
     format_date,
@@ -513,6 +514,7 @@ class GameState:
     player_generation: int = 1
     player_lifespan_age: int = 90
     player_background: str = "First-Generation Farmer"
+    player_origin: str = "Nearby Farming Country"
     player_starting_class: str = "Vanguard"
     designated_heir_child_id: int = 0
     dynasty_name: str = ""
@@ -550,6 +552,14 @@ class GameState:
     world_containers: Dict[str, Dict[str, object]] = None
     container_storage_migrated: bool = False
     placed_objects: Dict[str, str] = None
+    placed_object_rotations: Dict[str, int] = None
+    placed_object_finishes: Dict[str, str] = None
+    placed_floor_objects: Dict[str, str] = None
+    placed_floor_object_rotations: Dict[str, int] = None
+    placed_floor_object_finishes: Dict[str, str] = None
+    furniture_states: Dict[str, Dict[str, object]] = None
+    furniture_journal_entries: List[Dict[str, object]] = None
+    player_furniture_pose: Dict[str, object] = None
     fertilized_tiles: Dict[str, bool] = None
     owned_tools: List[str] = None
     tool_levels: Dict[str, int] = None
@@ -557,6 +567,8 @@ class GameState:
     house_upgrades: List[str] = None
     custom_house_map_rows: List[str] = None
     held_object: Optional[str] = None
+    held_object_rotation: int = 0
+    held_object_finish: str = "Natural"
     wilderness_seed: int = 1337
     wilderness_chunk_x: int = 0
     wilderness_chunk_y: int = 0
@@ -596,6 +608,13 @@ class GameState:
     town_npc_dialogue_counts: Dict[str, int] = None
     town_npc_relationships: Dict[str, int] = None
     town_npc_last_talk_day: Dict[str, str] = None
+    npc_dialogue_promises: Dict[str, Dict[str, object]] = None
+    npc_dialogue_social_state: Dict[str, Dict[str, object]] = None
+    social_reputation: int = 0
+    quest_records: Dict[str, Dict[str, object]] = None
+    tracked_quest_id: str = ""
+    planned_events: Dict[str, Dict[str, object]] = None
+    temporary_participant_states: Dict[str, Dict[str, object]] = None
     town_npc_last_gift_day: Dict[str, str] = None
     town_npc_last_gift_reactions: Dict[str, Dict[str, object]] = None
     town_npc_recent_gifts: Dict[str, List[Dict[str, object]]] = None
@@ -717,6 +736,7 @@ class GameState:
     scene_flags: List[str] = None
     active_scene_id: str = ""
     active_scene_step_index: int = 0
+    special_event_scenes: Dict[str, Dict[str, object]] = None
     active_food_buffs: Dict[str, Dict[str, int]] = None
     fish_ponds: Dict[str, Dict[str, object]] = None
     artisan_processors: Dict[str, Dict[str, object]] = None
@@ -791,6 +811,7 @@ class GameState:
     fishing_pool: List[str] = None
     weather: str = "Sunny"
     message: str = "Welcome to Elsewhere. Press H for help or K for calendar."
+    hud_activity_log: List[Dict[str, object]] = None
     color_enabled: bool = True
     ambient_visuals_enabled: bool = True
     high_contrast_enabled: bool = False
@@ -801,6 +822,7 @@ class GameState:
     bin_menu_suppressed_until_exit: bool = False
     show_target_info: bool = True
     show_control_hints: bool = True
+    show_hud_sidebar: bool = True
 
     def __post_init__(self):
         def list_values(value: object) -> List[object]:
@@ -896,8 +918,88 @@ class GameState:
         if not isinstance(self.world_containers, dict):
             self.world_containers = {}
         self.container_storage_migrated = bool(self.container_storage_migrated)
-        if self.placed_objects is None:
+        if not isinstance(self.placed_objects, dict):
             self.placed_objects = {}
+        if not isinstance(self.placed_object_rotations, dict):
+            self.placed_object_rotations = {}
+        if not isinstance(self.placed_object_finishes, dict):
+            self.placed_object_finishes = {}
+        if not isinstance(self.placed_floor_objects, dict):
+            self.placed_floor_objects = {}
+        if not isinstance(self.placed_floor_object_rotations, dict):
+            self.placed_floor_object_rotations = {}
+        if not isinstance(self.placed_floor_object_finishes, dict):
+            self.placed_floor_object_finishes = {}
+        if not isinstance(self.furniture_states, dict):
+            self.furniture_states = {}
+        self.furniture_states = {
+            str(key): dict(value)
+            for key, value in self.furniture_states.items()
+            if isinstance(value, dict)
+        }
+        if not isinstance(self.furniture_journal_entries, list):
+            self.furniture_journal_entries = []
+        self.furniture_journal_entries = [
+            dict(entry)
+            for entry in self.furniture_journal_entries[-100:]
+            if isinstance(entry, dict)
+        ]
+        if not isinstance(self.player_furniture_pose, dict):
+            self.player_furniture_pose = {}
+        # Older saves stored rugs in the solid furnishing layer. Move them to
+        # the dedicated floor layer before normalizing their keyed metadata.
+        for key, obj_name in list(self.placed_objects.items()):
+            if INFRASTRUCTURE_DATA.get(str(obj_name), {}).get("placement_layer") != "floor":
+                continue
+            floor_key = str(key)
+            self.placed_floor_objects.setdefault(floor_key, str(obj_name))
+            self.placed_objects.pop(key, None)
+            if floor_key in (self.placed_object_rotations or {}):
+                self.placed_floor_object_rotations.setdefault(
+                    floor_key, self.placed_object_rotations.pop(floor_key),
+                )
+            if floor_key in (self.placed_object_finishes or {}):
+                self.placed_floor_object_finishes.setdefault(
+                    floor_key, self.placed_object_finishes.pop(floor_key),
+                )
+        self.placed_object_rotations = {
+            str(key): int(value) % 4
+            for key, value in self.placed_object_rotations.items()
+            if str(key) in self.placed_objects
+            and isinstance(value, (int, float, str))
+            and str(value).lstrip("-").isdigit()
+            and int(value) % 4
+        }
+        self.placed_floor_object_rotations = {
+            str(key): int(value) % 4
+            for key, value in self.placed_floor_object_rotations.items()
+            if str(key) in self.placed_floor_objects
+            and isinstance(value, (int, float, str))
+            and str(value).lstrip("-").isdigit()
+            and int(value) % 4
+        }
+        try:
+            self.held_object_rotation = int(self.held_object_rotation or 0) % 4
+        except (TypeError, ValueError):
+            self.held_object_rotation = 0
+        if not self.held_object:
+            self.held_object_rotation = 0
+        valid_finishes = set(FURNITURE_FINISHES)
+        self.placed_object_finishes = {
+            str(key): normalize_furniture_finish(value)
+            for key, value in self.placed_object_finishes.items()
+            if str(key) in self.placed_objects and str(value).title() in valid_finishes
+            and str(value).title() != "Natural"
+        }
+        self.placed_floor_object_finishes = {
+            str(key): normalize_furniture_finish(value)
+            for key, value in self.placed_floor_object_finishes.items()
+            if str(key) in self.placed_floor_objects and str(value).title() in valid_finishes
+            and str(value).title() != "Natural"
+        }
+        self.held_object_finish = normalize_furniture_finish(self.held_object_finish)
+        if self.held_object_finish not in valid_finishes or not self.held_object:
+            self.held_object_finish = "Natural"
         if self.fertilized_tiles is None:
             self.fertilized_tiles = {}
         if self.farm_building_harvest_days is None:
@@ -916,6 +1018,46 @@ class GameState:
             self.town_npc_relationships = {}
         if self.town_npc_last_talk_day is None:
             self.town_npc_last_talk_day = {}
+        if not isinstance(self.npc_dialogue_promises, dict):
+            self.npc_dialogue_promises = {}
+        if not isinstance(self.npc_dialogue_social_state, dict):
+            self.npc_dialogue_social_state = {}
+        if not isinstance(self.quest_records, dict):
+            self.quest_records = {}
+        self.tracked_quest_id = str(self.tracked_quest_id or "")
+        if not isinstance(self.planned_events, dict):
+            self.planned_events = {}
+        if not isinstance(self.temporary_participant_states, dict):
+            self.temporary_participant_states = {}
+        try:
+            self.social_reputation = max(-1000, min(1000, int(self.social_reputation)))
+        except Exception:
+            self.social_reputation = 0
+        if not isinstance(self.hud_activity_log, list):
+            self.hud_activity_log = []
+        clean_hud_activity_log: List[Dict[str, object]] = []
+        for raw_entry in self.hud_activity_log[-100:]:
+            if isinstance(raw_entry, dict):
+                text = str(raw_entry.get("text", "") or "").strip()[:300]
+                if not text:
+                    continue
+                try:
+                    count = max(1, min(999, int(raw_entry.get("count", 1))))
+                except Exception:
+                    count = 1
+                clean_hud_activity_log.append({
+                    "text": text,
+                    "category": str(raw_entry.get("category", "general") or "general")[:24],
+                    "count": count,
+                    "time": str(raw_entry.get("time", "") or "")[:12],
+                    "date": str(raw_entry.get("date", "") or "")[:32],
+                })
+            elif raw_entry is not None and str(raw_entry).strip():
+                clean_hud_activity_log.append({
+                    "text": str(raw_entry).strip()[:300],
+                    "category": "general", "count": 1, "time": "", "date": "",
+                })
+        self.hud_activity_log = clean_hud_activity_log[-100:]
         if self.town_npc_last_gift_day is None:
             self.town_npc_last_gift_day = {}
         if not isinstance(self.town_npc_last_gift_day, dict):
@@ -1536,6 +1678,9 @@ class GameState:
         self.player_background = str(
             self.player_background or "First-Generation Farmer"
         )
+        self.player_origin = str(
+            self.player_origin or "Nearby Farming Country"
+        )[:80]
         self.player_starting_class = str(
             self.player_starting_class or "Vanguard"
         )
@@ -1751,6 +1896,28 @@ class GameState:
             self.active_scene_step_index = max(0, int(self.active_scene_step_index))
         except Exception:
             self.active_scene_step_index = 0
+        if not isinstance(self.special_event_scenes, dict):
+            self.special_event_scenes = {}
+        clean_special_scenes: Dict[str, Dict[str, object]] = {}
+        for raw_id, raw_scene in self.special_event_scenes.items():
+            if not isinstance(raw_scene, dict):
+                continue
+            scene_id = str(raw_scene.get("id", raw_id) or raw_id)
+            steps = [dict(step) for step in raw_scene.get("steps", []) or [] if isinstance(step, dict)][:64]
+            if not scene_id.startswith("special:") or not steps:
+                continue
+            scene = dict(raw_scene)
+            scene.update({
+                "id": scene_id, "title": str(raw_scene.get("title", "World Event"))[:120],
+                "steps": steps, "repeatable": False,
+                "completion_flag": str(raw_scene.get("completion_flag", scene_id) or scene_id),
+            })
+            clean_special_scenes[scene_id] = scene
+        active_special = str(self.active_scene_id or "")
+        retained_ids = list(clean_special_scenes)[-40:]
+        if active_special in clean_special_scenes and active_special not in retained_ids:
+            retained_ids.insert(0, active_special)
+        self.special_event_scenes = {scene_id: clean_special_scenes[scene_id] for scene_id in retained_ids}
         if self.active_food_buffs is None:
             self.active_food_buffs = {}
         if not isinstance(self.active_food_buffs, dict):

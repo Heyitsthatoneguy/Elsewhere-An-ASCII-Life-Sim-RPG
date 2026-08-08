@@ -278,7 +278,7 @@ class HoldemMixin:
             "- Every seat antes. Betting uses a fixed limit based on the selected table buy-in.",
             "- Check when nothing is owed, call the current bet, raise by the table limit, or fold.",
             "- The selected buy-in is your maximum possible loss. Chips not committed to the pot return after the hand.",
-            "- A winner receives the pot; exact ties split it. X/Escape safely folds.",
+            "- A winner receives the pot; exact ties split it. B/X/Escape/Q/Tab safely folds.",
             "- Friendly, Practiced, and Expert tables change how accurately opponents value and defend their hands.",
             "- Hearts and Diamonds are red; Clubs and Spades are white. Hidden opponent cards use face-down cards.",
             "- Choose with W/S, arrows, or number keys. F folds, C checks/calls, and R raises when available.",
@@ -337,7 +337,7 @@ class HoldemMixin:
             "F: fold",
             "C: check/call",
             "R: raise",
-            "X/Esc: fold",
+            "B/X/Esc/Q/Tab: fold",
         )
 
     def _holdem_player_bet(self, game: HoldemRound, difficulty: str) -> None:
@@ -352,7 +352,7 @@ class HoldemMixin:
             selected = min(selected, len(actions) - 1)
             self._draw_holdem_table(game, difficulty, selected, actions)
             key = normalize_key(read_key())
-            if key in {"x", "\x1b", "q"}:
+            if key in {"b", "x", "\x1b", "q", "\t"}:
                 action = "fold"
             elif key == "f":
                 action = "fold"

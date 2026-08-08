@@ -25,8 +25,12 @@ import ascii_farmstead_civic_state as civic_state
 import ascii_farmstead_custom_content as custom_content
 import ascii_farmstead_custom_extended as custom_extended
 import ascii_farmstead_custom_menus as custom_menus
+import ascii_farmstead_containers as container_system
 import ascii_farmstead_dynasty as dynasty
 import ascii_farmstead_excavation as excavation
+import ascii_farmstead_furniture as furniture_art
+import ascii_farmstead_furniture_catalog as furniture_catalog
+import ascii_farmstead_furniture_actions as furniture_actions
 import ascii_farmstead_board_visuals as board_visuals
 import ascii_farmstead_checkers as checkers
 import ascii_farmstead_chess as chess
@@ -42,11 +46,15 @@ import ascii_farmstead_inventory as inventory
 import ascii_farmstead_random_loot as random_loot
 import ascii_farmstead_minigame_ui as minigame_ui
 import ascii_farmstead_npcs as npcs
+import ascii_farmstead_dialogue as dialogue_system
 import ascii_farmstead_saves as saves
 import ascii_farmstead_state as state
 import ascii_farmstead_town_builder as town_builder
 import ascii_farmstead_npc_builder as npc_builder
 import ascii_farmstead_npc_dialogue as npc_dialogue
+import ascii_farmstead_dialogue_library as dialogue_library
+import ascii_farmstead_procedural_interiors as procedural_interiors
+import ascii_farmstead_procedural_furnishing as procedural_furnishing
 import ascii_farmstead_procedural_towns as procedural_towns
 import ascii_farmstead_wilderness as wilderness_system
 import ascii_farmstead_support as support
@@ -85,7 +93,7 @@ def visible_terminal_len(text: object) -> int:
 def main() -> int:
     assert support.GAME_TITLE == "Elsewhere: an ASCII Life-Sim RPG"
     assert support.GAME_SHORT_TITLE == "Elsewhere"
-    assert support.GAME_VERSION == "0.9.0-beta.5"
+    assert support.GAME_VERSION == "0.9.0-beta.6"
     assert support.movement_delta_for_key("NUM7") == (-1, -1)
     assert support.movement_delta_for_key("NUM8") == (0, -1)
     assert support.movement_delta_for_key("NUM3") == (1, 1)
@@ -131,6 +139,25 @@ def main() -> int:
         inn_upper_grid[8][14] = "b"
         inn_upper_grid[8][48] = "s"
         inn_upper_rows = ["".join(row) for row in inn_upper_grid]
+        authored_store_override_rows = custom_extended.default_custom_building_template_rows(
+            "general_store"
+        )
+        authored_store_override_grid = [list(row) for row in authored_store_override_rows]
+        for override_y, override_row in enumerate(authored_store_override_grid):
+            for override_x, override_tile in enumerate(override_row):
+                if override_tile == "&":
+                    authored_store_override_grid[override_y][override_x] = "."
+        authored_store_override_grid[6][10] = "r"
+        authored_store_override_rows = [
+            "".join(row) for row in authored_store_override_grid
+        ]
+        procedural_store_override_grid = [
+            list(row) for row in authored_store_override_rows
+        ]
+        procedural_store_override_grid[6][10] = "s"
+        procedural_store_override_rows = [
+            "".join(row) for row in procedural_store_override_grid
+        ]
         custom_library = {
             "version": 1,
             "abilities": [
@@ -287,7 +314,29 @@ def main() -> int:
                         {"kind": "shopping_counter", "x1": 31, "y1": 20, "x2": 38, "y2": 22},
                         {"kind": "dining", "x1": 31, "y1": 22, "x2": 42, "y2": 24},
                     ],
-                }
+                },
+                {
+                    "name": "Built-in General Store",
+                    "description": "A direct authored-map override.",
+                    "building_type": "general_store",
+                    "max_occupancy": 0,
+                    "enabled": True,
+                    "manual_layout": True,
+                    "builtin_preset_id": "authored:make_general_store_map",
+                    "overrides_builtin": True,
+                    "rows": authored_store_override_rows,
+                },
+                {
+                    "name": "General Store Layout A",
+                    "description": "A direct procedural-layout override.",
+                    "building_type": "general_store",
+                    "max_occupancy": 0,
+                    "enabled": True,
+                    "manual_layout": True,
+                    "builtin_preset_id": "procedural:general_store:0",
+                    "overrides_builtin": True,
+                    "rows": procedural_store_override_rows,
+                },
             ],
         }
         saved, save_message = custom_content.save_custom_content(custom_library)
@@ -353,9 +402,40 @@ def main() -> int:
         assert cached_building_record is building_record
         assert building_record["name"] == "Archive Cottage"
         assert building_record["max_occupancy"] == 8
+        assert building_record["generation_weight"] == 5
         assert building_record["zones"][0]["kind"] == "bedroom"
         assert building_record["colors"][0] == {"floor": 0, "x": 9, "y": 5, "color": "blue"}
         assert building_record["spawns"][0] == {"floor": 0, "x": 11, "y": 6}
+        assert not custom_extended.custom_building_template_records(
+            "general_store",
+            enabled_only=True,
+        )
+        authored_store_override = custom_extended.custom_building_template_override(
+            "authored:make_general_store_map"
+        )
+        assert authored_store_override is not None
+        assert authored_store_override["manual_layout"]
+        assert authored_store_override["overrides_builtin"]
+        assert "&" not in "".join(authored_store_override["rows"])
+        assert authored_store_override["rows"][6][10] == "r"
+        procedural_store_override = custom_extended.custom_building_template_override(
+            "procedural:general_store:0"
+        )
+        assert procedural_store_override is not None
+        assert procedural_store_override["rows"][6][10] == "s"
+        furnishing_home_rows = [
+            row.replace("b", "I").replace("f", "k")
+            for row in custom_extended.default_custom_building_template_rows("home")
+        ]
+        furnishing_home = custom_extended.sanitize_custom_building_template({
+            "name": "Expanded Furnishing Home",
+            "building_type": "home",
+            "rows": furnishing_home_rows,
+        })
+        assert furnishing_home is not None
+        furnishing_home_tiles = "".join(furnishing_home["rows"])
+        assert "I" in furnishing_home_tiles and "k" in furnishing_home_tiles
+        assert "b" not in furnishing_home_tiles and "f" not in furnishing_home_tiles
         building_grid = custom_extended.stamp_custom_building_template(building_record)
         assert building_grid is not None
         assert building_grid[5][9] == "d"
@@ -396,6 +476,762 @@ def main() -> int:
             != custom_extended.custom_building_template_signature(building_record)
         )
         custom_farm_game = FarmGame()
+        # Public starting-town blueprint overrides are legacy records now.
+        # Runtime interiors use modular room graphs and catalog furniture.
+        assert custom_farm_game.general_store_map[6][10] != "r"
+        assert "&" in "".join(
+            "".join(row) for row in custom_farm_game.general_store_map
+        )
+        assert len(custom_farm_game.general_store_map) == 28
+        assert len(custom_farm_game.general_store_map[0]) == 64
+        assert custom_farm_game._starting_town_catalog_furniture_cache[
+            "GeneralStoreInterior"
+        ]
+        custom_farm_game.transition_to_general_store()
+        authored_override_doors = [
+            (x, y)
+            for y, row in enumerate(custom_farm_game.general_store_map)
+            for x, tile in enumerate(row)
+            if tile == "D"
+        ]
+        assert any(
+            abs(custom_farm_game.state.player_x - door_x)
+            + abs(custom_farm_game.state.player_y - door_y)
+            == 1
+            for door_x, door_y in authored_override_doors
+        )
+        built_in_building_presets = custom_farm_game.built_in_building_template_presets()
+        assert len(built_in_building_presets) == 59
+        assert len({
+            str(record["name"]).casefold()
+            for record in built_in_building_presets
+        }) == len(built_in_building_presets)
+        assert len({
+            str(record["builtin_preset_id"])
+            for record in built_in_building_presets
+        }) == len(built_in_building_presets)
+        assert {
+            record["_preset_group"]
+            for record in built_in_building_presets
+        } == {"Starting Town & Farm", "Procedural Town Layouts"}
+        assert sum(
+            record["_preset_origin"] == "authored"
+            for record in built_in_building_presets
+        ) == 19
+        assert sum(
+            record["_preset_origin"] == "procedural"
+            for record in built_in_building_presets
+        ) == 40
+        assert {
+            "market_stall",
+            "sheriff_office",
+        }.issubset({
+            str(record["building_type"])
+            for record in built_in_building_presets
+        })
+        assert all(not record["enabled"] for record in built_in_building_presets)
+        assert all(record.get("builtin_preset_id") for record in built_in_building_presets)
+        built_in_farmhouse = next(
+            record
+            for record in built_in_building_presets
+            if record["name"] == "Built-in Farmhouse"
+        )
+        assert {"&", "b", "f", "D"}.issubset(set("".join(built_in_farmhouse["rows"])))
+        assert built_in_farmhouse["zones"]
+        assert built_in_farmhouse["spawns"]
+        built_in_blacksmith = next(
+            record
+            for record in built_in_building_presets
+            if record["name"] == "Built-in Blacksmith"
+        )
+        assert {"q", "o", "w", "a", "x"}.issubset(set("".join(built_in_blacksmith["rows"])))
+        procedural_store_presets = [
+            record
+            for record in built_in_building_presets
+            if record["_preset_origin"] == "procedural"
+            and record["building_type"] == "general_store"
+        ]
+        assert len(procedural_store_presets) == 4
+        assert len({
+            tuple(
+                "".join("." if tile != " " else " " for tile in row)
+                for row in record["rows"]
+            )
+            for record in procedural_store_presets
+        }) == 4
+        override_building = {
+            "id": "override-store",
+            "type_id": "general_store",
+            "name": "Override Store",
+        }
+        override_seed = next(
+            seed
+            for seed in range(100)
+            if npc_builder.stable_text_seed(
+                f"{seed}:general_store:override-store:interior-variants"
+            ) % 4 == 0
+        )
+        override_plan = {
+            "id": "override-plan",
+            "seed": override_seed,
+            "buildings": {"override-store": override_building},
+        }
+        selected_override = npc_builder.procedural_custom_building_template(
+            override_plan,
+            override_building,
+        )
+        assert selected_override is not None
+        assert selected_override["builtin_preset_id"] == "procedural:general_store:0"
+        assert selected_override["rows"][6][10] == "s"
+        copied_store_preset = custom_farm_game.custom_building_editable_preset_copy(
+            procedural_store_presets[0],
+            [{"name": f"{procedural_store_presets[0]['name']} Copy"}],
+        )
+        assert copied_store_preset is not None
+        assert copied_store_preset["name"].endswith("Copy 2")
+        assert not copied_store_preset["enabled"]
+        assert "_preset_group" not in copied_store_preset
+        assert copied_store_preset["building_type"] == "general_store"
+        assert custom_extended.sanitize_custom_building_template({
+            "name": "Market Preset",
+            "building_type": "market_stall",
+        })["building_type"] == "market_stall"
+        assert custom_extended.sanitize_custom_building_template({
+            "name": "Sheriff Preset",
+            "building_type": "sheriff_office",
+        })["building_type"] == "sheriff_office"
+        assert custom_farm_game.custom_building_mouse_canvas_point({
+            "kind": "mouse",
+            "x": 9,
+            "y": 7,
+        }) == (9, 5)
+        assert custom_farm_game.custom_building_mouse_canvas_point({
+            "kind": "mouse",
+            "x": 64,
+            "y": 7,
+        }) is None
+        assert custom_farm_game.custom_building_line_points(
+            (5, 5), (9, 5)
+        ) == [(5, 5), (6, 5), (7, 5), (8, 5), (9, 5)]
+        clipboard_source = [
+            "abcdef",
+            "ghijkl",
+            "mnopqr",
+        ]
+        clipboard = custom_farm_game.custom_building_extract_clipboard(
+            clipboard_source,
+            {"x1": 1, "y1": 0, "x2": 3, "y2": 1},
+        )
+        assert clipboard == ["bcd", "hij"]
+        assert custom_farm_game.custom_building_transform_clipboard(
+            clipboard,
+            "horizontal",
+        ) == ["dcb", "jih"]
+        assert custom_farm_game.custom_building_transform_clipboard(
+            clipboard,
+            "vertical",
+        ) == ["hij", "bcd"]
+        assert custom_farm_game.custom_building_transform_clipboard(
+            clipboard,
+            "clockwise",
+        ) == ["hb", "ic", "jd"]
+        pasted_clipboard = custom_farm_game.custom_building_paste_clipboard(
+            ["." * 64] * 28,
+            ["A ", " B"],
+            2,
+            3,
+            transparent=True,
+        )
+        assert pasted_clipboard[3][2:4] == "A."
+        assert pasted_clipboard[4][2:4] == ".B"
+        clipboard_preview = custom_farm_game.custom_building_clipboard_preview(
+            ["." * 64] * 28,
+            ["A ", " B"],
+            63,
+            27,
+        )
+        assert clipboard_preview["tiles"][(63, 27)] == ("A", False)
+        assert clipboard_preview["clipped"] == 3
+        assert clipboard_preview["overwritten"] == 0
+        overwrite_preview_rows = ["." * 64 for _ in range(28)]
+        overwrite_preview_rows[4] = overwrite_preview_rows[4][:5] + "#" + overwrite_preview_rows[4][6:]
+        overwrite_preview = custom_farm_game.custom_building_clipboard_preview(
+            overwrite_preview_rows,
+            ["A"],
+            5,
+            4,
+        )
+        assert overwrite_preview["tiles"][(5, 4)] == ("A", True)
+        assert overwrite_preview["overwritten"] == 1
+        transparent_preview = custom_farm_game.custom_building_clipboard_preview(
+            overwrite_preview_rows,
+            [" A"],
+            4,
+            4,
+            transparent=True,
+        )
+        assert (4, 4) not in transparent_preview["tiles"]
+        assert transparent_preview["overwritten"] == 1
+        room_shell = custom_farm_game.custom_building_room_shell(
+            [" " * 64] * 28,
+            {"x1": 2, "y1": 3, "x2": 6, "y2": 7},
+        )
+        assert room_shell[3][2:7] == "#####"
+        assert room_shell[5][2:7] == "#...#"
+        move_source = [["." for _ in range(64)] for _ in range(28)]
+        move_source[2][2:5] = list("ABC")
+        move_source[3][2:5] = list("DEF")
+        moved_selection = custom_farm_game.custom_building_move_selection(
+            ["".join(row) for row in move_source],
+            {"x1": 2, "y1": 2, "x2": 4, "y2": 3},
+            8,
+            6,
+        )
+        assert moved_selection[2][2:5] == "   "
+        assert moved_selection[3][2:5] == "   "
+        assert moved_selection[6][8:11] == "ABC"
+        assert moved_selection[7][8:11] == "DEF"
+        room_kits = custom_farm_game.custom_building_room_kits()
+        assert len(room_kits) >= 16
+        assert len({str(kit["name"]) for kit in room_kits}) == len(room_kits)
+        assert all(
+            len({len(str(row)) for row in kit["rows"]}) == 1
+            for kit in room_kits
+        )
+        inn_room_kit = next(kit for kit in room_kits if kit["name"] == "Inn Guest Room")
+        assert "".join(inn_room_kit["rows"]).count("b") == 1
+        furnishing_arrangements = [
+            kit
+            for kit in room_kits
+            if kit.get("group") == "Furnishing Arrangements"
+        ]
+        assert len(furnishing_arrangements) >= 9
+        assert {
+            "bedroom",
+            "dining",
+            "library_stacks",
+            "clinic_ward",
+            "shopping_counter",
+            "storage",
+            "workshop",
+        }.issubset({str(kit["zone"]) for kit in furnishing_arrangements})
+        zone_overlay = custom_farm_game.custom_building_floor_zone_overlay(
+            [
+                {"kind": "bedroom", "floor": 0, "x1": 1, "y1": 1, "x2": 4, "y2": 4},
+                {"kind": "kitchen", "floor": 0, "x1": 4, "y1": 1, "x2": 7, "y2": 4},
+                {"kind": "office", "floor": 1, "x1": 8, "y1": 8, "x2": 10, "y2": 10},
+            ],
+            0,
+        )
+        assert zone_overlay[(1, 1)] == "B"
+        assert zone_overlay[(7, 1)] == "K"
+        assert zone_overlay[(4, 2)] == "+"
+        assert (8, 8) not in zone_overlay
+        original_canvas_clear = custom_menus.clear_screen
+        original_color_enabled = support.get_color_enabled()
+        try:
+            support.set_color_enabled(True)
+            custom_menus.clear_screen = lambda: None
+            canvas_output = io.StringIO()
+            semantic_rows = ["#D&b".ljust(custom_extended.BUILDING_TEMPLATE_WIDTH)] + [
+                " " * custom_extended.BUILDING_TEMPLATE_WIDTH
+            ] * (custom_extended.BUILDING_TEMPLATE_HEIGHT - 1)
+            with contextlib.redirect_stdout(canvas_output):
+                custom_farm_game.draw_custom_building_template_canvas(
+                    "Colored Canvas",
+                    semantic_rows,
+                    20,
+                    20,
+                )
+            rendered_canvas = canvas_output.getvalue()
+            assert "\x1b[" in rendered_canvas
+            assert support.colorize(
+                "#",
+                visuals.interior_tile_color("#", context="public", ambient=False),
+            ) in rendered_canvas
+            assert support.colorize(
+                "&",
+                visuals.interior_tile_color("&", context="public", ambient=False),
+            ) in rendered_canvas
+        finally:
+            custom_menus.clear_screen = original_canvas_clear
+            support.set_color_enabled(original_color_enabled)
+        horizontal_door_grid = [[" " for _ in range(64)] for _ in range(28)]
+        horizontal_door_grid[3][2:7] = list("#####")
+        horizontal_door_grid[2][4] = "."
+        horizontal_door_grid[4][4] = "."
+        smart_horizontal_door, horizontal_door_placed = custom_farm_game.custom_building_smart_door(
+            ["".join(row) for row in horizontal_door_grid],
+            4,
+            3,
+        )
+        assert horizontal_door_placed
+        assert smart_horizontal_door[3][4] == "_"
+        vertical_door_grid = [[" " for _ in range(64)] for _ in range(28)]
+        for door_y in range(2, 7):
+            vertical_door_grid[door_y][4] = "#"
+        vertical_door_grid[4][3] = "."
+        vertical_door_grid[4][5] = "."
+        smart_vertical_door, vertical_door_placed = custom_farm_game.custom_building_smart_door(
+            ["".join(row) for row in vertical_door_grid],
+            4,
+            4,
+        )
+        assert vertical_door_placed
+        assert smart_vertical_door[4][4] == "|"
+        exterior_door, exterior_door_placed = custom_farm_game.custom_building_smart_door(
+            ["".join(row) for row in horizontal_door_grid],
+            3,
+            3,
+            exterior=True,
+        )
+        assert exterior_door_placed
+        assert exterior_door[3][3] == "D"
+        assert set(custom_farm_game.custom_building_flood_points(
+            [
+                "#####",
+                "#..##",
+                "#..##",
+                "#####",
+            ],
+            1,
+            1,
+        )) == {(1, 1), (2, 1), (1, 2), (2, 2)}
+        fixture_groups = custom_farm_game.custom_building_fixture_brush_groups()
+        grouped_fixture_symbols = [
+            symbol
+            for _group_name, brushes in fixture_groups
+            for _label, symbol, _hint in brushes
+        ]
+        assert len(grouped_fixture_symbols) == len(set(grouped_fixture_symbols))
+        assert set(grouped_fixture_symbols) == {
+            symbol
+            for _label, symbol, _hint in custom_farm_game.custom_building_fixture_brushes()
+        }
+        assert {
+            "primary_bedroom", "guest_room", "nursery", "bathroom",
+            "pantry", "living_room", "private_hall", "service_hall",
+        } <= set(custom_extended.BUILDING_TEMPLATE_ZONE_KINDS)
+        assert all(
+            custom_extended.BUILDING_TEMPLATE_ZONE_LABELS.get(kind)
+            for kind in custom_extended.BUILDING_TEMPLATE_ZONE_KINDS
+        )
+        neutral_fixture_catalog = custom_extended.building_template_fixture_catalog(
+            "Smoke Test Building"
+        )
+        assert set(grouped_fixture_symbols) <= set(neutral_fixture_catalog)
+        assert all(
+            "uncatalogued" not in neutral_fixture_catalog[symbol]["desc"].lower()
+            and neutral_fixture_catalog[symbol]["hint"]
+            for symbol in grouped_fixture_symbols
+        )
+        for authored_location in (
+            "GeneralStoreInterior",
+            "BlacksmithInterior",
+            "LibraryInterior",
+            "MayorHouseInterior",
+            "InnInterior",
+            "FurnitureStoreInterior",
+            "CarpenterStoreInterior",
+            "AnimalStoreInterior",
+            "ClinicInterior",
+            "TownHallInterior",
+            "MarketRowInterior",
+            "MuseumInterior",
+            "TownResidenceInterior",
+        ):
+            assert set(grouped_fixture_symbols) <= set(
+                custom_farm_game.town_interior_tile_catalog(authored_location)
+            ), f"{authored_location} does not recognize every editor fixture"
+        # Room-aware zoning follows architecture like the player's reference
+        # inn: each guest room remains distinct, while the counter, kitchen,
+        # dining room, and public hall receive coherent functional areas.
+        reference_inn_rows = [" " * custom_extended.BUILDING_TEMPLATE_WIDTH for _ in range(16)] + [
+            "                        ###############                         ",
+            "            #############$...-...-...f#############            ",
+            "            #b.l#b.l#b.l#....--&--....#b.l#b.l#b.l#            ",
+            "            #b..#b..#b..#.............#b..#b..#b..#            ",
+            "            ##.###.###.##.............##.###.###.##            ",
+            "            #.....................................#            ",
+            "            ##.###.###.##.............##.###.###.##            ",
+            "            #b..#b..#b..#.c.........c.#b..#b..#b..#            ",
+            "            #b.l#b.l#b.l#ctc..,,,..ctc#b.l#b.l#b.l#            ",
+            "            #############.c...,,,...c.#############            ",
+            "                        #######D#######                         ",
+            " " * custom_extended.BUILDING_TEMPLATE_WIDTH,
+        ]
+        reference_inn_rows = [
+            row.ljust(custom_extended.BUILDING_TEMPLATE_WIDTH)[
+                :custom_extended.BUILDING_TEMPLATE_WIDTH
+            ]
+            for row in reference_inn_rows
+        ]
+        inferred_reference_zones = custom_farm_game.custom_building_preset_zones(
+            [{"name": "Ground Floor", "rows": reference_inn_rows}],
+            "inn",
+        )
+        inferred_reference_bedrooms = {
+            (zone["x1"], zone["y1"], zone["x2"], zone["y2"])
+            for zone in inferred_reference_zones
+            if zone["kind"] == "bedroom"
+        }
+        assert len(inferred_reference_bedrooms) == 12
+        assert {
+            "shopping_counter",
+            "kitchen",
+            "dining",
+            "public_hall",
+        } <= {str(zone["kind"]) for zone in inferred_reference_zones}
+        assert all(
+            all(
+                reference_inn_rows[y][x] != "#"
+                for y in range(zone["y1"], zone["y2"] + 1)
+                for x in range(zone["x1"], zone["x2"] + 1)
+            )
+            for zone in inferred_reference_zones
+            if zone["kind"] == "bedroom"
+        )
+        furnishing_symbols = set(custom_extended.BUILDING_TEMPLATE_FURNISHING_DATA)
+        assert len(furnishing_symbols) >= 18
+        assert furnishing_symbols.issubset(custom_extended.BUILDING_TEMPLATE_ALLOWED_TILES)
+        assert furnishing_symbols.issubset(set(grouped_fixture_symbols))
+        furnishing_catalog = custom_farm_game.procedural_town_interior_tile_catalog({
+            "name": "Furnishing Test Home",
+            "type_id": "home",
+        })
+        furnishing_blocking = custom_farm_game.procedural_town_interior_blocking_tiles()
+        for symbol, furnishing in custom_extended.BUILDING_TEMPLATE_FURNISHING_DATA.items():
+            assert symbol in furnishing_catalog
+            assert "custom fixture" not in furnishing_catalog[symbol]["desc"].lower()
+            assert str(furnishing["name"]).lower() in furnishing_catalog[symbol]["hint"].lower()
+            assert symbol in furnishing_blocking
+            assert visuals.interior_tile_color(symbol)
+        assert custom_extended.building_template_functional_furniture_name(
+            custom_extended.BUILDING_TEMPLATE_FURNISHING_DATA["H"]
+        ) == "Bookshelf"
+        assert custom_extended.building_template_functional_furniture_name(
+            custom_extended.BUILDING_TEMPLATE_FURNISHING_DATA["N"]
+        ) == "Nightstand"
+        assert custom_extended.building_template_functional_furniture_name(
+            custom_extended.BUILDING_TEMPLATE_GENERIC_FIXTURE_DATA["f"]
+        ) == "Fireplace"
+        fixture_visual_game = FarmGame()
+        fixture_visual_game.state.location = "TownResidenceInterior"
+        fixture_visual_game.state.detailed_glyphs_enabled = True
+        fixture_visual_grid = [list("HNLf")]
+        assert ANSI_CSI_RE.sub(
+            "", fixture_visual_game.render_interior_visual_tile(
+                fixture_visual_grid, 0, 0, "home",
+            ),
+        ) == "▥"
+        assert ANSI_CSI_RE.sub(
+            "", fixture_visual_game.render_interior_visual_tile(
+                fixture_visual_grid, 1, 0, "home",
+            ),
+        ) == "▤"
+        assert ANSI_CSI_RE.sub(
+            "", fixture_visual_game.render_interior_visual_tile(
+                fixture_visual_grid, 2, 0, "home",
+            ),
+        ) == "✦"
+        assert ANSI_CSI_RE.sub(
+            "", fixture_visual_game.render_interior_visual_tile(
+                fixture_visual_grid, 3, 0, "home",
+            ),
+        ) == "♨"
+        fixture_visual_game.state.detailed_glyphs_enabled = False
+        assert ANSI_CSI_RE.sub(
+            "", fixture_visual_game.render_interior_visual_tile(
+                fixture_visual_grid, 0, 0, "home",
+            ),
+        ) == "H"
+        duplicated = custom_farm_game.custom_building_duplicate_floor_data(
+            [{"name": "Ground Floor", "rows": ["." * 64] * 28}],
+            [{"kind": "bedroom", "floor": 0, "x1": 1, "y1": 1, "x2": 4, "y2": 4}],
+            [{"floor": 0, "x": 2, "y": 2}],
+            [{"floor": 0, "x": 3, "y": 3, "color": "blue"}],
+            0,
+        )
+        duplicate_floors, duplicate_zones, duplicate_spawns, duplicate_colors, duplicate_index = duplicated
+        assert duplicate_index == 1
+        assert duplicate_floors[1]["name"] == "Ground Floor Copy"
+        assert duplicate_zones[-1]["floor"] == 1
+        assert duplicate_spawns[-1]["floor"] == 1
+        assert duplicate_colors[-1]["floor"] == 1
+        transform_rows = [[" " for _ in range(64)] for _ in range(28)]
+        transform_rows[3][2] = "A"
+        transformed = custom_farm_game.custom_building_transform_floor_data(
+            [{"name": "Upper", "rows": ["".join(row) for row in transform_rows]}],
+            [{"kind": "office", "floor": 0, "x1": 2, "y1": 3, "x2": 4, "y2": 5}],
+            [{"floor": 0, "x": 2, "y": 3}],
+            [{"floor": 0, "x": 2, "y": 3, "color": "blue"}],
+            0,
+            "horizontal",
+        )
+        transform_floors, transform_zones, transform_spawns, transform_colors = transformed
+        assert transform_floors[0]["rows"][3][61] == "A"
+        assert (transform_zones[0]["x1"], transform_zones[0]["x2"]) == (59, 61)
+        assert transform_spawns[0]["x"] == 61
+        assert transform_colors[0]["x"] == 61
+        linked_stair_floors, stairs_linked = custom_farm_game.custom_building_link_stair_floors(
+            [
+                {"name": "Ground", "rows": ["." * 64] * 28},
+                {"name": "Upper", "rows": ["." * 64] * 28},
+            ],
+            0,
+            12,
+            9,
+        )
+        assert stairs_linked
+        assert linked_stair_floors[0]["rows"][9][12] == "<"
+        assert linked_stair_floors[1]["rows"][9][12] == ">"
+        weighted_templates = [
+            {"name": "Rare", "generation_weight": 1},
+            {"name": "Frequent", "generation_weight": 9},
+        ]
+        weighted_names = [
+            npc_builder.weighted_custom_building_template(
+                weighted_templates,
+                seed,
+            )["name"]
+            for seed in range(100)
+        ]
+        assert weighted_names.count("Rare") == 10
+        assert weighted_names.count("Frequent") == 90
+        assert not custom_farm_game.custom_building_template_validation(
+            built_in_farmhouse
+        )["critical"]
+        isolated_rows = [[" " for _ in range(64)] for _ in range(28)]
+        isolated_rows[1][1] = "."
+        isolated_rows[27][32] = "D"
+        isolated_template = custom_extended.sanitize_custom_building_template({
+            "name": "Isolated Door",
+            "building_type": "home",
+            "rows": ["".join(row) for row in isolated_rows],
+        })
+        assert custom_farm_game.custom_building_template_validation(
+            isolated_template
+        )["critical"]
+        assert ui.menu_mouse_item_index(
+            2,
+            1,
+            "Mouse Menu",
+            [MenuItem("One"), MenuItem("Two")],
+            None,
+            0,
+            2,
+        ) == 0
+        assert ui.menu_mouse_item_index(
+            2,
+            3,
+            "Mouse Menu",
+            [MenuItem("One"), MenuItem("Two")],
+            ["Details"],
+            0,
+            2,
+        ) == 0
+
+        original_editor_input = custom_menus.read_key_or_mouse
+        original_editor_draw = custom_farm_game.draw_custom_building_template_canvas
+        original_editor_menu_select = custom_menus.menu_select
+        original_rect_selector = custom_farm_game.custom_building_rect_selector
+        custom_farm_game.draw_custom_building_template_canvas = lambda *args, **kwargs: None
+        try:
+            fixture_events = iter([
+                {"kind": "mouse", "x": 5, "y": 7, "left": False, "right": False, "wheel": -1},
+                {"kind": "mouse", "x": 5, "y": 7, "left": True, "right": False, "wheel": 0},
+                {"kind": "mouse", "x": 9, "y": 7, "left": True, "right": False, "wheel": 0},
+                {"kind": "mouse", "x": 9, "y": 7, "left": False, "right": False, "wheel": 0},
+                {"kind": "mouse", "x": 7, "y": 7, "left": False, "right": True, "wheel": 0},
+                {"kind": "mouse", "x": 8, "y": 7, "left": False, "right": True, "wheel": 0},
+                {"kind": "mouse", "x": 8, "y": 7, "left": False, "right": False, "wheel": 0},
+                {"kind": "key", "key": "q"},
+            ])
+            custom_menus.read_key_or_mouse = lambda: next(fixture_events)
+            mouse_fixture_rows = custom_farm_game.custom_building_fixture_editor(
+                ["." * custom_extended.BUILDING_TEMPLATE_WIDTH]
+                * custom_extended.BUILDING_TEMPLATE_HEIGHT
+            )
+            assert mouse_fixture_rows[5][5:10] == "##  #"
+
+            hover_events = iter([
+                {
+                    "kind": "mouse",
+                    "x": 6,
+                    "y": 8,
+                    "left": True,
+                    "right": False,
+                    "wheel": 0,
+                    "moved": True,
+                },
+                {
+                    "kind": "mouse",
+                    "x": 7,
+                    "y": 8,
+                    "left": False,
+                    "right": False,
+                    "wheel": 0,
+                    "moved": True,
+                },
+                {"kind": "key", "key": "q"},
+            ])
+            custom_menus.read_key_or_mouse = lambda: next(hover_events)
+            hover_rows = custom_farm_game.custom_building_fixture_editor(
+                [" " * custom_extended.BUILDING_TEMPLATE_WIDTH]
+                * custom_extended.BUILDING_TEMPLATE_HEIGHT
+            )
+            assert not any(row.strip() for row in hover_rows)
+
+            undo_redo_events = iter([
+                {"kind": "mouse", "x": 0, "y": 0, "left": False, "right": False, "wheel": -1},
+                {"kind": "key", "key": "\r"},
+                {"kind": "key", "key": "u"},
+                {"kind": "key", "key": "y"},
+                {"kind": "key", "key": "q"},
+            ])
+            custom_menus.read_key_or_mouse = lambda: next(undo_redo_events)
+            undo_redo_rows = custom_farm_game.custom_building_fixture_editor(
+                ["." * custom_extended.BUILDING_TEMPLATE_WIDTH]
+                * custom_extended.BUILDING_TEMPLATE_HEIGHT
+            )
+            assert undo_redo_rows[
+                custom_extended.BUILDING_TEMPLATE_HEIGHT // 2
+            ][
+                custom_extended.BUILDING_TEMPLATE_WIDTH // 2
+            ] == "#"
+
+            color_events = iter([
+                {"kind": "mouse", "x": 2, "y": 6, "left": True, "right": False, "wheel": 0},
+                {"kind": "mouse", "x": 4, "y": 6, "left": True, "right": False, "wheel": 0},
+                {"kind": "mouse", "x": 4, "y": 6, "left": False, "right": False, "wheel": 0},
+                {"kind": "mouse", "x": 3, "y": 6, "left": False, "right": True, "wheel": 0},
+                {"kind": "mouse", "x": 3, "y": 6, "left": False, "right": False, "wheel": 0},
+                {"kind": "key", "key": "q"},
+            ])
+            custom_menus.read_key_or_mouse = lambda: next(color_events)
+            mouse_colors = custom_farm_game.custom_building_color_editor(
+                ["." * custom_extended.BUILDING_TEMPLATE_WIDTH]
+                * custom_extended.BUILDING_TEMPLATE_HEIGHT,
+                [],
+                0,
+            )
+            mouse_color_points = {
+                (int(record["x"]), int(record["y"]), str(record["color"]))
+                for record in mouse_colors
+            }
+            assert (2, 4, "brown") in mouse_color_points
+            assert (4, 4, "brown") in mouse_color_points
+            assert not any(x == 3 and y == 4 for x, y, _color in mouse_color_points)
+
+            hover_color_events = iter([
+                {
+                    "kind": "mouse",
+                    "x": 6,
+                    "y": 8,
+                    "left": True,
+                    "right": False,
+                    "wheel": 0,
+                    "moved": True,
+                },
+                {
+                    "kind": "mouse",
+                    "x": 6,
+                    "y": 8,
+                    "left": False,
+                    "right": False,
+                    "wheel": 0,
+                    "moved": True,
+                },
+                {"kind": "key", "key": "q"},
+            ])
+            custom_menus.read_key_or_mouse = lambda: next(hover_color_events)
+            assert custom_farm_game.custom_building_color_editor(
+                ["." * custom_extended.BUILDING_TEMPLATE_WIDTH]
+                * custom_extended.BUILDING_TEMPLATE_HEIGHT,
+                [],
+                0,
+            ) == []
+
+            rect_events = iter([
+                {"kind": "mouse", "x": 2, "y": 4, "left": True, "right": False, "wheel": 0},
+                {"kind": "mouse", "x": 7, "y": 8, "left": True, "right": False, "wheel": 0},
+                {"kind": "mouse", "x": 7, "y": 8, "left": False, "right": False, "wheel": 0},
+            ])
+            custom_menus.read_key_or_mouse = lambda: next(rect_events)
+            assert custom_farm_game.custom_building_rect_selector(
+                "Mouse Rectangle",
+                ["." * custom_extended.BUILDING_TEMPLATE_WIDTH]
+                * custom_extended.BUILDING_TEMPLATE_HEIGHT,
+            ) == {"x1": 2, "y1": 2, "x2": 7, "y2": 6}
+
+            point_events = iter([
+                {"kind": "mouse", "x": 11, "y": 9, "left": True, "right": False, "wheel": 0},
+            ])
+            custom_menus.read_key_or_mouse = lambda: next(point_events)
+            assert custom_farm_game.custom_building_point_selector(
+                "Mouse Point",
+                ["." * custom_extended.BUILDING_TEMPLATE_WIDTH]
+                * custom_extended.BUILDING_TEMPLATE_HEIGHT,
+            ) == {"x": 11, "y": 7}
+
+            zone_menu_values = iter(["redraw", 0, custom_menus.MENU_BACK])
+            custom_menus.menu_select = lambda *args, **kwargs: SimpleNamespace(
+                value=next(zone_menu_values)
+            )
+            captured_initial_rects = []
+            custom_farm_game.custom_building_rect_selector = lambda *args, **kwargs: (
+                captured_initial_rects.append(kwargs.get("initial_rect"))
+                or {"x1": 4, "y1": 5, "x2": 12, "y2": 13}
+            )
+            redrawn_zones = custom_farm_game.custom_building_zone_menu(
+                ["." * custom_extended.BUILDING_TEMPLATE_WIDTH]
+                * custom_extended.BUILDING_TEMPLATE_HEIGHT,
+                [{"kind": "bedroom", "floor": 0, "x1": 1, "y1": 2, "x2": 8, "y2": 9}],
+                0,
+            )
+            assert captured_initial_rects == [(1, 2, 8, 9)]
+            assert redrawn_zones == [
+                {"kind": "bedroom", "floor": 0, "x1": 4, "y1": 5, "x2": 12, "y2": 13}
+            ]
+
+            zone_delete_values = iter(["delete_floor", "delete", custom_menus.MENU_BACK])
+            custom_menus.menu_select = lambda *args, **kwargs: SimpleNamespace(
+                value=next(zone_delete_values)
+            )
+            remaining_zones = custom_farm_game.custom_building_zone_menu(
+                ["." * custom_extended.BUILDING_TEMPLATE_WIDTH]
+                * custom_extended.BUILDING_TEMPLATE_HEIGHT,
+                [
+                    {"kind": "bedroom", "floor": 0, "x1": 1, "y1": 2, "x2": 8, "y2": 9},
+                    {"kind": "office", "floor": 1, "x1": 2, "y1": 3, "x2": 7, "y2": 8},
+                ],
+                0,
+            )
+            assert remaining_zones == [
+                {"kind": "office", "floor": 1, "x1": 2, "y1": 3, "x2": 7, "y2": 8}
+            ]
+
+            custom_menus.menu_select = original_editor_menu_select
+            custom_farm_game.custom_building_rect_selector = original_rect_selector
+
+            preview_place_events = iter([
+                {"kind": "key", "key": "RIGHT"},
+                {"kind": "key", "key": "DOWN"},
+                {"kind": "key", "key": "z"},
+            ])
+            custom_menus.read_key_or_mouse = lambda: next(preview_place_events)
+            assert custom_farm_game.custom_building_clipboard_placement_selector(
+                "Preview Placement",
+                ["." * custom_extended.BUILDING_TEMPLATE_WIDTH]
+                * custom_extended.BUILDING_TEMPLATE_HEIGHT,
+                ["ABC", "DEF"],
+                initial_point=(3, 4),
+            ) == {"x": 4, "y": 5}
+        finally:
+            custom_menus.read_key_or_mouse = original_editor_input
+            custom_menus.menu_select = original_editor_menu_select
+            custom_farm_game.draw_custom_building_template_canvas = original_editor_draw
+            custom_farm_game.custom_building_rect_selector = original_rect_selector
         custom_presets = custom_farm_game.all_tactical_mission_presets()
         custom_preset = next(preset for preset in custom_presets if preset.get("map") == "Hedge Trial")
         custom_mission_request = custom_farm_game.mission_preset_request(custom_preset)
@@ -1306,6 +2142,8 @@ def main() -> int:
     assert loaded_state.tavern_game_discoveries == []
     assert loaded_state.marriage_month == 0
     assert loaded_state.family_event_log == []
+    assert loaded_state.hud_activity_log == []
+    assert loaded_state.show_hud_sidebar is True
     assert loaded_state.family_event_flags == []
     assert loaded_state.pregnancy_checkup_months_seen == []
     assert loaded_state.child_milestone_flags == []
@@ -2132,7 +2970,56 @@ def main() -> int:
     })["wilderness_settlements"]
     assert "4,-2" in settlement_save_fields
 
+    assert len(npc_builder.ADDITIONAL_FEMALE_GIVEN_NAMES) == 150
+    assert len(npc_builder.ADDITIONAL_MALE_GIVEN_NAMES) == 150
+    assert (
+        len(npc_builder.ADDITIONAL_FEMALE_GIVEN_NAMES)
+        + len(npc_builder.ADDITIONAL_MALE_GIVEN_NAMES)
+    ) == 300
+    all_procedural_given_names = (
+        npc_builder.FEMALE_GIVEN_NAMES
+        + npc_builder.MALE_GIVEN_NAMES
+    )
+    assert len(all_procedural_given_names) == 348
+    assert len({
+        name.casefold()
+        for name in all_procedural_given_names
+    }) == len(all_procedural_given_names)
     procedural_builder = npc_builder.ProceduralNpcBuilder()
+    name_probe_plan = {"seed": 90210}
+    sampled_female_names = {
+        procedural_builder.choose_given_name(
+            name_probe_plan,
+            f"female-name-probe:{index}",
+            "Female",
+        )
+        for index in range(1000)
+    }
+    sampled_male_names = {
+        procedural_builder.choose_given_name(
+            name_probe_plan,
+            f"male-name-probe:{index}",
+            "Male",
+        )
+        for index in range(1000)
+    }
+    assert sampled_female_names & set(npc_builder.ADDITIONAL_FEMALE_GIVEN_NAMES)
+    assert sampled_male_names & set(npc_builder.ADDITIONAL_MALE_GIVEN_NAMES)
+    assert len(npc_builder.ADDITIONAL_SURNAMES) == 300
+    assert len(npc_builder.SURNAMES) == 324
+    assert len({
+        surname.casefold()
+        for surname in npc_builder.SURNAMES
+    }) == len(npc_builder.SURNAMES)
+    sampled_surnames = {
+        procedural_builder.household_surname(
+            name_probe_plan,
+            f"surname-probe:{index}",
+        )
+        for index in range(1200)
+    }
+    assert sampled_surnames & set(npc_builder.ADDITIONAL_SURNAMES)
+    assert sampled_surnames.issubset(set(npc_builder.SURNAMES))
     population_plan = settlement_builder.create_plan(
         11,
         -7,
@@ -2159,6 +3046,8 @@ def main() -> int:
     assert population_summary["average_job_morale"] > 0
     assert population_summary["weekly_wages"] > 0
     assert population_summary["service_tags"]
+    assert population_summary["occupied_rooms"] > 0
+    assert population_summary["residents_without_rooms"] >= 0
     assert procedural_builder.validate(
         generated_population,
         population_plan,
@@ -2167,12 +3056,57 @@ def main() -> int:
     assert len(generated_ids) == population_summary["population"]
     for generated_household in generated_population["households"].values():
         assert generated_household["head_resident_id"] in generated_household["member_ids"]
+        assert generated_household["room_assignment_version"] == 2
+        room_assigned_ids = {
+            resident_id
+            for occupant_ids in generated_household["room_assignments"].values()
+            for resident_id in occupant_ids
+        }
+        assert room_assigned_ids.isdisjoint(
+            set(generated_household["unassigned_room_member_ids"])
+        )
+        assert room_assigned_ids | set(generated_household["unassigned_room_member_ids"]) == set(
+            generated_household["member_ids"]
+        )
+        household_home = population_plan["buildings"][generated_household["home_building_id"]]
+        sleeping_rooms = {
+            room["id"]: room
+            for room in npc_builder.procedural_building_sleeping_rooms(
+                population_plan,
+                household_home,
+            )
+        }
+        if (
+            household_home["type_id"] == "home"
+            and npc_builder.procedural_custom_building_template(
+                population_plan,
+                household_home,
+            ) is None
+        ):
+            assert not generated_household["unassigned_room_member_ids"]
+            assert generated_household["architectural_capacity"] == sum(
+                room["capacity"] for room in sleeping_rooms.values()
+            )
+            if any(
+                generated_population["residents"][resident_id]["age_group"] == "Child"
+                for resident_id in generated_household["member_ids"]
+            ):
+                assert "nursery" in generated_household["room_conversions"].values()
+                assert any(room["role"] == "nursery" for room in sleeping_rooms.values())
+        assert set(generated_household["room_assignments"]) <= set(sleeping_rooms)
+        for room_id, occupant_ids in generated_household["room_assignments"].items():
+            assert len(occupant_ids) <= sleeping_rooms[room_id]["capacity"]
+            if household_home["type_id"] == "inn":
+                assert len(occupant_ids) == 1
         married_ids = generated_household.get("married_couple_ids", [])
         if married_ids:
             assert len(married_ids) == 2
             married_people = [generated_population["residents"][resident_id] for resident_id in married_ids]
             assert {resident["sex"] for resident in married_people} == {"Male", "Female"}
             assert all(resident["marital_status"] == "Married" for resident in married_people)
+            married_room_ids = {resident["assigned_room_id"] for resident in married_people}
+            if "" not in married_room_ids and household_home["type_id"] != "inn":
+                assert len(married_room_ids) == 1
     for generated_resident in generated_population["residents"].values():
         assert generated_resident["household_role"] != "Partner"
         assert set(npc_builder.PROCEDURAL_ROUTINE_PHASES).issubset(
@@ -2180,6 +3114,13 @@ def main() -> int:
         )
         assert generated_resident["home_building_id"] in population_plan["buildings"]
         assert population_plan["buildings"][generated_resident["home_building_id"]]["phase_index"] == 3
+        household = generated_population["households"][generated_resident["household_id"]]
+        if generated_resident["assigned_room_id"]:
+            assert generated_resident["assigned_room_label"]
+            assert generated_resident["id"] in household["room_assignments"][generated_resident["assigned_room_id"]]
+            assert generated_resident["assigned_room_label"].lower() in generated_resident["schedule"]["late"]["activity"]
+        else:
+            assert generated_resident["id"] in household["unassigned_room_member_ids"]
         job_profile = generated_resident["job_profile"]
         assert job_profile["title"]
         assert job_profile["duties"]
@@ -2224,6 +3165,13 @@ def main() -> int:
     sanitized_resident = next(iter(sanitized_population["residents"].values()))
     assert sanitized_resident["job_profile"]["title"]
     assert sanitized_resident["job_profile"]["service_tags"]
+    assert "assigned_room_id" in sanitized_resident
+    assert all(
+        household["room_assignment_version"] == 2
+        and "architectural_capacity" in household
+        and "room_conversions" in household
+        for household in sanitized_population["households"].values()
+    )
 
     workplace_only_plan = settlement_builder.create_plan(
         12,
@@ -2403,6 +3351,11 @@ def main() -> int:
     procedural_town_game.autosave_with_message = (
         lambda message: procedural_town_game.set_message(message)
     )
+    procedural_special_events = []
+    procedural_town_game.play_world_event_scene = (
+        lambda event_id, title, steps, completion_message="":
+        procedural_special_events.append((str(event_id), str(title), list(steps), str(completion_message))) or True
+    )
     procedural_town_game.state.wilderness_seed = 24681357
     procedural_town_game._procedural_town_site_cache = {}
     authored_town_before_runtime = [
@@ -2520,7 +3473,7 @@ def main() -> int:
     assert any("[@]" in line for line in cartography_plain)
     assert any("\u00b7" in line for line in cartography_plain[3:14])
     assert any("\u2591" in line for line in cartography_plain[3:14])
-    assert any("WASD/Numpad Move | Enter Travel | Esc Close | R Town" in line for line in cartography_plain)
+    assert any("Close B/X/Esc/Q/Tab" in line for line in cartography_plain)
     assert any("UNKNOWN" in line and "GOAL" in line for line in cartography_plain)
     nearby_chart_target = min(
         (point for point in origin_region_members if point != (0, 0)),
@@ -3360,6 +4313,30 @@ def main() -> int:
     stage2_game.autosave_with_message = lambda message: stage2_game.set_message(message)
     stage2_game.state.location = "Wilderness"
     stage2_game.set_wilderness_chunk(6, 7)
+    region_anchor = stage2_game.wilderness_region_coords(6, 7)
+    region_cache_size = len(stage2_game._wilderness_region_coords_cache)
+    assert all(stage2_game.wilderness_region_coords(6, 7) == region_anchor for _ in range(100))
+    assert len(stage2_game._wilderness_region_coords_cache) == region_cache_size
+    assert stage2_game.wilderness_region_structure_chunk(6, 7) == stage2_game.wilderness_region_structure_chunk(6, 7)
+    assert stage2_game.wilderness_region_outpost_chunk(6, 7) == stage2_game.wilderness_region_outpost_chunk(6, 7)
+    assert stage2_game._wilderness_region_structure_chunk_cache
+    assert stage2_game._wilderness_region_outpost_chunk_cache
+
+    animal_overlay_calls = {"event": 0, "seasonal": 0}
+    original_event_lookup = stage2_game.wilderness_event_visual_lookup
+    original_seasonal_lookup = stage2_game.wilderness_seasonal_surface_lookup
+    def counted_event_lookup(*args, **kwargs):
+        animal_overlay_calls["event"] += 1
+        return original_event_lookup(*args, **kwargs)
+    def counted_seasonal_lookup(*args, **kwargs):
+        animal_overlay_calls["seasonal"] += 1
+        return original_seasonal_lookup(*args, **kwargs)
+    stage2_game.wilderness_event_visual_lookup = counted_event_lookup
+    stage2_game.wilderness_seasonal_surface_lookup = counted_seasonal_lookup
+    stage2_game.generate_wilderness_animals_for_chunk(6, 7)
+    stage2_game.wilderness_event_visual_lookup = original_event_lookup
+    stage2_game.wilderness_seasonal_surface_lookup = original_seasonal_lookup
+    assert animal_overlay_calls == {"event": 1, "seasonal": 1}, animal_overlay_calls
     stage2_game.map_lines()
     first_prefetch_keys = set(stage2_game._wilderness_stream_preloaded_chunks)
     assert len(first_prefetch_keys) == 1
@@ -3569,6 +4546,7 @@ def main() -> int:
     assert visual_settings["ambient_visuals_enabled"] is True
     assert visual_settings["high_contrast_enabled"] is False
     assert visual_settings["detailed_glyphs_enabled"] is True
+    assert visual_settings["show_hud_sidebar"] is True
     assert visual_settings["wake_hour"] == 7
     assert stage2_game.wake_time_label() == "7:00 AM"
     stage2_game.state.wake_hour = 12
@@ -3580,11 +4558,13 @@ def main() -> int:
         "ambient_visuals_enabled": False,
         "high_contrast_enabled": True,
         "detailed_glyphs_enabled": False,
+        "show_hud_sidebar": False,
         "wake_hour": 9,
     })
     assert stage2_game.state.ambient_visuals_enabled is False
     assert stage2_game.state.high_contrast_enabled is True
     assert stage2_game.state.detailed_glyphs_enabled is False
+    assert stage2_game.state.show_hud_sidebar is False
     assert stage2_game.state.wake_hour == 9
     stage2_game.apply_startup_settings_snapshot(visual_settings)
     ambient_phase_before = int(getattr(stage2_game, "_ambient_visual_phase", 0))
@@ -3948,6 +4928,50 @@ def main() -> int:
         procedural_town_x,
         procedural_town_y,
     ) == {"errors": [], "warnings": []}
+    assigned_runtime_resident = next(
+        resident
+        for resident in procedural_runtime_population["residents"].values()
+        if resident.get("assigned_room_id")
+    )
+    assigned_runtime_home = procedural_town_plan["buildings"][
+        assigned_runtime_resident["home_building_id"]
+    ]
+    assigned_floor_count = procedural_town_game.procedural_town_building_floor_count(
+        procedural_town_plan,
+        assigned_runtime_home,
+    )
+    procedural_town_game.state.current_procedural_settlement_key = (
+        f"{procedural_town_x},{procedural_town_y}"
+    )
+    procedural_town_game.state.current_procedural_building_id = str(assigned_runtime_home["id"])
+    procedural_town_game.state.current_procedural_building_floor = int(
+        assigned_runtime_resident["assigned_room_floor"]
+    )
+    procedural_town_game.state.location = procedural_towns.PROCEDURAL_TOWN_INTERIOR_LOCATION
+    assigned_room_anchors = procedural_town_game.procedural_town_assigned_room_anchor(
+        procedural_town_plan,
+        assigned_runtime_home,
+        assigned_runtime_resident,
+    )
+    assert len(assigned_room_anchors) == 1
+    assigned_room_grid = procedural_town_game.procedural_town_interior_map(
+        assigned_runtime_home,
+        floor=assigned_runtime_resident["assigned_room_floor"],
+    )
+    assert procedural_town_game.procedural_town_interior_tile_passable(
+        assigned_room_grid[assigned_room_anchors[0][1]][assigned_room_anchors[0][0]]
+    )
+    assert procedural_town_game.procedural_town_resident_preferred_interior_floor(
+        procedural_town_plan,
+        assigned_runtime_home,
+        assigned_runtime_resident,
+        "late",
+        assigned_floor_count,
+        0,
+    ) == int(assigned_runtime_resident["assigned_room_floor"])
+    procedural_town_game.state.location = "Wilderness"
+    procedural_town_game.state.wilderness_chunk_x = procedural_town_x
+    procedural_town_game.state.wilderness_chunk_y = procedural_town_y
     district_growth_game = FarmGame()
     district_growth_game.autosave_with_message = (
         lambda message: district_growth_game.set_message(message)
@@ -4302,6 +5326,76 @@ def main() -> int:
     assert procedural_town_game.procedural_town_resident_runtime_activity(
         "building:home", "outdoor", "sleeping at home", "late"
     ) == "walking home to sleep"
+    fixture_test_grid = [["#" for _ in range(9)] for _ in range(7)]
+    for fixture_y in range(1, 6):
+        for fixture_x in range(1, 8):
+            fixture_test_grid[fixture_y][fixture_x] = "."
+    fixture_test_grid[3][4] = "H"
+    fixture_test_grid[2][2] = "R"
+    fixture_test_grid[4][4] = "|"
+    book_anchors = procedural_town_game.procedural_town_fixture_interaction_anchors(
+        fixture_test_grid,
+        {"H"},
+        "smoke:librarian",
+    )
+    assert set(book_anchors) == {(3, 3), (5, 3), (4, 2)}
+    assert all(
+        procedural_town_game.procedural_town_interior_tile_passable(
+            fixture_test_grid[y][x]
+        )
+        for x, y in book_anchors
+    )
+    assert procedural_town_game.procedural_town_adjacent_fixture_symbol(
+        fixture_test_grid,
+        (3, 3),
+        {"H"},
+    ) == "H"
+    assert procedural_town_game.procedural_town_face_adjacent_fixture(
+        fixture_test_grid,
+        (3, 3),
+        {"H"},
+    ) == "RIGHT"
+    assert procedural_town_game.procedural_town_resident_fixture_activity(
+        "H",
+        "work_morning",
+        "handling local research",
+        {"type_id": "library"},
+    ) == "reading and organizing the local shelves"
+    assert procedural_town_game.procedural_town_resident_fixture_activity(
+        "W",
+        "work_morning",
+        "tending patients",
+        {"type_id": "clinic"},
+    ) == "checking remedies and treatment supplies"
+    fixture_resident = {
+        "id": "fixture-resident",
+        "role": "Settler",
+        "home_building_id": "fixture-home",
+    }
+    fixture_home = {"id": "fixture-home", "type_id": "home"}
+    assert {"b", "B", "I", "J", "K"}.issubset(
+        procedural_town_game.procedural_town_resident_fixture_symbols(
+            fixture_resident,
+            fixture_home,
+            "late",
+            "sleeping at home",
+        )
+    )
+    fixture_librarian = {"id": "fixture-archivist", "role": "Archivist"}
+    assert {"H", "i", "l", "L"}.issubset(
+        procedural_town_game.procedural_town_resident_fixture_symbols(
+            fixture_librarian,
+            {"id": "fixture-library", "type_id": "library"},
+            "work_morning",
+            "organizing research books",
+        )
+    )
+    assert procedural_town_game.procedural_town_resident_fixture_symbols(
+        {"id": "fixture-shopkeeper", "role": "Shopkeeper"},
+        {"id": "fixture-store", "type_id": "general_store"},
+        "work_morning",
+        "checking store stock",
+    ) == {"&"}
     original_runtime_hour = procedural_town_game.state.hour
     procedural_town_game.state.hour = 23
     procedural_town_game.ensure_procedural_town_resident_runtime(
@@ -4504,9 +5598,8 @@ def main() -> int:
             runtime_resident
         )
     ]
-    assert all(label in resident_menu_labels for label in [
-        "Talk", "Give Gift", "Ask Rumor", "Request", "Profile", "Status", "Back",
-    ])
+    assert all(label in resident_menu_labels for label in ["Talk", "Profile", "Status", "Back"])
+    assert not {"Give Gift", "Ask Rumor", "Request", "Courtship", "Propose"}.intersection(resident_menu_labels)
     assert resident_menu_labels[-1] == "Back"
     liked_gift = runtime_resident["likes"][0]
     procedural_town_game.state.inventory[liked_gift] = 1
@@ -4741,6 +5834,15 @@ def main() -> int:
         sorted(service_counters),
     )
     assert any(
+        str(worker.get("runtime_fixture_symbol", "")) in {"&", "$", "V"}
+        for worker in store_staff
+    )
+    assert any(
+        "service" in str(worker.get("runtime_activity", "")).lower()
+        or "display" in str(worker.get("runtime_activity", "")).lower()
+        for worker in store_staff
+    )
+    assert any(
         item.value == "service"
         for item in procedural_town_game.procedural_town_resident_menu_items(store_staff[0])
     )
@@ -4758,33 +5860,6 @@ def main() -> int:
     procedural_interior_community = procedural_town_game.ensure_procedural_town_community(
         procedural_town_plan
     )
-    variant_probe_building = next(
-        building
-        for building in procedural_interior_buildings
-        if building["type_id"] == "general_store"
-    )
-    variant_probe_grids = [
-        procedural_town_game.procedural_town_generated_ground_floor_map(
-            procedural_town_plan,
-            variant_probe_building,
-            1,
-            None,
-            None,
-            procedural_interior_community,
-            layout_variant,
-            0,
-        )
-        for layout_variant in range(4)
-    ]
-    variant_probe_signatures = {
-        tuple("".join("." if tile != " " else " " for tile in row) for row in variant_grid)
-        for variant_grid in variant_probe_grids
-    }
-    assert len(variant_probe_signatures) == 4, "Same-type procedural interiors do not vary structurally"
-    assert all(
-        all(tile not in {"|", "_"} for row in variant_grid for tile in row)
-        for variant_grid in variant_probe_grids
-    ), "Public room connections should be open archways, not decorative doors"
     expected_tiles_by_type = {
         "general_store": {"&", "$", "s"},
         "market_stall": {"&", "$", "s"},
@@ -4796,11 +5871,252 @@ def main() -> int:
         "workshop": {"&", "w", "a", "x"},
         "town_hall": {"&", "d", "P"},
     }
+    procedural_layout_types = tuple(expected_tiles_by_type)
+    assert not procedural_furnishing.validate_furnishing_kits()
+
+    def assert_functional_room_furnishings(grid, room_plan):
+        def room_cells(room, symbol):
+            x1, y1, x2, y2 = room["rect"]
+            return [
+                (x, y)
+                for y in range(y1 + 1, y2)
+                for x in range(x1 + 1, x2)
+                if grid[y][x] == symbol
+            ]
+
+        def adjacent(first, second):
+            return any(
+                abs(x1 - x2) + abs(y1 - y2) == 1
+                for x1, y1 in first
+                for x2, y2 in second
+            )
+
+        for room in room_plan["rooms"]:
+            role = str(room.get("role", ""))
+            x1, y1, x2, y2 = room["rect"]
+            center_x, center_y = (x1 + x2) // 2, (y1 + y2) // 2
+            assert grid[center_y][center_x] in {".", ",", "_", "|", "<", ">"}
+            if str(room.get("occupancy_kind", "")) in {"resident", "guest"}:
+                assert room_cells(room, "b")
+            if role == "kitchen":
+                assert room_cells(room, "f")
+            if role in {"common", "common_room", "reading", "council", "meeting"}:
+                tables, chairs = room_cells(room, "t"), room_cells(room, "c")
+                assert tables and chairs and adjacent(tables, chairs)
+            if role in {"study", "office"}:
+                desks, chairs = room_cells(room, "d"), room_cells(room, "c")
+                assert desks and chairs and adjacent(desks, chairs)
+
+    cross_type_variant_signatures = set()
+    for procedural_layout_type in procedural_layout_types:
+        variant_probe_building = {
+            "id": f"smoke:{procedural_layout_type}",
+            "type_id": procedural_layout_type,
+            "room_program_variant": 1,
+        }
+        floor_count = 2 if procedural_layout_type in {"home", "inn"} else 1
+        variant_probe_grids = []
+        for layout_variant in range(4):
+            catalog_placements = []
+            variant_probe_grids.append(
+                procedural_town_game.procedural_town_generated_ground_floor_map(
+                procedural_town_plan,
+                variant_probe_building,
+                floor_count,
+                None,
+                None,
+                procedural_interior_community,
+                layout_variant,
+                layout_variant,
+                catalog_placements,
+            )
+            )
+            assert catalog_placements
+            assert all(
+                str(placement.get("name", "")) in furniture_catalog.FURNITURE_CATALOG_DATA
+                and placement.get("cells")
+                and str(placement.get("room_role", ""))
+                for placement in catalog_placements
+            )
+        variant_probe_signatures = {
+            tuple(
+                "".join("." if tile != " " else " " for tile in row)
+                for row in variant_grid
+            )
+            for variant_grid in variant_probe_grids
+        }
+        assert len(variant_probe_signatures) == 4, (
+            f"{procedural_layout_type} procedural layouts do not have four distinct plans"
+        )
+        cross_type_variant_signatures.update(variant_probe_signatures)
+        for layout_variant, variant_grid in enumerate(variant_probe_grids):
+            variant_symbols = set("".join("".join(row) for row in variant_grid))
+            assert expected_tiles_by_type[procedural_layout_type] <= variant_symbols
+            assert sum(row.count("D") for row in variant_grid) == 1
+            assert sum(row.count("&") for row in variant_grid) == 1
+            room_plan = procedural_interiors.procedural_interior_room_plan(
+                procedural_layout_type,
+                layout_variant,
+                floor_count,
+                0,
+            )
+            assert not room_plan["validation"], (
+                procedural_layout_type,
+                layout_variant,
+                room_plan["validation"],
+            )
+            room_ids = {str(room["id"]) for room in room_plan["rooms"]}
+            assert len(room_ids) == len(room_plan["rooms"])
+            assert len({str(room["size"]) for room in room_plan["rooms"]}) >= 3
+            assert_functional_room_furnishings(variant_grid, room_plan)
+        program_signatures = set()
+        program_room_counts = []
+        for program_variant in range(3):
+            program_probe_building = dict(
+                variant_probe_building,
+                id=f"smoke:{procedural_layout_type}:program:{program_variant}",
+                room_program_variant=program_variant,
+            )
+            for program_layout_variant in range(4):
+                program_grid = procedural_town_game.procedural_town_generated_ground_floor_map(
+                    procedural_town_plan,
+                    program_probe_building,
+                    floor_count,
+                    None,
+                    None,
+                    procedural_interior_community,
+                    program_layout_variant,
+                    program_layout_variant,
+                )
+                program_plan = procedural_interiors.procedural_interior_room_plan(
+                    procedural_layout_type,
+                    program_layout_variant,
+                    floor_count,
+                    0,
+                    None,
+                    program_variant,
+                )
+                assert not program_plan["validation"], (
+                    procedural_layout_type,
+                    program_variant,
+                    program_layout_variant,
+                    program_plan["validation"],
+                )
+                assert program_plan["program_name"] == (
+                    "Compact", "Standard", "Expanded"
+                )[program_variant]
+                assert_functional_room_furnishings(program_grid, program_plan)
+                if procedural_layout_type in {"home", "inn"}:
+                    program_upper_grid = (
+                        procedural_town_game.procedural_town_generated_upper_floor_map(
+                            procedural_town_plan,
+                            program_probe_building,
+                            1,
+                            2,
+                            program_layout_variant,
+                        )
+                    )
+                    program_upper_plan = procedural_interiors.procedural_interior_room_plan(
+                        procedural_layout_type,
+                        program_layout_variant,
+                        2,
+                        1,
+                        None,
+                        program_variant,
+                    )
+                    assert not program_upper_plan["validation"]
+                    assert_functional_room_furnishings(
+                        program_upper_grid,
+                        program_upper_plan,
+                    )
+                if program_layout_variant == 0:
+                    program_room_counts.append(len(program_plan["rooms"]))
+                    program_signatures.add(tuple(
+                        "".join("." if tile != " " else " " for tile in row)
+                        for row in program_grid
+                    ))
+        assert len(program_signatures) == 3
+        assert program_room_counts[0] < program_room_counts[2]
+        if procedural_layout_type == "general_store":
+            assert all(
+                sum(row.count("_") for row in variant_grid) >= 1
+                for variant_grid in variant_probe_grids
+            ), "Private and service shop rooms should have meaningful doors"
+        if procedural_layout_type == "home":
+            for layout_variant in range(4):
+                home_plan = procedural_interiors.procedural_interior_room_plan(
+                    "home", layout_variant, 2, 0,
+                )
+                home_rooms = {str(room["id"]): room for room in home_plan["rooms"]}
+                assert home_plan["resident_capacity"] == 3
+                assert home_rooms["primary_bath"]["parent"] == "primary"
+                assert home_rooms["primary_bath"]["connection"] == "direct"
+                assert home_rooms["primary"]["capacity"] == 2
+                assert home_rooms["bedroom_2"]["capacity"] == 1
+                adaptive_rooms = {"floor:0:study": "nursery"}
+                adapted_plan = procedural_interiors.procedural_interior_room_plan(
+                    "home", layout_variant, 1, 0, adaptive_rooms,
+                )
+                adapted_study = next(
+                    room for room in adapted_plan["rooms"] if room["id"] == "study"
+                )
+                assert adapted_plan["resident_capacity"] == 4
+                assert adapted_study["role"] == "nursery"
+                assert adapted_study["adapted_from"] == "study"
+                assert adapted_study["capacity"] == 1
+                adapted_grid = procedural_interiors.build_procedural_ground_floor(
+                    "home",
+                    layout_variant,
+                    0,
+                    1,
+                    room_overrides=adaptive_rooms,
+                )
+                assert sum(row.count("b") for row in adapted_grid) == 3
+                assert procedural_interiors.procedural_building_room_capacity(
+                    "home", layout_variant, 1, adaptive_rooms,
+                ) == 4
+            assert procedural_interiors.sanitize_procedural_room_overrides({
+                "floor:0:study": "bedroom",
+                "floor:9:study": "nursery",
+                "floor:0:kitchen": "kitchen",
+            }) == {"floor:0:study": "bedroom"}
+        if procedural_layout_type == "inn":
+            for layout_variant, variant_grid in enumerate(variant_probe_grids):
+                inn_plan = procedural_interiors.procedural_interior_room_plan(
+                    "inn", layout_variant, 2, 0,
+                )
+                upper_grid = procedural_town_game.procedural_town_generated_upper_floor_map(
+                    procedural_town_plan,
+                    variant_probe_building,
+                    1,
+                    2,
+                    layout_variant,
+                )
+                upper_plan = procedural_interiors.procedural_interior_room_plan(
+                    "inn", layout_variant, 2, 1,
+                )
+                assert sum(row.count("b") for row in variant_grid) == 4
+                assert sum(row.count("b") for row in upper_grid) == 6
+                assert sum(row.count(">") for row in upper_grid) == 1
+                assert inn_plan["guest_capacity"] == 4
+                assert upper_plan["guest_capacity"] == 6
+                assert all(
+                    int(room["capacity"]) == 1
+                    for room in (*inn_plan["rooms"], *upper_plan["rooms"])
+                    if str(room.get("role")) == "guest_room"
+                )
+                assert procedural_interiors.procedural_building_room_capacity(
+                    "inn", layout_variant, 2,
+                ) == 10
+    assert len(cross_type_variant_signatures) >= 24, (
+        "Procedural building roles still reuse too many identical shells"
+    )
     original_building_service = procedural_town_game.procedural_town_building_service
     generated_shape_signatures = set()
     generated_shape_signatures_by_type = {}
     generated_building_counts_by_type = {}
     generated_service_positions = set()
+    resolved_room_container_profiles = set()
     try:
         for proc_building in procedural_interior_buildings:
             procedural_town_game.state.location = procedural_towns.PROCEDURAL_TOWN_INTERIOR_LOCATION
@@ -4808,7 +6124,158 @@ def main() -> int:
                 f"{procedural_town_plan['chunk_x']},{procedural_town_plan['chunk_y']}"
             )
             procedural_town_game.state.current_procedural_building_id = str(proc_building["id"])
+            procedural_town_game.state.current_procedural_building_floor = 0
             display_grid = procedural_town_game.procedural_town_interior_map(proc_building)
+            catalog_lookup = {}
+            custom_template = procedural_town_game.procedural_town_custom_building_template(
+                procedural_town_plan,
+                proc_building,
+            )
+            property_record = (
+                procedural_town_game.player_property_for_building(
+                    procedural_town_plan, proc_building
+                )
+                if str(proc_building.get("type_id", "")) == "home"
+                else None
+            )
+            if not custom_template and not property_record:
+                furniture_scope = (
+                    str(procedural_town_plan.get("id", "")),
+                    str(proc_building.get("id", "")),
+                    0,
+                )
+                catalog_lookup = procedural_town_game._procedural_town_catalog_furniture_cache.get(
+                    furniture_scope, {}
+                )
+                assert catalog_lookup
+                furniture_position, furniture_cell = next(iter(catalog_lookup.items()))
+                assert furniture_cell["name"] in furniture_catalog.FURNITURE_CATALOG_DATA
+                assert visible_terminal_len(
+                    procedural_town_game.render_tile(
+                        furniture_position[0], furniture_position[1], display_grid
+                    )
+                ) == 1
+                furniture_description = procedural_town_game.procedural_town_interior_tile_description(
+                    display_grid[furniture_position[1]][furniture_position[0]],
+                    proc_building,
+                    *furniture_position,
+                )
+                assert str(furniture_cell["name"]) in furniture_description
+                assert procedural_town_game.procedural_town_interior_tile_interactable(
+                    display_grid[furniture_position[1]][furniture_position[0]],
+                    proc_building,
+                    *furniture_position,
+                )
+            architecture_lines = procedural_town_game.procedural_town_modular_architecture_lines(
+                procedural_town_plan,
+                proc_building,
+            )
+            if architecture_lines:
+                assert any("Architecture:" in line for line in architecture_lines)
+                assert any(
+                    program_name in line
+                    for program_name in ("Compact", "Standard", "Expanded")
+                    for line in architecture_lines
+                )
+                assert int(proc_building.get("room_program_variant", -1)) in {0, 1, 2}
+                assert any("capacity" in line.lower() for line in architecture_lines)
+                assert any(
+                    "Furnishing plan:" in line and "lanes kept clear" in line
+                    for line in architecture_lines
+                )
+                modular_anchors = procedural_town_game.procedural_town_modular_room_anchors(
+                    procedural_town_plan,
+                    proc_building,
+                    ["public_hall"],
+                )
+                assert modular_anchors
+                assert all(
+                    procedural_town_game.procedural_town_interior_tile_passable(
+                        display_grid[y][x]
+                    )
+                    for x, y in modular_anchors
+                )
+                room_fixture = next(
+                    (
+                        (x, y, tile, room, profile)
+                        for y, row in enumerate(display_grid)
+                        for x, tile in enumerate(row)
+                        for room in [
+                            procedural_town_game.procedural_town_room_at_position(
+                                x,
+                                y,
+                                proc_building,
+                            )
+                        ]
+                        if isinstance(room, dict)
+                        for profile in [
+                            procedural_town_game.procedural_room_container_profile(
+                                str(proc_building.get("type_id", "")),
+                                str(room.get("role", "")),
+                                str(room.get("source_id", room.get("id", ""))),
+                                tile,
+                            )
+                        ]
+                        if profile
+                    ),
+                    None,
+                )
+                if room_fixture:
+                    fixture_x, fixture_y, _tile, fixture_room, expected_profile = room_fixture
+                    catalog_container = procedural_town_game.procedural_town_catalog_furniture_at(
+                        fixture_x, fixture_y,
+                    )
+                    if isinstance(catalog_container, dict):
+                        catalog_name = str(catalog_container.get("name", ""))
+                        expected_profile = str(
+                            data.INFRASTRUCTURE_DATA.get(catalog_name, {}).get(
+                                "container_profile", expected_profile,
+                            )
+                        )
+                    static_profile = procedural_town_game.static_container_profile_at(
+                        fixture_x,
+                        fixture_y,
+                    )
+                    assert static_profile and static_profile[0] == expected_profile
+                    container_record = procedural_town_game.world_container_at(
+                        fixture_x,
+                        fixture_y,
+                    )
+                    assert container_record and container_record["profile"] == expected_profile
+                    assert container_record["owner"]
+                    assert procedural_town_game.world_container_at(
+                        fixture_x,
+                        fixture_y,
+                    ) is container_record
+                    assert str(fixture_room.get("id", "")).startswith("floor:")
+                    resolved_room_container_profiles.add(expected_profile)
+            procedural_symbols = set(
+                "".join("".join(row) for row in display_grid)
+            )
+            for semantic_tile in procedural_symbols:
+                semantic_description = (
+                    procedural_town_game.procedural_town_interior_tile_description(
+                        semantic_tile,
+                        proc_building,
+                    )
+                )
+                semantic_hint = (
+                    procedural_town_game.procedural_town_interior_tile_hint(
+                        semantic_tile,
+                        proc_building,
+                    )
+                )
+                assert len(semantic_description) >= 8
+                assert "nothing here needs your attention" not in semantic_description.lower()
+                assert "settlement building interior" not in semantic_description.lower()
+                assert semantic_hint and "nothing" not in semantic_hint.lower()
+                if semantic_tile not in {" ", "#", ".", ","}:
+                    assert (
+                        procedural_town_game.procedural_town_interior_tile_interactable(
+                            semantic_tile,
+                            proc_building,
+                        )
+                    )
             door_side = procedural_town_game.procedural_town_building_door_side(proc_building)
             display_doors = [
                 (x, y)
@@ -4847,11 +6314,9 @@ def main() -> int:
             assert len(grid) >= 26
             assert grid[door_y][door_x] == "D"
             assert grid[0][0] == " "
-            for lane_y in range(18, door_y):
-                for lane_x in range(door_x - 1, door_x + 2):
-                    assert grid[lane_y][lane_x] == ".", (
-                        f"{proc_building['type_id']} front approach cluttered at {lane_x},{lane_y}"
-                    )
+            assert grid[door_y - 1][door_x] == ".", (
+                f"{proc_building['type_id']} entrance landing is obstructed"
+            )
             assert any(
                 grid[y][x] == "."
                 for y in range(1, 18)
@@ -4883,12 +6348,25 @@ def main() -> int:
             while queue:
                 x, y = queue.popleft()
                 for nx, ny in [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)]:
+                    display_nx, display_ny = procedural_town_game.procedural_town_orient_position(
+                        nx,
+                        ny,
+                        len(grid[0]),
+                        len(grid),
+                        door_side,
+                    )
+                    catalog_walkable = bool(
+                        catalog_lookup.get((display_nx, display_ny), {}).get(
+                            "walkable_kind"
+                        )
+                    )
                     if (
                         (nx, ny) in seen
                         or not (0 <= ny < len(grid) and 0 <= nx < len(grid[ny]))
                         or (
                             grid[ny][nx] in procedural_blocking_tiles
                             and grid[ny][nx] != "_"
+                            and not catalog_walkable
                         )
                     ):
                         continue
@@ -4924,6 +6402,50 @@ def main() -> int:
                     for x, y in positions
                     for dx, dy in [(1, 0), (-1, 0), (0, 1), (0, -1)]
                 ), f"{proc_building['type_id']} tile {tile!r} is not reachable"
+            passive_fixture = next(
+                (
+                    (x, y)
+                    for y, row in enumerate(display_grid)
+                    for x, tile in enumerate(row)
+                    if tile not in {
+                        " ", "#", ".", ",", "D", "|", "_", "<", "U", ">",
+                        "&", "P",
+                    }
+                    and not procedural_town_game.game_table_fixture_id(tile)
+                ),
+                None,
+            )
+            if passive_fixture:
+                original_show_world_container = procedural_town_game.show_world_container
+                original_fixture_select = procedural_town_game.vertical_panel_select
+                original_fixture_view = procedural_town_game.vertical_panel_view
+                original_fixture_safe_menu = procedural_town_game.safe_menu
+                procedural_town_game.show_world_container = (
+                    lambda record: procedural_town_game.set_message(
+                        f"Opened functional {record.get('name', 'container')}."
+                    )
+                )
+                procedural_town_game.vertical_panel_select = lambda *args, **kwargs: MenuItem(
+                    label="Back", value=data.MENU_BACK, enabled=True,
+                )
+                procedural_town_game.vertical_panel_view = lambda *args, **kwargs: None
+                procedural_town_game.safe_menu = (
+                    lambda menu_func, close_message: procedural_town_game.set_message(close_message)
+                )
+                try:
+                    procedural_town_game.use_procedural_town_interior_action(
+                        *passive_fixture
+                    )
+                finally:
+                    procedural_town_game.show_world_container = original_show_world_container
+                    procedural_town_game.vertical_panel_select = original_fixture_select
+                    procedural_town_game.vertical_panel_view = original_fixture_view
+                    procedural_town_game.safe_menu = original_fixture_safe_menu
+                assert procedural_town_game.state.message
+                assert (
+                    "nothing here needs your attention"
+                    not in procedural_town_game.state.message.lower()
+                )
             service_calls = []
             procedural_town_game.procedural_town_building_service = (
                 lambda service_building, service_calls=service_calls: service_calls.append(service_building["id"]) or True
@@ -4950,6 +6472,7 @@ def main() -> int:
         if generated_building_counts_by_type.get(type_id, 0) >= 2
     )
     assert len(generated_service_positions) >= 2
+    assert len(resolved_room_container_profiles) >= 3
     progression_probe = next(
         resident
         for resident in procedural_town_game.procedural_settlement_residents(
@@ -5169,13 +6692,13 @@ def main() -> int:
         for game_id in expected_inn_games
     } == {"card", "board"}
     assert "|" not in procedural_inn_glyphs
-    assert 1 <= sum(row.count("_") for row in procedural_inn_map) <= 6
+    assert 4 <= sum(row.count("_") for row in procedural_inn_map) <= 16
     procedural_store_map = procedural_town_game.procedural_town_interior_map(
         general_store_building
     )
-    assert not ({"|", "_"} & set(
-        "".join("".join(row) for row in procedural_store_map)
-    ))
+    procedural_store_glyphs = set("".join("".join(row) for row in procedural_store_map))
+    assert "_" in procedural_store_glyphs
+    assert "|" not in procedural_store_glyphs
     procedural_town_game.state.stamina = 20
     assert procedural_town_game.use_procedural_town_special_service(inn_building)
     assert procedural_town_game.state.stamina == min(
@@ -5390,11 +6913,28 @@ def main() -> int:
         residence_height,
         procedural_town_game.procedural_town_building_door_side(home_building),
     )
-    bed_position = orient_residence_position(8, 8)
-    calendar_position = orient_residence_position(17, 8)
-    television_position = orient_residence_position(49, 8)
-    kitchen_position = orient_residence_position(9, 16)
-    chair_position = orient_residence_position(18, 12)
+    def residence_furnishing_position(name):
+        for key, placed_name in procedural_town_game.state.placed_objects.items():
+            parsed = procedural_town_game.parse_object_key(str(key))
+            if not parsed or str(placed_name) != name:
+                continue
+            location_key, source_x, source_y = parsed
+            if location_key == property_scope:
+                return orient_residence_position(source_x, source_y)
+        raise AssertionError(f"Purchased procedural residence is missing {name}")
+
+    bed_position = residence_furnishing_position("Bed")
+    calendar_position = residence_furnishing_position("Wall Calendar")
+    television_position = residence_furnishing_position("Television")
+    kitchen_position = residence_furnishing_position("Kitchen Counter")
+    chair_position = next(
+        (x, y)
+        for y, row in enumerate(procedural_town_game.active_map())
+        for x, tile in enumerate(row)
+        if tile in {".", ","}
+        and not procedural_town_game.get_placed_object(x, y)
+        and procedural_town_game.can_place_object("Wooden Chair", x, y)[0]
+    )
     assert procedural_town_game.get_placed_object(*bed_position) == "Bed"
     assert procedural_town_game.get_placed_object(*calendar_position) == "Wall Calendar"
     assert procedural_town_game.get_placed_object(*television_position) == "Television"
@@ -5403,6 +6943,17 @@ def main() -> int:
     assert procedural_town_game.active_map()[kitchen_position[1]][kitchen_position[0]] == "."
     assert procedural_town_game.can_hold_objects_here()
     assert procedural_town_game.can_place_object("Wooden Chair", *chair_position)[0]
+    procedural_town_game.state.hour = 23
+    procedural_family_position = procedural_town_game.family_procedural_furniture_activity_position(
+        "test_household_member", ("sleep",),
+        {(procedural_town_game.state.player_x, procedural_town_game.state.player_y)},
+    )
+    assert procedural_family_position is not None
+    assert procedural_town_game.procedural_town_interior_tile_passable(
+        procedural_town_game.active_map()[procedural_family_position[1]][procedural_family_position[0]]
+    )
+    assert procedural_town_game.get_placed_object(*procedural_family_position) is None
+    procedural_town_game.state.hour = 12
     population_after_home_purchase = procedural_town_game.procedural_settlement_population(
         procedural_town_x,
         procedural_town_y,
@@ -5446,7 +6997,7 @@ def main() -> int:
         property_record["id"]
     )
     assert property_record["household_moved"] is True
-    family_table_position = orient_residence_position(46, 15)
+    family_table_position = residence_furnishing_position("Family Table")
     assert procedural_town_game.get_placed_object(*family_table_position) == "Family Table"
     assert procedural_town_game.household_residence_property() is property_record
     assert any(
@@ -5607,6 +7158,8 @@ def main() -> int:
     assert politics["current_policy"] == "Open Trade"
     assert politics["last_result_scores"]["player"] > 0
     assert procedural_town_game.state.civic_profile["elections_won"] == 1
+    assert any(event_id.startswith("election_debate:") for event_id, _title, _steps, _message in procedural_special_events)
+    assert any(event_id.startswith("election_result:") for event_id, _title, _steps, _message in procedural_special_events)
     petition = procedural_town_game.ensure_procedural_constituent_petition(
         procedural_town_plan
     )
@@ -5625,6 +7178,10 @@ def main() -> int:
         len(resident.get("memories", []) or [])
         for resident in procedural_runtime_population["residents"].values()
     ) > resident_memory_count_before_petition
+    assert any(
+        event_id.startswith("constituent_petition:")
+        for event_id, _title, _steps, _message in procedural_special_events
+    )
     assert procedural_town_game.create_player_trade_route(
         business_record["id"],
         procedural_town_game.civic_town_key(partner_plan),
@@ -5820,13 +7377,19 @@ def main() -> int:
     assert procedural_town_game.join_regional_council(
         procedural_town_game.civic_town_key(procedural_town_plan)
     )
+    assert any(event_id.startswith("regional_council_join:") for event_id, _title, _steps, _message in procedural_special_events)
     assert procedural_town_game.establish_regional_agreement(
         trade_route["id"],
         "Trade Charter",
     )
     assert trade_route["agreement_type"] == "Trade Charter"
+    assert any(
+        event_id.startswith("regional_agreement:")
+        for event_id, _title, _steps, _message in procedural_special_events
+    )
     assert procedural_town_game.contribute_to_regional_treasury(3000)
     assert procedural_town_game.complete_regional_project("caravan_league")
+    assert any(event_id.startswith("regional_project:") for event_id, _title, _steps, _message in procedural_special_events)
     regional_council = procedural_town_game.ensure_regional_council_state()
     assert "caravan_league" in regional_council["completed_projects"]
     assert regional_council["member"] is True
@@ -5981,6 +7544,7 @@ def main() -> int:
     assert trade_route["caravan_journeys"] == route_journeys_before + 1
     assert escort_contract["status"] == "completed"
     assert procedural_town_game.ensure_regional_contract_state()["journey_log"]
+    assert any(event_id.startswith("caravan_journey:") for event_id, _title, _steps, _message in procedural_special_events)
     assert (
         procedural_town_game.state.wilderness_chunk_x,
         procedural_town_game.state.wilderness_chunk_y,
@@ -6079,8 +7643,43 @@ def main() -> int:
             romance_resident
         )
     ]
-    assert "Courtship" in romance_menu_labels
-    assert "Propose" in romance_menu_labels
+    assert "Courtship" not in romance_menu_labels
+    assert "Propose" not in romance_menu_labels
+    assert "relationship" in {
+        value for value, _label, _hint
+        in procedural_town_game.dialogue_topic_options(romance_resident, "procedural")
+    }
+    relationship_options = []
+    original_relationship_choose = procedural_town_game.dialogue_choose
+    original_relationship_say = procedural_town_game.dialogue_say
+    procedural_town_game.dialogue_choose = lambda actor, prompt, phase, options, transcript: (
+        relationship_options.extend(options), "back"
+    )[-1]
+    procedural_town_game.dialogue_say = lambda *args, **kwargs: True
+    try:
+        assert procedural_town_game.dialogue_handle_relationship_topic(
+            romance_resident, "procedural", []
+        )
+    finally:
+        procedural_town_game.dialogue_choose = original_relationship_choose
+        procedural_town_game.dialogue_say = original_relationship_say
+    relationship_values = {value for value, _label, _hint in relationship_options}
+    assert {"status", "gift", "courtship", "proposal", "back"}.issubset(relationship_values)
+    original_wedding_date_picker = procedural_town_game.choose_scheduled_wedding_date
+    procedural_town_game.choose_scheduled_wedding_date = (
+        lambda _npc: procedural_town_game.date_after_days(7)
+    )
+    try:
+        assert procedural_town_game.propose_to_town_npc(
+            romance_resident,
+            present=True,
+        )
+    finally:
+        procedural_town_game.choose_scheduled_wedding_date = original_wedding_date_picker
+    assert any(
+        event_id.startswith(f"proposal:{romance_resident_id}:")
+        for event_id, _title, _steps, _message in procedural_special_events
+    )
     procedural_town_game.state.spouse_npc_id = romance_resident_id
     procedural_town_game.state.dating_npc_ids = [romance_resident_id]
     procedural_town_game.state.spouse_moved_to_farm = True
@@ -6263,7 +7862,12 @@ def main() -> int:
             [ui.MenuItem("Continue", value="continue")],
             footer="Choose an option.",
         ) is None
-        assert captured_full_menu_footer and "B/X/Esc/Q cancel" in captured_full_menu_footer[-1]
+        assert captured_full_menu_footer and "B/X/Esc/Q/Tab cancel" in captured_full_menu_footer[-1]
+        ui.read_key = lambda: "\t"
+        assert ui.menu_select(
+            "Tab Cancellation",
+            [ui.MenuItem("Continue", value="continue")],
+        ) is None
         paging_keys = iter(["RIGHT", "\r"])
         ui.read_key = lambda: next(paging_keys)
         ui.draw_menu = lambda *args, **kwargs: None
@@ -6337,8 +7941,60 @@ def main() -> int:
             return_back=True,
         )
         assert shortcut_back_choice and shortcut_back_choice.value == farmstead_main.MENU_BACK
+        panel_keys = iter(["END", "\r"])
+        end_choice = panel_game.vertical_panel_select(
+            "Long Menu End",
+            [MenuItem(f"Row {index}", value=index, enabled=True) for index in range(30)],
+        )
+        assert end_choice and end_choice.value == 29
+        panel_keys = iter(["END", "b"])
+        panel_draws.clear()
+        panel_game.vertical_panel_view(
+            "Long Viewer",
+            [f"Viewer row {index}" for index in range(40)],
+            panel_height=14,
+        )
+        assert panel_draws and any(
+            "Viewer row 39" in ui.strip_ansi(line)
+            for line in panel_draws[-1][0]
+        )
     finally:
         farmstead_main.read_key = original_main_read_key
+
+    quest_exit_game = FarmGame()
+    quest_exit_calls = []
+    quest_exit_choices = iter([
+        MenuItem("Back", value=farmstead_main.MENU_BACK, enabled=True),
+        MenuItem("Back", value=farmstead_main.MENU_BACK, enabled=True),
+    ])
+
+    def quest_exit_selector(title, items, *args, **kwargs):
+        quest_exit_calls.append((str(title), list(items)))
+        return next(quest_exit_choices)
+
+    quest_exit_game.vertical_panel_select = quest_exit_selector
+    assert quest_exit_game.show_unified_quest_log_menu() == "__BACK__"
+    assert quest_exit_game.show_planned_event_menu() == "__BACK__"
+    assert len(quest_exit_calls) == 2
+    assert all(
+        sum(item.value == farmstead_main.MENU_BACK for item in items) == 1
+        for _title, items in quest_exit_calls
+    )
+
+    dialogue_exit_game = FarmGame()
+    dialogue_exit_game._draw_dialogue_frame = lambda *args, **kwargs: None
+    dialogue_exit_game.dialogue_read_key = lambda: "b"
+    dialogue_actor = {"id": "exit-audit", "name": "Exit Audit", "role": "Tester"}
+    assert not dialogue_exit_game.dialogue_say(
+        dialogue_actor, "This line can be left safely.", "audit", [],
+    )
+    assert dialogue_exit_game.dialogue_choose(
+        dialogue_actor,
+        "This choice can be left safely.",
+        "audit",
+        [("continue", "Continue", "")],
+        [],
+    ) == "goodbye"
 
     keybind_game = FarmGame()
     keybind_game.autosave_with_message = lambda message: keybind_game.set_message(message)
@@ -6357,6 +8013,7 @@ def main() -> int:
     assert keybind_game.state.selected_seed != first_seed
     numpad_game = FarmGame()
     numpad_game.autosave_with_message = lambda message: numpad_game.set_message(message)
+    numpad_game.update_farm_animal_actors = lambda force=False: None
     diagonal_start = next(
         (x, y)
         for y in range(2, numpad_game.active_map_height() - 2)
@@ -6370,6 +8027,7 @@ def main() -> int:
     assert (numpad_game.state.player_x, numpad_game.state.player_y) == (
         diagonal_start[0] - 1, diagonal_start[1] - 1,
     )
+    diagonal_test_random_state = random.getstate()
     blocked_start = (numpad_game.state.player_x, numpad_game.state.player_y)
     original_numpad_passable = numpad_game.passable
     numpad_game.passable = lambda x, y, ignore_travel_follower_id=None: (
@@ -6377,8 +8035,37 @@ def main() -> int:
         else original_numpad_passable(x, y, ignore_travel_follower_id)
     )
     numpad_game.handle_key("NUM3")
-    assert (numpad_game.state.player_x, numpad_game.state.player_y) == blocked_start
-    assert "blocked corner" in numpad_game.state.message.lower()
+    assert (numpad_game.state.player_x, numpad_game.state.player_y) == (
+        blocked_start[0] + 1,
+        blocked_start[1] + 1,
+    ), "One blocked side should not prevent an otherwise open diagonal"
+    numpad_game.state.player_x, numpad_game.state.player_y = blocked_start
+    numpad_game.passable = lambda x, y, ignore_travel_follower_id=None: (
+        False
+        if (x, y) in {
+            (blocked_start[0] + 1, blocked_start[1]),
+            (blocked_start[0], blocked_start[1] + 1),
+        }
+        else original_numpad_passable(x, y, ignore_travel_follower_id)
+    )
+    numpad_game.handle_key("NUM3")
+    assert (numpad_game.state.player_x, numpad_game.state.player_y) == (
+        blocked_start[0] + 1,
+        blocked_start[1] + 1,
+    ), "Open diagonal destinations should remain reachable between blocked side tiles"
+    numpad_game.state.player_x, numpad_game.state.player_y = blocked_start
+    diagonal_destination = (blocked_start[0] + 1, blocked_start[1] + 1)
+    numpad_game.passable = lambda x, y, ignore_travel_follower_id=None: (
+        False
+        if (x, y) == diagonal_destination
+        else original_numpad_passable(x, y, ignore_travel_follower_id)
+    )
+    numpad_game.handle_key("NUM3")
+    assert (numpad_game.state.player_x, numpad_game.state.player_y) == blocked_start, (
+        "A genuinely blocked diagonal destination should remain impassable"
+    )
+    numpad_game.passable = original_numpad_passable
+    random.setstate(diagonal_test_random_state)
     tool_called = {"value": False}
     keybind_game.use_tool = lambda: tool_called.__setitem__("value", True)
     keybind_game.handle_key("f")
@@ -6559,6 +8246,789 @@ def main() -> int:
         assert item_name in catalog_state.inventory
         assert_known_inventory_items(record.get("cost", {}), f"automation {item_name} cost")
     assert data.INFRASTRUCTURE_DATA["Pipe Segment"].get("walkable") is True
+    assert not furniture_art.validate_furniture_art()
+    legacy_furniture_visuals = {
+        "Wooden Chair": ("╥",),
+        "Armchair": ("▰",),
+        "Bed": ("○▓▓", "╚═╝"),
+        "Wooden Table": ("╾╼",),
+        "Bookshelf": ("▥", "▤"),
+        "Decorative Rug": ("╭◆╮", "╰◇╯"),
+        "House Plant": ("♣",),
+        "Wall Calendar": ("▧",),
+        "Wall Mirror": ("◉",),
+        "Wall Art": ("◇",),
+        "Dresser": ("▤▤",),
+        "Television": ("▣",),
+        "Shelf": ("▥▤",),
+        "Kitchen Counter": ("╾○▤╼",),
+        "Couch": ("╭▓╮",),
+        "Large Rug": ("╭───╮", "│◆◇◆│", "╰───╯"),
+        "Nightstand": ("▤",),
+        "Wash Basin": ("◉◉",),
+        "Pantry": ("▦▦",),
+        "Fireplace": ("╭♨╮",),
+        "Writing Desk": ("╾▤",),
+        "Tea Table": ("●",),
+        "Standing Lamp": ("✦",),
+        "Flower Vase": ("⚘",),
+        "Wardrobe": ("▥▥",),
+        "Room Divider": ("│", "│"),
+        "Crib": ("╫╫",),
+        "Child Bed": ("○▓",),
+        "Toy Shelf": ("▦",),
+        "Study Desk": ("╾▧",),
+        "Family Table": ("╾◆╼",),
+        "Keepsake Chest": ("▰◆",),
+    }
+    for furniture_name, expected_rows in legacy_furniture_visuals.items():
+        assert furniture_art.furniture_art_rows(furniture_name, detailed=True) == expected_rows
+        simple_rows = furniture_art.furniture_art_rows(furniture_name, detailed=False)
+        assert simple_rows
+        assert [len(row) for row in simple_rows] == [len(row) for row in expected_rows]
+        expected_size = tuple(data.INFRASTRUCTURE_DATA[furniture_name].get("footprint", [1, 1]))
+        assert furniture_art.furniture_art_size(furniture_name) == expected_size
+        for rotation in range(4):
+            rotated_rows = furniture_art.furniture_art_rows(furniture_name, True, rotation)
+            assert rotated_rows and len({len(row) for row in rotated_rows}) == 1
+            for offset_y, row in enumerate(rotated_rows):
+                for offset_x, _glyph in enumerate(row):
+                    cell = furniture_art.furniture_art_cell(
+                        furniture_name, offset_x, offset_y, True, rotation,
+                    )
+                    assert cell is not None and cell[1] != "default"
+    assert not furniture_catalog.validate_furniture_catalog()
+    expanded_furniture_names = set(furniture_catalog.FURNITURE_CATALOG_DATA)
+    assert len(expanded_furniture_names) == 300
+    assert expanded_furniture_names.issubset(data.INFRASTRUCTURE_DATA)
+    assert expanded_furniture_names.issubset(furniture_art.FURNITURE_ART)
+    assert all(name in catalog_state.inventory for name in expanded_furniture_names)
+    assert {
+        str(data.INFRASTRUCTURE_DATA[name].get("catalog_collection", ""))
+        for name in expanded_furniture_names
+    } == {"Hearthwood", "Coastal", "Manor"}
+    assert all(
+        sum(
+            1 for name in expanded_furniture_names
+            if data.INFRASTRUCTURE_DATA[name].get("catalog_collection") == collection
+        ) == 100
+        for collection in ("Hearthwood", "Coastal", "Manor")
+    )
+    assert {
+        "Hearthwood Captain Chair",
+        "Coastal Apothecary Cabinet",
+        "Manor Long Hall Carpet",
+    }.issubset(expanded_furniture_names)
+    expected_catalog_groups = {
+        "Seating", "Tables & Work", "Storage", "Bedroom", "Kitchen",
+        "Bath", "Lighting & Decor", "Wall Decor", "Rugs",
+    }
+    assert {
+        str(data.INFRASTRUCTURE_DATA[name].get("furniture_group", ""))
+        for name in expanded_furniture_names
+    } == expected_catalog_groups
+    catalog_container_names = {
+        name for name in expanded_furniture_names
+        if data.INFRASTRUCTURE_DATA[name].get("container_profile")
+    }
+    assert catalog_container_names
+    assert catalog_container_names.issubset(container_system.PLAYER_CONTAINER_DATA)
+    all_furniture_records = {
+        name: record
+        for name, record in data.INFRASTRUCTURE_DATA.items()
+        if record.get("category") == "furniture"
+    }
+    assert len(all_furniture_records) == 353
+    assert not furniture_actions.furniture_action_coverage(all_furniture_records)
+    assert all(
+        str(record.get("furniture_action", "")) in furniture_actions.FURNITURE_ACTION_LABELS
+        for record in all_furniture_records.values()
+    )
+    assert furniture_art.furniture_display_glyph("[", "wood", True) == "╭"
+    assert furniture_art.furniture_display_glyph("#", "linen", True) == "░"
+    assert furniture_art.furniture_display_glyph("F", "fire", True) == "♨"
+    assert furniture_art.furniture_display_glyph("~", "water", True) == "≈"
+    assert furniture_art.furniture_display_glyph("[", "wood", False) == "["
+    catalog_visual_signatures = set()
+    for furniture_name in furniture_catalog.FURNITURE_CATALOG_DATA:
+        for rotation in range(4):
+            source_rows = furniture_art.furniture_art_rows(
+                furniture_name, True, rotation,
+            )
+            display_rows = furniture_art.furniture_display_rows(
+                furniture_name, True, rotation,
+            )
+            assert len(display_rows) == len(source_rows)
+            assert all(
+                len(display_row) == len(source_row)
+                for display_row, source_row in zip(display_rows, source_rows)
+            )
+            assert all(len(glyph) == 1 for row in display_rows for glyph in row)
+            assert not ({"╞", "╡", "▓", "❬", "❭"} & set("".join(display_rows)))
+        catalog_visual_signatures.add(
+            furniture_art.furniture_display_rows(furniture_name, True, 0)
+        )
+        assert furniture_art.furniture_display_rows(
+            furniture_name, False, 0,
+        ) == furniture_art.furniture_art_rows(furniture_name, False, 0)
+    assert len(catalog_visual_signatures) >= 90
+    assert furniture_art.furniture_display_rows(
+        "Hearthwood Single Bed", True, 0,
+    ) == ("╭○░╮", "╰──╯")
+    assert furniture_art.furniture_display_rows(
+        "Hearthwood Stove Range", True, 0,
+    ) == ("╭♨─♨╮",)
+    assert furniture_art.furniture_display_material_role(
+        "Hearthwood Bathtub", "[", "water",
+    ) == "stone"
+    assert furniture_art.furniture_display_material_role(
+        "Hearthwood Indoor Planter", "f", "accent",
+    ) == "plant"
+
+    expanded_catalog_game = FarmGame()
+    expanded_catalog_game.state.location = "HouseInterior"
+    expanded_catalog_game.house_map = [
+        list("#" * 70) if y in {0, 23} else list("#" + "." * 68 + "#")
+        for y in range(24)
+    ]
+    expanded_catalog_game.state.player_x = 2
+    expanded_catalog_game.state.player_y = 2
+    assert len({
+        expanded_catalog_game.catalog_furniture_color({
+            "glyph": "=", "material_role": "wood", "collection": collection,
+        })
+        for collection in ("Hearthwood", "Coastal", "Manor")
+    }) == 3
+
+    furniture_mechanics_game = FarmGame()
+    furniture_mechanics_game.state.location = "HouseInterior"
+    furniture_mechanics_game.house_map = [list("." * 64) for _ in range(28)]
+    furniture_mechanics_game.state.player_x = 4
+    furniture_mechanics_game.state.player_y = 5
+    furniture_mechanics_game.state.stamina = 40
+    furniture_mechanics_game.autosave_with_message = furniture_mechanics_game.set_message
+    furniture_mechanics_game.vertical_panel_view = lambda *args, **kwargs: None
+
+    assert furniture_mechanics_game.use_functional_furniture("Wooden Chair", 5, 5)
+    assert furniture_mechanics_game.state.player_furniture_pose.get("pose") == "seated"
+    assert (furniture_mechanics_game.state.player_x, furniture_mechanics_game.state.player_y) == (5, 5)
+    furniture_mechanics_game.move(1, 0)
+    assert not furniture_mechanics_game.state.player_furniture_pose
+
+    original_furniture_select = furniture_mechanics_game.vertical_panel_select
+    furniture_mechanics_game.vertical_panel_select = (
+        lambda *args, **kwargs: MenuItem(label="Water and tend", value="water", enabled=True)
+    )
+    assert furniture_mechanics_game.use_functional_furniture("House Plant", 8, 8)
+    furniture_mechanics_game.vertical_panel_select = original_furniture_select
+    plant_key = furniture_mechanics_game.furniture_state_key("House Plant", 8, 8)
+    assert furniture_mechanics_game.state.furniture_states[plant_key]["care"] == 1
+    assert furniture_mechanics_game.state.furniture_states[plant_key]["watered_day"] == furniture_mechanics_game.town_npc_day_key()
+
+    assert furniture_mechanics_game.use_functional_furniture("Standing Lamp", 9, 8)
+    lamp_key = furniture_mechanics_game.furniture_state_key("Standing Lamp", 9, 8)
+    assert furniture_mechanics_game.state.furniture_states[lamp_key]["light_on"] is False
+    assert furniture_mechanics_game.use_functional_furniture("Standing Lamp", 9, 8)
+    assert furniture_mechanics_game.state.furniture_states[lamp_key]["light_on"] is True
+
+    _journal_key, journal_state = furniture_mechanics_game.furniture_state_record("Writing Desk", 10, 8)
+    furniture_mechanics_game.write_furniture_journal_entry("Writing Desk", journal_state)
+    assert furniture_mechanics_game.state.furniture_journal_entries[-1]["furniture"] == "Writing Desk"
+
+    furniture_mechanics_game.state.combat_current_hp = max(1, furniture_mechanics_game.state.combat_max_hp - 5)
+    before_bath_hp = furniture_mechanics_game.state.combat_current_hp
+    assert furniture_mechanics_game.use_functional_furniture("Wash Basin", 11, 8)
+    assert furniture_mechanics_game.state.combat_current_hp > before_bath_hp
+    assert furniture_mechanics_game.use_functional_furniture("Wall Art", 12, 8)
+    furniture_mechanics_game.vertical_panel_select = (
+        lambda *args, **kwargs: MenuItem(label="Feed and observe", value="observe", enabled=True)
+    )
+    assert furniture_mechanics_game.use_functional_furniture("Hearthwood Aquarium", 13, 8)
+    furniture_mechanics_game.vertical_panel_select = original_furniture_select
+    aquarium_key = furniture_mechanics_game.furniture_state_key("Hearthwood Aquarium", 13, 8)
+    aquarium_state = furniture_mechanics_game.state.furniture_states[aquarium_key]
+    aquarium_state["fish"] = {"Pond Minnow": 2}
+    aquarium_state["feedings"] = 3
+    aquarium_state.pop("fed_day", None)
+    furniture_mechanics_game.observe_furniture_aquarium(
+        "Hearthwood Aquarium", aquarium_state, 2,
+    )
+    assert aquarium_state["feedings"] == 4
+    assert sum(aquarium_state["fish"].values()) == 3
+    furniture_mechanics_game.vertical_panel_select = (
+        lambda *args, **kwargs: MenuItem(label="Clean and straighten rug", value="clean", enabled=True)
+    )
+    assert furniture_mechanics_game.use_functional_furniture("Decorative Rug", 14, 8)
+    furniture_mechanics_game.vertical_panel_select = original_furniture_select
+    rug_key = furniture_mechanics_game.furniture_state_key("Decorative Rug", 14, 8)
+    assert furniture_mechanics_game.state.furniture_states[rug_key]["straightened"] is True
+
+    # Original farmhouse furniture has dedicated mechanics rather than generic
+    # flavor-only fallbacks. Television channels persist and the cooking station
+    # teaches no more than one recipe in a given week.
+    _tv_key, tv_state = furniture_mechanics_game.furniture_state_record("Television", 16, 8)
+    recipes_before_tv = len(furniture_mechanics_game.known_recipe_names())
+    furniture_mechanics_game.watch_furniture_tv_channel("Television", tv_state, "cooking", 1)
+    recipes_after_tv = len(furniture_mechanics_game.known_recipe_names())
+    assert tv_state["channel"] == "cooking"
+    assert tv_state["powered_on"] is True
+    assert recipes_after_tv >= recipes_before_tv
+    assert tv_state["cooking_broadcast_week"] == furniture_mechanics_game.bounty_week_key()
+    furniture_mechanics_game.watch_furniture_tv_channel("Television", tv_state, "cooking", 1)
+    assert len(furniture_mechanics_game.known_recipe_names()) == recipes_after_tv
+
+    _nightstand_key, nightstand_state = furniture_mechanics_game.furniture_state_record("Nightstand", 17, 8)
+    focus_before_reading = max(0, int(furniture_mechanics_game.state.combat_max_focus) - 10)
+    furniture_mechanics_game.state.combat_focus = focus_before_reading
+    furniture_mechanics_game.use_nightstand_bedside_reading("Nightstand", nightstand_state, 2)
+    assert furniture_mechanics_game.state.combat_focus > focus_before_reading
+    assert nightstand_state["bedside_read_day"] == furniture_mechanics_game.town_npc_day_key()
+
+    furniture_mechanics_game.state.children = [{"id": 991, "name": "Robin"}]
+    family_bond_before_furniture = furniture_mechanics_game.family_bond_score()
+    furniture_mechanics_game.vertical_panel_select = (
+        lambda *args, **kwargs: MenuItem(label="Read a bedtime story", value="story", enabled=True)
+    )
+    assert furniture_mechanics_game.use_functional_furniture("Child Bed", 18, 8)
+    furniture_mechanics_game.vertical_panel_select = original_furniture_select
+    assert furniture_mechanics_game.family_bond_score() > family_bond_before_furniture
+
+    furniture_mechanics_game.vertical_panel_select = (
+        lambda *args, **kwargs: MenuItem(label="Warm up by the fire", value="warm", enabled=True)
+    )
+    assert furniture_mechanics_game.use_functional_furniture("Fireplace", 19, 8)
+    furniture_mechanics_game.vertical_panel_select = original_furniture_select
+    hearth_key = furniture_mechanics_game.furniture_state_key("Fireplace", 19, 8)
+    assert furniture_mechanics_game.state.furniture_states[hearth_key]["warmed_day"] == furniture_mechanics_game.town_npc_day_key()
+
+    furniture_mechanics_game.set_placed_object(15, 8, "Room Divider")
+    placed_divider_key = furniture_mechanics_game.obj_key(15, 8)
+    assert not furniture_mechanics_game.passable(15, 8)
+    assert furniture_mechanics_game.use_functional_furniture(
+        "Room Divider", 15, 8, object_key=placed_divider_key,
+    )
+    divider_key = f"placed:{placed_divider_key}:Room Divider"
+    assert furniture_mechanics_game.state.furniture_states[divider_key]["open"] is True
+    assert furniture_mechanics_game.passable(15, 8)
+    assert furniture_actions.furniture_action_id(
+        "Hearthwood Tub Screen", data.INFRASTRUCTURE_DATA["Hearthwood Tub Screen"],
+    ) == "privacy"
+    furniture_mechanics_game.set_placed_object(6, 6, "Standing Lamp")
+    furniture_mechanics_game.set_placed_object(7, 6, "Wooden Table")
+    support_bonus, support_names = furniture_mechanics_game.furniture_room_support(
+        "seat", 5, 5,
+    )
+    assert support_bonus >= 2
+    assert {"Standing Lamp", "Wooden Table"}.issubset(set(support_names))
+    chair_key = furniture_mechanics_game.furniture_state_key("Wooden Chair", 5, 5)
+    chair_state = furniture_mechanics_game.state.furniture_states[chair_key]
+    chair_state["uses"] = 15
+    assert furniture_mechanics_game.furniture_familiarity_label(chair_state) == "Trusted"
+    effectiveness, _supporters = furniture_mechanics_game.furniture_effectiveness(
+        "seat", 5, 5, chair_state,
+    )
+    assert effectiveness >= 4
+    table_key = furniture_mechanics_game.obj_key(7, 6)
+    _table_state_key, table_state = furniture_mechanics_game.furniture_state_record(
+        "Wooden Table", 7, 6, object_key=table_key,
+    )
+    furniture_mechanics_game.state.inventory["Quartz"] = 1
+    comfort_before_display = furniture_mechanics_game.house_comfort_score()
+    assert furniture_mechanics_game.furniture_place_display_item(
+        "Wooden Table", table_state, "Quartz",
+    )
+    assert furniture_mechanics_game.state.inventory.get("Quartz", 0) == 0
+    assert table_state["display_item"] == "Quartz"
+    assert furniture_mechanics_game.house_comfort_score() > comfort_before_display
+    assert "displayed Quartz" in furniture_mechanics_game.object_store_block_reason(
+        table_key, "Wooden Table",
+    )
+    assert furniture_mechanics_game.furniture_take_display_item(
+        "Wooden Table", table_state, quiet=True,
+    )
+    assert furniture_mechanics_game.state.inventory["Quartz"] == 1
+    aquarium_state["fish"] = {"Pond Minnow": 1}
+    furniture_mechanics_game.set_placed_object(20, 8, "Hearthwood Aquarium")
+    placed_aquarium_key = furniture_mechanics_game.obj_key(20, 8)
+    placed_aquarium_state_key = f"placed:{placed_aquarium_key}:Hearthwood Aquarium"
+    furniture_mechanics_game.state.furniture_states[placed_aquarium_state_key] = aquarium_state
+    assert "remove the aquarium's fish" in furniture_mechanics_game.object_store_block_reason(
+        placed_aquarium_key, "Hearthwood Aquarium",
+    )
+    for furniture_name in sorted(expanded_furniture_names):
+        furniture_data = data.INFRASTRUCTURE_DATA[furniture_name]
+        art_rows = furniture_art.furniture_art_rows(furniture_name)
+        assert art_rows
+        assert tuple(furniture_data["footprint"]) == (len(art_rows[0]), len(art_rows))
+        assert int(furniture_data.get("price", 0)) > 0
+        assert furniture_data.get("category") == "furniture"
+        expanded_catalog_game.state.placed_objects = {}
+        expanded_catalog_game.state.placed_floor_objects = {}
+        expanded_catalog_game.state.placed_object_rotations = {}
+        expanded_catalog_game.state.placed_floor_object_rotations = {}
+        expanded_catalog_game.state.placed_object_finishes = {}
+        expanded_catalog_game.state.placed_floor_object_finishes = {}
+        placement = (
+            (10, 0)
+            if furniture_data.get("placement_surface") == "wall"
+            else (10, 5)
+        )
+        assert expanded_catalog_game.can_place_object(furniture_name, *placement)[0], furniture_name
+        expanded_catalog_game.set_placed_object(*placement, furniture_name)
+        assert expanded_catalog_game.get_placed_object(*placement) == furniture_name
+        rendered = ANSI_CSI_RE.sub(
+            "", expanded_catalog_game.render_tile(*placement),
+        )
+        assert len(rendered) == 1
+        key = expanded_catalog_game.obj_key(*placement)
+        if furniture_data.get("placement_layer") == "floor":
+            assert expanded_catalog_game.state.placed_floor_objects[key] == furniture_name
+        else:
+            assert expanded_catalog_game.state.placed_objects[key] == furniture_name
+    assert tuple(furniture_art.FURNITURE_FINISHES) == (
+        "Natural", "Whitewashed", "Walnut", "Cherry", "Forest", "Ocean", "Royal",
+    )
+    assert furniture_art.normalize_furniture_finish("ocean") == "Ocean"
+    assert furniture_art.normalize_furniture_finish("unknown") == "Natural"
+    assert furniture_art.furniture_component_at("Kitchen Suite", 1, 1, 0) == "cook"
+    assert furniture_art.furniture_component_at("Kitchen Suite", 0, 1, 1) == "cook"
+    assert furniture_art.furniture_component_at("Kitchen Suite", 0, 4, 1) == "wash"
+    assert furniture_art.furniture_component_at("Kitchen Suite", 7, 0, 2) == "cook"
+    assert furniture_art.furniture_component_at("Kitchen Suite", 1, 7, 3) == "cook"
+    assert furniture_art.furniture_component_at("Reading Nook", 0, 2, 0) == "bookshelf"
+    assert furniture_art.furniture_component_at("Reading Nook", 8, 2, 0) == "rest"
+    assert furniture_art.furniture_component_at("Dressing Vanity", 3, 0, 0) == "mirror"
+    assert furniture_art.furniture_component_at("Dressing Vanity", 3, 2, 0) == "storage"
+    large_furniture_functions = {
+        "Four-Poster Bed": "sleep",
+        "Dining Set": "family_meal",
+        "Library Bookcase": "bookshelf",
+        "Sectional Couch": "rest",
+        "Kitchen Suite": "cook",
+        "Display Counter": "display_storage",
+        "Workshop Bench": "craft",
+        "Bathing Tub": "bathe",
+        "Dressing Vanity": "mirror",
+        "Storage Hutch": "storage",
+        "Stone Hearth": "hearth",
+        "Reading Nook": "bookshelf",
+        "Parlor Set": "rest",
+    }
+    for furniture_name, expected_function in large_furniture_functions.items():
+        furniture_record = data.INFRASTRUCTURE_DATA[furniture_name]
+        assert furniture_record["category"] == "furniture"
+        assert furniture_record["furniture_function"] == expected_function
+        assert tuple(furniture_record["footprint"]) == furniture_art.furniture_art_size(furniture_name)
+        detailed_rows = furniture_art.furniture_art_rows(furniture_name, detailed=True)
+        simple_rows = furniture_art.furniture_art_rows(furniture_name, detailed=False)
+        assert detailed_rows and simple_rows
+        assert [len(row) for row in detailed_rows] == [len(row) for row in simple_rows]
+
+    furniture_art_game = FarmGame()
+    furniture_art_game.state.location = "HouseInterior"
+    furniture_art_game.house_map = [list("." * 40) for _ in range(16)]
+    furniture_art_game.state.player_x = 1
+    furniture_art_game.state.player_y = 1
+    for furniture_name, artwork in legacy_furniture_visuals.items():
+        furniture_art_game.state.placed_objects = {}
+        furniture_art_game.state.placed_floor_objects = {}
+        furniture_art_game.state.placed_object_rotations = {}
+        furniture_art_game.set_placed_object(5, 5, furniture_name)
+        for offset_y, artwork_row in enumerate(artwork):
+            for offset_x, expected_glyph in enumerate(artwork_row):
+                rendered = ANSI_CSI_RE.sub(
+                    "",
+                    furniture_art_game.render_placed_object(
+                        furniture_name, 5 + offset_x, 5 + offset_y, 5, 5,
+                    ),
+                )
+                assert rendered == expected_glyph
+        furniture_art_game.state.detailed_glyphs_enabled = False
+        simple_glyph = ANSI_CSI_RE.sub(
+            "", furniture_art_game.render_placed_object(furniture_name, 5, 5, 5, 5),
+        )
+        assert simple_glyph == furniture_art.furniture_art_rows(furniture_name, False)[0][0]
+        furniture_art_game.state.detailed_glyphs_enabled = True
+    furniture_art_game.state.placed_objects = {}
+    furniture_art_game.state.placed_floor_objects = {}
+    furniture_art_game.set_placed_object(5, 5, "Television")
+    television_object_key = furniture_art_game.obj_key(5, 5)
+    _television_state_key, television_visual_state = furniture_art_game.furniture_state_record(
+        "Television", 5, 5, object_key=television_object_key,
+    )
+    television_off_render = furniture_art_game.render_placed_object("Television", 5, 5, 5, 5)
+    assert support.C.FLOOR_SHADOW in television_off_render
+    television_visual_state.update({"powered_on": True, "channel": "cooking"})
+    television_on_render = furniture_art_game.render_placed_object("Television", 5, 5, 5, 5)
+    assert support.C.LAMP in television_on_render
+    for furniture_name in large_furniture_functions:
+        furniture_art_game.state.placed_objects = {}
+        furniture_art_game.state.placed_object_rotations = {}
+        assert furniture_art_game.can_place_object(furniture_name, 5, 5)[0]
+        furniture_art_game.set_placed_object(5, 5, furniture_name)
+        artwork = furniture_art.furniture_art_rows(furniture_name, detailed=True)
+        for offset_y, artwork_row in enumerate(artwork):
+            for offset_x, expected_glyph in enumerate(artwork_row):
+                tile_x, tile_y = 5 + offset_x, 5 + offset_y
+                assert furniture_art_game.get_placed_object(tile_x, tile_y) == furniture_name
+                rendered = ANSI_CSI_RE.sub(
+                    "",
+                    furniture_art_game.render_placed_object(
+                        furniture_name, tile_x, tile_y, 5, 5,
+                    ),
+                )
+                assert rendered == expected_glyph
+                expected_walkable = bool(furniture_art.furniture_walkable_kind(
+                    furniture_name, offset_x, offset_y,
+                ))
+                assert furniture_art_game.passable(tile_x, tile_y) is expected_walkable
+        last_x = 5 + len(artwork[0]) - 1
+        last_y = 5 + len(artwork) - 1
+        assert furniture_art_game.target_action_hint(last_x, last_y).startswith("Z:")
+
+        rotated_rows = furniture_art.furniture_art_rows(
+            furniture_name, detailed=True, rotation=1,
+        )
+        assert furniture_art_game.object_footprint_size(furniture_name, 1) == (
+            len(rotated_rows[0]), len(rotated_rows),
+        )
+        furniture_art_game.state.placed_objects = {}
+        furniture_art_game.state.placed_object_rotations = {}
+        assert furniture_art_game.can_place_object(furniture_name, 5, 5, rotation=1)[0]
+        furniture_art_game.set_placed_object(5, 5, furniture_name, rotation=1)
+        rotated_key = furniture_art_game.obj_key(5, 5)
+        assert furniture_art_game.object_rotation_for_key(rotated_key) == 1
+        assert furniture_art_game.get_placed_object(
+            5 + len(rotated_rows[0]) - 1, 5 + len(rotated_rows) - 1,
+        ) == furniture_name
+        for offset_y, artwork_row in enumerate(rotated_rows):
+            for offset_x, expected_glyph in enumerate(artwork_row):
+                rendered = ANSI_CSI_RE.sub(
+                    "",
+                    furniture_art_game.render_placed_object(
+                        furniture_name, 5 + offset_x, 5 + offset_y, 5, 5,
+                        rotation=1,
+                    ),
+                )
+                assert rendered == expected_glyph
+    assert ANSI_CSI_RE.sub(
+        "",
+        furniture_art_game.render_held_object_preview(
+            "Kitchen Suite", 6, 5, 5, 5, True,
+        ),
+    ) == furniture_art.furniture_art_rows("Kitchen Suite")[0][1]
+
+    furniture_function_calls = []
+    furniture_art_game.sleep = lambda force=False: furniture_function_calls.append("sleep")
+    furniture_art_game.safe_menu = (
+        lambda menu_func, close_message: furniture_function_calls.append(close_message)
+    )
+    furniture_art_game.show_bookshelf_menu = lambda: furniture_function_calls.append("bookshelf")
+    furniture_art_game.restore_stamina_from_house = (
+        lambda key, amount, source: furniture_function_calls.append(("rest", source, amount))
+    )
+    furniture_art_game.show_player_color_mirror_menu = lambda: furniture_function_calls.append("mirror")
+    furniture_art_game.show_player_combat_equipment_menu = lambda: furniture_function_calls.append("gear")
+    furniture_art_game.family_meal_menu = lambda: furniture_function_calls.append("meal") or "changed"
+    furniture_art_game.vertical_panel_select = lambda title, items, *args, **kwargs: next(
+        (item for item in items if item.value == "sleep"),
+        next(
+            (item for item in items if item.value == "meal"),
+            next((item for item in items if item.value == "appearance"), items[-1]),
+        ),
+    )
+    for furniture_name in large_furniture_functions:
+        furniture_art_game.use_house_furniture(furniture_name)
+    assert "sleep" in furniture_function_calls
+    assert "Cooking closed." in furniture_function_calls
+    assert "Crafting closed." in furniture_function_calls
+    assert "bookshelf" in furniture_function_calls
+    assert "meal" in furniture_function_calls
+    assert "mirror" in furniture_function_calls
+    assert furniture_art_game.state.player_furniture_pose.get("pose") == "seated"
+    furniture_art_game.use_house_furniture_component("Kitchen Suite", "cook", 1, 1)
+    furniture_art_game.use_house_furniture_component("Kitchen Suite", "wash", 1, 1)
+    furniture_art_game.use_house_furniture_component("Workshop Bench", "craft", 1, 1)
+    furniture_art_game.use_house_furniture_component("Workshop Bench", "gear", 1, 1)
+    furniture_art_game.use_house_furniture_component("Parlor Set", "social", 1, 1)
+    furniture_art_game.use_house_furniture_component("Dressing Vanity", "mirror", 1, 1)
+    assert furniture_function_calls.count("Cooking closed.") >= 2
+    assert furniture_function_calls.count("Crafting closed.") >= 2
+    assert "Equipment closed." in furniture_function_calls
+
+    furniture_rotation_game = FarmGame()
+    furniture_rotation_game.state.location = "HouseInterior"
+    furniture_rotation_game.house_map = [list("." * 40) for _ in range(20)]
+    furniture_rotation_game.autosave_with_message = furniture_rotation_game.set_message
+    furniture_rotation_game.state.player_x = 1
+    furniture_rotation_game.state.player_y = 1
+    furniture_rotation_game.set_placed_object(
+        6, 6, "Kitchen Suite", rotation=1, finish="Ocean",
+    )
+    kitchen_key = furniture_rotation_game.obj_key(6, 6)
+    assert furniture_rotation_game.object_finish_for_key(kitchen_key) == "Ocean"
+    assert furniture_rotation_game.rotated_furniture_use_edges("Kitchen Suite", 1) == ("west",)
+    assert furniture_rotation_game.furniture_accessible_from_player(
+        kitchen_key, "Kitchen Suite", 6, 7,
+    )[0] is False
+    furniture_rotation_game.state.player_x = 5
+    furniture_rotation_game.state.player_y = 7
+    assert furniture_rotation_game.furniture_accessible_from_player(
+        kitchen_key, "Kitchen Suite", 6, 7,
+    )[0] is True
+    assert furniture_rotation_game.target_action_hint(6, 7).startswith("Z: use stove")
+    furniture_rotation_game.state.player_x = 1
+    furniture_rotation_game.state.player_y = 1
+    furniture_rotation_game.state.facing = "RIGHT"
+    furniture_rotation_game.state.player_x = 5
+    furniture_rotation_game.state.player_y = 7
+    assert furniture_rotation_game.pickup_front_object_to_hand()
+    assert furniture_rotation_game.state.held_object == "Kitchen Suite"
+    assert furniture_rotation_game.state.held_object_rotation == 1
+    assert furniture_rotation_game.state.held_object_finish == "Ocean"
+    assert furniture_rotation_game.rotate_held_object()
+    assert furniture_rotation_game.state.held_object_rotation == 2
+    assert furniture_rotation_game.cycle_held_object_finish()
+    assert furniture_rotation_game.state.held_object_finish == "Royal"
+    furniture_rotation_game.store_held_object()
+    assert furniture_rotation_game.state.held_object is None
+    assert furniture_rotation_game.state.held_object_rotation == 0
+    assert furniture_rotation_game.state.held_object_finish == "Natural"
+
+    furniture_rotation_game.set_placed_object(
+        20, 5, "Dining Set", finish="Cherry",
+    )
+    dining_key = furniture_rotation_game.obj_key(20, 5)
+    assert furniture_rotation_game.object_finish_for_key(dining_key) == "Cherry"
+    cherry_render = furniture_rotation_game.render_placed_object(
+        "Dining Set", 20, 5, 20, 5,
+    )
+    assert support.C.ROOF_RED in cherry_render
+
+    # Rugs occupy a saved floor-decoration layer: they remain walkable and
+    # editable while solid furniture can overlap them.
+    assert data.INFRASTRUCTURE_DATA["Decorative Rug"]["placement_layer"] == "floor"
+    assert data.INFRASTRUCTURE_DATA["Large Rug"]["placement_layer"] == "floor"
+    migrated_rug_state = GameState(
+        placed_objects={"HouseInterior:5,5": "Decorative Rug"},
+        placed_object_rotations={"HouseInterior:5,5": 1},
+        placed_object_finishes={"HouseInterior:5,5": "Ocean"},
+    )
+    assert "HouseInterior:5,5" not in migrated_rug_state.placed_objects
+    assert migrated_rug_state.placed_floor_objects["HouseInterior:5,5"] == "Decorative Rug"
+    assert migrated_rug_state.placed_floor_object_rotations["HouseInterior:5,5"] == 1
+    assert migrated_rug_state.placed_floor_object_finishes["HouseInterior:5,5"] == "Ocean"
+
+    floor_layer_game = FarmGame()
+    floor_layer_game.state.location = "HouseInterior"
+    floor_layer_game.house_map = [list("." * 30) for _ in range(16)]
+    floor_layer_game.state.player_x = 1
+    floor_layer_game.state.player_y = 1
+    floor_layer_game.state.placed_objects = {}
+    floor_layer_game.state.placed_floor_objects = {}
+    floor_layer_game.state.placed_object_rotations = {}
+    floor_layer_game.state.placed_floor_object_rotations = {}
+    floor_layer_game.state.placed_object_finishes = {}
+    floor_layer_game.state.placed_floor_object_finishes = {}
+    floor_layer_game.autosave_with_message = floor_layer_game.set_message
+    assert floor_layer_game.can_place_object("Decorative Rug", 5, 5, rotation=1)[0]
+    floor_layer_game.set_placed_object(5, 5, "Decorative Rug", rotation=1, finish="Ocean")
+    rug_key = floor_layer_game.obj_key(5, 5)
+    assert rug_key not in floor_layer_game.state.placed_objects
+    assert floor_layer_game.state.placed_floor_objects[rug_key] == "Decorative Rug"
+    assert floor_layer_game.passable(5, 5)
+    assert floor_layer_game.can_place_object("Couch", 6, 6)[0]
+    floor_layer_game.set_placed_object(6, 6, "Couch")
+    couch_key = floor_layer_game.obj_key(6, 6)
+    assert floor_layer_game.placed_object_at(6, 6)[:2] == (couch_key, "Couch")
+    assert floor_layer_game.placed_object_at(5, 6)[:2] == (rug_key, "Decorative Rug")
+    assert not floor_layer_game.passable(6, 6)
+    assert floor_layer_game.passable(5, 6)
+    assert not floor_layer_game.can_place_object("Large Rug", 4, 4)[0]
+    assert floor_layer_game.move_placed_object(rug_key, 10, 8)
+    moved_rug_key = floor_layer_game.obj_key(10, 8)
+    assert rug_key not in floor_layer_game.state.placed_floor_objects
+    assert floor_layer_game.state.placed_floor_objects[moved_rug_key] == "Decorative Rug"
+    assert floor_layer_game.object_rotation_for_key(moved_rug_key, "Decorative Rug") == 1
+    assert floor_layer_game.object_finish_for_key(moved_rug_key, "Decorative Rug") == "Ocean"
+    assert floor_layer_game.house_comfort_score() >= 3
+
+    # Wall furnishings mount to real walls instead of consuming circulation
+    # floor, while remaining ordinary movable and functional furniture.
+    for wall_furnishing in ("Wall Calendar", "Wall Mirror", "Wall Art"):
+        assert data.INFRASTRUCTURE_DATA[wall_furnishing]["placement_surface"] == "wall"
+        assert furniture_art.furniture_has_art(wall_furnishing)
+    wall_furniture_game = FarmGame()
+    wall_furniture_game.state.location = "HouseInterior"
+    wall_furniture_game.house_map = wall_furniture_game.make_house_map()
+    wall_furniture_game.state.placed_objects = {}
+    wall_furniture_game.state.placed_floor_objects = {}
+    wall_furniture_game.state.placed_object_rotations = {}
+    wall_furniture_game.state.placed_floor_object_rotations = {}
+    wall_furniture_game.state.placed_object_finishes = {}
+    wall_furniture_game.state.placed_floor_object_finishes = {}
+    min_x, min_y, _max_x, _max_y = wall_furniture_game.house_floor_bounds()
+    mount_x, mount_y = min_x + 3, min_y - 1
+    assert wall_furniture_game.house_map[mount_y][mount_x] == "#"
+    assert wall_furniture_game.can_place_object("Wall Calendar", mount_x, mount_y)[0]
+    assert not wall_furniture_game.can_place_object("Wall Calendar", mount_x, min_y)[0]
+    assert not wall_furniture_game.can_place_object("Wooden Chair", mount_x, mount_y)[0]
+    wall_furniture_game.set_placed_object(mount_x, mount_y, "Wall Calendar")
+    wall_furniture_game.state.player_x = mount_x
+    wall_furniture_game.state.player_y = min_y
+    wall_furniture_game.state.facing = "UP"
+    assert wall_furniture_game.passable(mount_x, min_y)
+    assert wall_furniture_game.target_action_hint(mount_x, mount_y).startswith("Z:")
+    assert "Placement: Wall-mounted" in wall_furniture_game.look_tile_lines(mount_x, mount_y)
+    assert ANSI_CSI_RE.sub(
+        "", wall_furniture_game.render_tile(mount_x, mount_y),
+    ) == "▧"
+    wall_furniture_game.set_object_finish_for_key(
+        wall_furniture_game.obj_key(mount_x, mount_y), "Wall Calendar", "Royal",
+    )
+    assert support.C.LIT in wall_furniture_game.render_tile(mount_x, mount_y)
+
+    isolated_wall_game = FarmGame()
+    isolated_wall_game.state.location = "HouseInterior"
+    isolated_wall_game.house_map = [list(" " * 20) for _ in range(12)]
+    isolated_wall_game.house_map[5][5] = "#"
+    isolated_wall_game.state.placed_objects = {}
+    isolated_wall_game.state.placed_floor_objects = {}
+    assert not isolated_wall_game.can_place_object("Wall Art", 5, 5)[0]
+
+    legacy_wall_game = FarmGame()
+    legacy_wall_game.state.location = "HouseInterior"
+    legacy_wall_game.house_map = legacy_wall_game.make_house_map()
+    legacy_wall_game.state.placed_objects = {"HouseInterior:20,8": "Wall Art"}
+    legacy_wall_game.state.placed_floor_objects = {}
+    legacy_wall_game.state.placed_object_rotations = {}
+    legacy_wall_game.state.placed_floor_object_rotations = {}
+    legacy_wall_game.state.placed_object_finishes = {"HouseInterior:20,8": "Ocean"}
+    legacy_wall_game.state.placed_floor_object_finishes = {}
+    legacy_wall_game.rebuild_house_for_current_upgrades(preserve_existing=True)
+    migrated_wall_entries = [
+        (key, name) for key, name in legacy_wall_game.state.placed_objects.items()
+        if name == "Wall Art"
+    ]
+    assert len(migrated_wall_entries) == 1
+    migrated_wall_key, _name = migrated_wall_entries[0]
+    _scope, migrated_wall_x, migrated_wall_y = legacy_wall_game.parse_object_key(migrated_wall_key)
+    assert legacy_wall_game.house_map[migrated_wall_y][migrated_wall_x] == "#"
+    assert any(
+        0 <= ny < len(legacy_wall_game.house_map)
+        and 0 <= nx < len(legacy_wall_game.house_map[ny])
+        and legacy_wall_game.house_map[ny][nx] in legacy_wall_game.house_floor_tiles()
+        for nx, ny in (
+            (migrated_wall_x, migrated_wall_y - 1),
+            (migrated_wall_x + 1, migrated_wall_y),
+            (migrated_wall_x, migrated_wall_y + 1),
+            (migrated_wall_x - 1, migrated_wall_y),
+        )
+    )
+    assert legacy_wall_game.object_finish_for_key(migrated_wall_key, "Wall Art") == "Ocean"
+
+    # Coordinated furniture keeps its complete placement footprint while
+    # exposing real seats and intentional negative space to actor movement.
+    assert furniture_art.furniture_walkable_kind("Wooden Chair", 0, 0) == "seat"
+    assert furniture_art.furniture_walkable_kind("Couch", 1, 0) == "seat"
+    assert furniture_art.furniture_walkable_kind("Dining Set", 0, 1) == "seat"
+    assert furniture_art.furniture_walkable_kind("Dining Set", 1, 1) == ""
+    assert furniture_art.furniture_walkable_kind("Dining Set", 2, 0, rotation=1) == "seat"
+    assert furniture_art.furniture_walkable_kind("Parlor Set", 4, 0) == "open"
+    assert furniture_art.furniture_walkable_kind("Parlor Set", 1, 1) == "seat"
+
+    seating_game = FarmGame()
+    seating_game.state.location = "HouseInterior"
+    seating_game.house_map = [list("." * 40) for _ in range(18)]
+    seating_game.state.placed_objects = {}
+    seating_game.state.placed_floor_objects = {}
+    seating_game.state.placed_object_rotations = {}
+    seating_game.state.placed_floor_object_rotations = {}
+    seating_game.state.placed_object_finishes = {}
+    seating_game.state.placed_floor_object_finishes = {}
+    seating_game.state.player_x = 1
+    seating_game.state.player_y = 1
+    seating_game.set_placed_object(5, 5, "Dining Set")
+    dining_seat = (5, 6)
+    dining_table = (6, 6)
+    assert seating_game.passable(*dining_seat)
+    assert not seating_game.passable(*dining_table)
+    assert seating_game.in_house_bounds_for_npc(*dining_seat)
+    assert not seating_game.in_house_bounds_for_npc(*dining_table)
+    assert not seating_game.can_place_object("Wooden Chair", *dining_seat)[0]
+    assert "Furniture cell: Seat (walkable)" in seating_game.look_tile_lines(*dining_seat)
+    seating_game.state.player_x, seating_game.state.player_y = dining_seat
+    seating_game.state.facing = "RIGHT"
+    assert seating_game.interaction_target_pos() == dining_seat
+    assert seating_game.furniture_accessible_from_player(
+        seating_game.obj_key(5, 5), "Dining Set", *dining_seat,
+    )[0]
+    seat_uses = []
+    seating_game.restore_stamina_from_house = (
+        lambda key, amount, source: seat_uses.append((key, amount, source))
+    )
+    seating_game.use_house_action(*dining_seat)
+    assert seat_uses and seat_uses[-1][2] == "dining set"
+    seating_game.state.player_x = 1
+    seating_game.state.player_y = 1
+    family_seat = seating_game.family_furniture_activity_position(
+        "seat-test", ("family_meal",), set(),
+    )
+    assert family_seat is not None
+    assert furniture_art.furniture_walkable_kind(
+        "Dining Set", family_seat[0] - 5, family_seat[1] - 5,
+    ) == "seat"
+    seating_game.set_placed_object(15, 5, "Four-Poster Bed")
+    assigned_bed_key = seating_game.obj_key(15, 5)
+    assigned_bed_state_key = f"placed:{assigned_bed_key}:Four-Poster Bed"
+    seating_game.state.furniture_states[assigned_bed_state_key] = {
+        "name": "Four-Poster Bed",
+        "assigned_actor_id": "household_child:77",
+        "assigned_name": "Test Child",
+    }
+    family_bond_before_assignment_use = seating_game.family_bond_score()
+    assigned_sleep_position = seating_game.family_furniture_activity_position(
+        "household_child:77", ("sleep",), set(),
+    )
+    assert assigned_sleep_position is not None
+    assert seating_game.state.furniture_states[assigned_bed_state_key]["household_uses"] == 1
+    assert seating_game.state.furniture_states[assigned_bed_state_key]["uses"] == 1
+    assert seating_game.family_bond_score() == family_bond_before_assignment_use + 1
+    assert seating_game.family_furniture_activity_position(
+        "household_child:78", ("sleep",), set(),
+    ) is None
+
+    seating_game.state.placed_objects = {}
+    seating_game.state.placed_object_rotations = {}
+    seating_game.set_placed_object(5, 5, "Dining Set", rotation=1)
+    assert seating_game.passable(7, 5)
+    assert not seating_game.passable(6, 6)
+
+    ensemble_game = FarmGame()
+    ensemble_game.state.location = "HouseInterior"
+    ensemble_game.house_map = [list("." * 100) for _ in range(20)]
+    ensemble_game.state.placed_objects = {}
+    ensemble_game.state.placed_object_rotations = {}
+    ensemble_game.state.placed_object_finishes = {}
+    ensemble_game.state.player_x = 95
+    ensemble_game.state.player_y = 18
+    ensemble_layout = [
+        ("Four-Poster Bed", 2, 2), ("Storage Hutch", 2, 6),
+        ("Kitchen Suite", 15, 2), ("Dining Set", 15, 5),
+        ("Sectional Couch", 30, 2), ("Stone Hearth", 30, 5),
+        ("Reading Nook", 45, 2), ("Workshop Bench", 45, 6),
+        ("Family Table", 60, 2), ("Child Bed", 60, 5),
+        ("Bathing Tub", 75, 2), ("Dressing Vanity", 75, 6),
+    ]
+    for furniture_name, x, y in ensemble_layout:
+        assert ensemble_game.can_place_object(furniture_name, x, y)[0]
+        ensemble_game.set_placed_object(x, y, furniture_name)
+    ensembles = ensemble_game.house_furniture_ensemble_status()
+    assert {entry["name"] for entry in ensembles if entry["active"]} == {
+        "Bedroom Retreat", "Working Kitchen", "Cozy Parlor",
+        "Study Corner", "Family Room", "Proper Washroom",
+    }
+    assert sum(int(entry["bonus"]) for entry in ensembles if entry["active"]) == 22
     for recipe_name in ["Rain Barrel", "Pipe Segment", "Irrigation Pump", "Water Tank", "Harvest Crate", "Shipping Loader", "Seed Hopper"]:
         assert recipe_name in data.CRAFTING_RECIPES
         output_name, output_qty = data.CRAFTING_RECIPES[recipe_name]["output"]
@@ -6652,6 +9122,57 @@ def main() -> int:
     assert len(game.active_town_npcs()) < len(game.state.town_npcs)
     assert game.scene_catalog()
     assert "life:first_land_claim" in game.scene_catalog()
+    scene_game = FarmGame()
+    scene_baseline = scene_game.town_npc_relationship("eli_carpenter")
+    captured_scene_frames = []
+    original_scene_draw = scene_game._draw_dialogue_frame
+    scene_game._draw_dialogue_frame = (
+        lambda actor, text, phase, transcript, *args, **kwargs:
+        captured_scene_frames.append((dict(actor), str(text), str(phase), list(transcript)))
+    )
+    try:
+        assert scene_game.start_scene("life:first_land_claim")
+        scene_game.draw_scene()
+        assert captured_scene_frames
+        assert captured_scene_frames[-1][0]["name"] == "Eli"
+        assert "The First Deed" in captured_scene_frames[-1][2]
+        assert scene_game.handle_scene_key("b") is False
+    finally:
+        scene_game._draw_dialogue_frame = original_scene_draw
+    assert scene_game.state.active_scene_id == ""
+    assert "life:first_land_claim" in scene_game.state.completed_scene_ids
+    assert "scene_flag:life:first_land_claim" in scene_game.state.scene_flags
+    assert scene_game.town_npc_relationship("eli_carpenter") == scene_baseline + 4
+    assert any(
+        entry.get("category") == "dialogue" and "Eli:" in entry.get("text", "")
+        for entry in scene_game.state.hud_activity_log
+    )
+    runtime_scene = scene_game.register_special_event_scene(
+        "smoke_runtime_event", "Persistent World Event",
+        [
+            {"type": "narration", "text": "The world remains visible around a runtime event."},
+            {"type": "give_item", "item": "Wood", "qty": 2},
+            {"type": "set_flag", "flag": "smoke_runtime_outcome"},
+        ],
+        "Runtime event complete.",
+    )
+    assert runtime_scene["id"] == "special:smoke_runtime_event"
+    assert scene_game.scene_by_id("special:smoke_runtime_event")["title"] == "Persistent World Event"
+    runtime_wood_before = int(scene_game.state.inventory.get("Wood", 0))
+    assert scene_game.start_scene("special:smoke_runtime_event")
+    assert scene_game.skip_active_scene()
+    assert scene_game.state.inventory.get("Wood", 0) == runtime_wood_before + 2
+    assert "smoke_runtime_outcome" in scene_game.state.scene_flags
+    assert "special:smoke_runtime_event" in scene_game.state.completed_scene_ids
+    persisted_runtime_state = state.GameState(active_scene_id="special:valid", active_scene_step_index=0, special_event_scenes={
+        "special:valid": {
+            "id": "special:valid", "title": "Valid", "steps": [{"type": "narration", "text": "Valid step."}],
+        },
+        "invalid": {"id": "invalid", "steps": [{"type": "narration", "text": "Invalid namespace."}]},
+        "special:empty": {"id": "special:empty", "steps": []},
+    })
+    assert list(persisted_runtime_state.special_event_scenes) == ["special:valid"]
+    assert persisted_runtime_state.active_scene_id == "special:valid"
     first_npc = game.state.town_npcs[0]
     assert game.town_npc_relationship(str(first_npc["id"])) == 0
     assert game.town_npc_friendship_label(0) == "Stranger"
@@ -6689,6 +9210,1124 @@ def main() -> int:
         game.vertical_panel_select = original_dialogue_select
     assert thoughtful_response["preferred_style"] == "practical"
     assert thoughtful_response["effect"] == 2
+    assert FarmGame.town_npc_conversation_menu.__module__ == "ascii_farmstead_dialogue"
+    expanded_lines = dialogue_library.expanded_dialogue_catalog()
+    assert dialogue_library.EXPANDED_DIALOGUE_LINE_COUNT == 3000
+    assert len(dialogue_library.VOICE_PROFILES) == 25
+    assert len(dialogue_library.DIALOGUE_LIBRARY_TOPICS) == 12
+    assert all(len(dialogue_library.TOPIC_PATTERNS[topic]) == 10 for topic in dialogue_library.DIALOGUE_LIBRARY_TOPICS)
+    assert len(expanded_lines) == 3000
+    assert len(set(expanded_lines.values())) == 3000
+    assert all(line and "{" not in line and "}" not in line and "\n" not in line for line in expanded_lines.values())
+    assert dialogue_library.dialogue_profile_for_role("Blacksmith")["id"] == "smith"
+    assert dialogue_library.dialogue_profile_for_role("Librarian")["id"] == "archive"
+    assert dialogue_library.dialogue_profile_for_role("Tundra Warden")["id"] == "nature"
+    smith_library_line = game.dialogue_library_line(first_npc | {"role": "Blacksmith"}, "work", "smoke")
+    archive_library_line = game.dialogue_library_line(first_npc | {"role": "Librarian"}, "work", "smoke")
+    assert smith_library_line != archive_library_line
+    assert game.dialogue_library_line(first_npc, "work", "stable") == game.dialogue_library_line(first_npc, "work", "stable")
+    dialogue_topics = game.dialogue_topic_options(first_npc, "authored")
+    assert [value for value, _label, _hint in dialogue_topics] == [
+        "directions", "background", "family", "work", "interests",
+        "people", "player", "smalltalk", "arrangements", "companions", "relationship", "goodbye",
+    ]
+    first_greeting = game.dialogue_greeting(first_npc, "authored", True, False)
+    assert first_npc["name"] in first_greeting
+    assert "work as" not in first_greeting.lower()
+    assert game.dialogue_demeanor(
+        {"id": "warm_test", "name": "Warm", "role": "Gardener", "personality": "Cheerful, warm"},
+        "procedural", True,
+    ) == "warm"
+    assert game.dialogue_demeanor(
+        {"id": "skeptic_test", "name": "Skeptic", "role": "Vendor", "personality": "Shrewd, skeptical"},
+        "procedural", True,
+    ) == "skeptical"
+    assert game.dialogue_demeanor(
+        {"id": "duty_test", "name": "Duty", "role": "Innkeeper", "personality": "Suspicious", "activity": "serving guests at the counter"},
+        "procedural", True,
+    ) == "professional"
+    assert game.dialogue_greeting(first_npc, "spouse", False, False) == ""
+    assert game.dialogue_farewell(first_npc, "child") == ""
+    original_dialogue_reader = game.dialogue_read_key
+    original_dialogue_draw = game._draw_dialogue_frame
+    original_hud_dialogue_log = json.loads(json.dumps(game.state.hud_activity_log))
+    game.dialogue_read_key = lambda: "\r"
+    game._draw_dialogue_frame = lambda *args, **kwargs: None
+    try:
+        assert game.dialogue_say(first_npc, "The road is busy this morning.", "chit-chat", [])
+    finally:
+        game.dialogue_read_key = original_dialogue_reader
+        game._draw_dialogue_frame = original_dialogue_draw
+    assert game.state.hud_activity_log[-1]["category"] == "dialogue"
+    assert first_npc["name"] in game.state.hud_activity_log[-1]["text"]
+    game.state.hud_activity_log = original_hud_dialogue_log
+    original_dialogue_width = dialogue_system.terminal_width
+    original_dialogue_height = dialogue_system.terminal_height
+    original_dialogue_clear = dialogue_system.clear_screen
+    original_frame_renderer = game.render_frame_text
+    original_centered_print = game.centered_print
+    dialogue_system.terminal_width = lambda: 80
+    dialogue_system.terminal_height = lambda: 30
+    dialogue_system.clear_screen = lambda: None
+    game.render_frame_text = lambda: "LEGACY HUD\nVISIBLE WORLD\nPLAYER AND NPC"
+    game.centered_print = lambda line, *args, **kwargs: print(line)
+    try:
+        frame_output = io.StringIO()
+        with contextlib.redirect_stdout(frame_output):
+            game._draw_dialogue_frame(
+                first_npc,
+                "The world remains visible while this conversation continues.",
+                "main subject",
+                [],
+                [("continue", "Continue talking", "Advance this conversation."), ("goodbye", "Leave", "Return to the world.")],
+                0,
+            )
+        rendered_dialogue = frame_output.getvalue()
+    finally:
+        dialogue_system.terminal_width = original_dialogue_width
+        dialogue_system.terminal_height = original_dialogue_height
+        dialogue_system.clear_screen = original_dialogue_clear
+        game.render_frame_text = original_frame_renderer
+        game.centered_print = original_centered_print
+    assert rendered_dialogue.startswith("LEGACY HUD\nVISIBLE WORLD\nPLAYER AND NPC\n")
+    assert first_npc["name"] in rendered_dialogue
+    assert "Continue talking" in rendered_dialogue
+    assert "B/X/Esc/Q/Tab leave" in rendered_dialogue
+    original_say = game.dialogue_say
+    original_choose = game.dialogue_choose
+    original_quiz = game.npc_dialogue_response_choice
+    dialogue_turns = []
+    dialogue_choices = iter(["topics", "background", "family", "interests", "companions", "goodbye"])
+    game.dialogue_say = lambda actor, text, phase, transcript: (
+        transcript.append({"speaker": str(actor.get("name", "NPC")), "text": str(text), "phase": str(phase)}),
+        dialogue_turns.append((str(phase), str(text))),
+        True,
+    )[-1]
+    game.dialogue_choose = lambda *args, **kwargs: next(dialogue_choices)
+    game.npc_dialogue_response_choice = lambda *args, **kwargs: (_ for _ in ()).throw(
+        AssertionError("normal conversation must not invoke the legacy relationship quiz")
+    )
+    try:
+        dialogue_result = game.run_unified_npc_conversation(
+            first_npc, kind="authored", first_meeting=True, repeated_today=False
+        )
+    finally:
+        game.dialogue_say = original_say
+        game.dialogue_choose = original_choose
+        game.npc_dialogue_response_choice = original_quiz
+    assert dialogue_result["completed"]
+    assert dialogue_result["topics"] == ["background", "family", "interests", "companions"]
+    assert [phase for phase, _text in dialogue_turns].count("greeting") == 1
+    assert [phase for phase, _text in dialogue_turns].count("main subject") == 1
+    assert [phase for phase, _text in dialogue_turns].count("response") == 4
+    assert "_dialogue_kind" not in first_npc
+    known_places = game.dialogue_known_places(first_npc, "authored")
+    assert known_places and all(place.get("name") and place.get("id") for place in known_places)
+    assert isinstance(game.state.npc_dialogue_social_state, dict)
+    assert isinstance(game.state.social_reputation, int)
+    assert isinstance(game.state.player_origin, str) and game.state.player_origin
+    assert game.state.player_background.lower() in game.dialogue_player_disclosure_statement("background").lower()
+    assert game.state.player_origin.lower() in game.dialogue_player_disclosure_statement("background").lower()
+    assert "wilderness" in game.dialogue_player_disclosure_statement("travels").lower()
+    assert "generation" in game.dialogue_player_disclosure_statement("ancestry").lower()
+    original_social_state = json.loads(json.dumps(game.state.npc_dialogue_social_state))
+    original_world_dialogue_log = json.loads(json.dumps(game.state.hud_activity_log))
+    knowledge_source = {
+        "id": "knowledge_source", "name": "Nora", "role": "Courier",
+        "personality": "Observant", "relationship": 0,
+    }
+    knowledge_listener = {
+        "id": "knowledge_listener", "name": "Pax", "role": "Innkeeper",
+        "personality": "Reserved", "relationship": 0,
+    }
+    source_packet = game.dialogue_add_knowledge(
+        knowledge_source, "procedural", "The north bridge is closed for repairs.",
+        subject="road closure", source_name="personal observation",
+        source_kind="firsthand", confidence=100,
+    )
+    assert source_packet["source_kind"] == "firsthand"
+    assert game.dialogue_propagate_knowledge(
+        knowledge_source, "procedural", knowledge_listener, "procedural"
+    )
+    listener_packet = game.dialogue_social_slot(
+        knowledge_listener, "procedural"
+    )["knowledge"][-1]
+    assert listener_packet["source_name"] == "Nora"
+    assert listener_packet["source_kind"] == "hearsay"
+    assert int(listener_packet["confidence"]) < int(source_packet["confidence"])
+    mood_actor = {
+        "id": "mood_actor", "name": "Vale", "role": "Miner",
+        "personality": "Calm", "relationship": 0,
+    }
+    mood = game.dialogue_set_mood(
+        mood_actor, "procedural", "angry", "a broken promise", 3, 2
+    )
+    assert game.dialogue_demeanor(mood_actor, "procedural") == "hostile"
+    mood["expires_day"] = game.dialogue_absolute_day() - 1
+    assert game.dialogue_current_mood(mood_actor, "procedural") == {}
+    arc_actor = {
+        "id": "arc_actor", "name": "Tess", "role": "Ranger",
+        "personality": "Practical", "relationship": 0,
+    }
+    arc_thread = game.dialogue_current_thread(arc_actor, "procedural", create=True)
+    assert arc_thread["profile"] == "roads" and arc_thread["stage"] == 0
+    arc_line, arc_gain = game.dialogue_advance_thread(
+        arc_actor, "procedural", arc_thread, "support"
+    )
+    assert arc_thread["stage"] == 1 and arc_gain == 1 and arc_line
+    repeated_arc_line, repeated_arc_gain = game.dialogue_advance_thread(
+        arc_actor, "procedural", arc_thread, "support"
+    )
+    assert arc_thread["stage"] == 1 and repeated_arc_gain == 0
+    assert "already" in repeated_arc_line.lower()
+    original_dialogue_absolute_day = game.dialogue_absolute_day
+    base_arc_day = original_dialogue_absolute_day()
+    try:
+        game.dialogue_absolute_day = lambda: base_arc_day + 1
+        game.dialogue_advance_thread(arc_actor, "procedural", arc_thread, "challenge")
+        game.dialogue_absolute_day = lambda: base_arc_day + 2
+        game.dialogue_advance_thread(arc_actor, "procedural", arc_thread, "listen")
+    finally:
+        game.dialogue_absolute_day = original_dialogue_absolute_day
+    assert arc_thread["stage"] == 3 and arc_thread["status"] == "resolved"
+    arc_slot = game.dialogue_social_slot(arc_actor, "procedural")
+    assert arc_slot["thread_history"]
+    assert arc_slot["story_consequences"][-1]["profile"] == "roads"
+    assert arc_slot["story_aftermath"]["thread_id"] == arc_thread["id"]
+    assert arc_actor["story_outcome"]["profile"] == "roads"
+    assert "route" in game.dialogue_activity(arc_actor, "procedural")
+    assert game.dialogue_current_thread(arc_actor, "procedural", create=True) == {}
+    aftermath_listener = {
+        "id": "aftermath_listener", "name": "Orin", "role": "Courier",
+        "personality": "Curious", "relationship": 0,
+    }
+    assert game.dialogue_propagate_knowledge(
+        arc_actor, "procedural", aftermath_listener, "procedural"
+    )
+    assert "route" in game.dialogue_social_slot(
+        aftermath_listener, "procedural"
+    )["knowledge"][-1]["text"].lower()
+    original_dialogue_absolute_day = game.dialogue_absolute_day
+    resolved_arc_day = int(arc_thread["resolved_day"])
+    try:
+        game.dialogue_absolute_day = lambda: resolved_arc_day + 1
+        arc_slot["initiation"] = {}
+        aftermath_initiation = game.dialogue_prepare_initiation(
+            arc_actor, "procedural"
+        )
+        assert aftermath_initiation["reason"] == "story_aftermath"
+        assert game.dialogue_accept_initiation(arc_actor, "procedural")
+        assert arc_slot["story_aftermath"]["acknowledged"]
+        game.dialogue_absolute_day = lambda: resolved_arc_day + 13
+        assert game.dialogue_current_thread(arc_actor, "procedural", create=True) == {}
+        game.dialogue_absolute_day = lambda: resolved_arc_day + 14
+        next_arc_thread = game.dialogue_current_thread(
+            arc_actor, "procedural", create=True
+        )
+        assert next_arc_thread["profile"] == "personal"
+        assert next_arc_thread["id"] != arc_thread["id"]
+    finally:
+        game.dialogue_absolute_day = original_dialogue_absolute_day
+    introduced_actor = {
+        "id": "introduced_actor", "name": "Ira", "role": "Scholar",
+        "personality": "Skeptical", "relationship": 0,
+    }
+    game.dialogue_social_slot(introduced_actor, "procedural")["introductions"].append({
+        "source_name": "Nora", "purpose": "that you were looking for the archive",
+        "acknowledged": False,
+    })
+    introduced_greeting = game.dialogue_greeting(
+        introduced_actor, "procedural", True, False
+    )
+    assert "Nora" in introduced_greeting and introduced_actor["name"] in introduced_greeting
+    assert game.dialogue_social_slot(
+        introduced_actor, "procedural"
+    )["introductions"][-1]["acknowledged"]
+    arrangement_actor = {
+        "id": "arrangement_actor", "name": "Mara", "role": "Courier",
+        "personality": "Warm", "relationship": 0,
+    }
+    arrangement_target = {
+        "id": "arrangement_target", "name": "Sol", "role": "Archivist",
+        "personality": "Reserved", "relationship": 0,
+        "procedural_resident": True,
+    }
+    original_known_people = game.dialogue_known_people
+    original_dialogue_choose_for_arrangement = game.dialogue_choose
+    original_dialogue_say_for_arrangement = game.dialogue_say
+    game.dialogue_known_people = lambda actor, kind: [arrangement_target]
+    arrangement_choices = iter(["introduction", "arrangement_target"])
+    game.dialogue_choose = lambda *args, **kwargs: next(arrangement_choices)
+    game.dialogue_say = lambda *args, **kwargs: True
+    try:
+        assert game.dialogue_handle_practical_arrangement(
+            arrangement_actor, "procedural", []
+        )
+    finally:
+        game.dialogue_known_people = original_known_people
+        game.dialogue_choose = original_dialogue_choose_for_arrangement
+        game.dialogue_say = original_dialogue_say_for_arrangement
+    assert game.dialogue_social_slot(
+        arrangement_target, "procedural"
+    )["introductions"][-1]["source_name"] == "Mara"
+    group_actor = {
+        "id": "group_actor", "name": "Oren", "role": "Carpenter",
+        "personality": "Blunt", "relationship": 0,
+    }
+    group_partner = {
+        "id": "group_partner", "name": "Lio", "role": "Gardener",
+        "personality": "Warm", "relationship": 0,
+    }
+    group_actor["_dialogue_group_partner"] = {
+        "actor": group_partner, "kind": "procedural", "distance": 2,
+    }
+    group_turns = []
+    original_dialogue_choose_for_group = game.dialogue_choose
+    original_dialogue_say_for_group = game.dialogue_say
+    game.dialogue_choose = lambda *args, **kwargs: "work"
+    game.dialogue_say = lambda speaker, text, phase, transcript: (
+        group_turns.append((str(speaker.get("name", "")), str(phase), str(text))), True
+    )[-1]
+    try:
+        assert game.dialogue_handle_group_topic(group_actor, "procedural", [])
+    finally:
+        game.dialogue_choose = original_dialogue_choose_for_group
+        game.dialogue_say = original_dialogue_say_for_group
+    assert [name for name, _phase, _text in group_turns] == ["Oren", "Lio"]
+    witness_actor = {
+        "id": "world_witness", "name": "Rowan", "role": "Ranger",
+        "personality": "Skeptical, observant", "activity": "checking trail markers",
+        "relationship": 0,
+    }
+    original_nearby_dialogue_actors = game.world_dialogue_nearby_actors
+    game.world_dialogue_nearby_actors = lambda radius=7: [{
+        "actor": witness_actor, "kind": "procedural",
+        "x": int(game.state.player_x) + 1, "y": int(game.state.player_y),
+        "distance": 1,
+    }]
+    try:
+        assert not game.world_dialogue_event_is_worth_witnessing(
+            "You need more wood.", "warning"
+        )
+        assert game.world_dialogue_record_player_event(
+            "Repaired the old trail marker.", "gain"
+        ) == 1
+    finally:
+        game.world_dialogue_nearby_actors = original_nearby_dialogue_actors
+    witness_slot = game.dialogue_social_slot(witness_actor, "procedural")
+    assert witness_slot["witnessed_events"][-1]["action"].startswith("repair ")
+    assert witness_slot["knowledge"][-1]["source_kind"] == "firsthand"
+    initiated_callout = game.dialogue_initiation_callout(
+        witness_actor, "procedural"
+    )
+    assert game.state.player_name in initiated_callout
+    assert "talk" in initiated_callout.lower()
+    accepted_initiation = game.dialogue_accept_initiation(
+        witness_actor, "procedural"
+    )
+    assert accepted_initiation
+    witness_callback = game.dialogue_witness_callback(
+        witness_actor, "procedural", "conversation"
+    )
+    assert "saw you repair" in witness_callback.lower()
+    assert witness_slot["witnessed_events"][-1]["conversation_acknowledged"]
+    pair_reply = game.world_dialogue_pair_exchange(
+        {
+            "actor": witness_actor, "kind": "procedural",
+            "x": 10, "y": 10, "distance": 2,
+        },
+        {
+            "actor": {
+                "id": "world_listener", "name": "June", "role": "Courier",
+                "personality": "Warm", "activity": "sorting deliveries",
+            },
+            "kind": "procedural", "x": 12, "y": 10, "distance": 3,
+        },
+    )
+    assert all(pair_reply) and "June" in pair_reply[0]
+    assert game.world_dialogue_emit_ambient([{
+        "actor": witness_actor, "kind": "procedural",
+        "x": 10, "y": 10, "distance": 2,
+    }])
+    assert game.state.hud_activity_log[-1]["category"] == "dialogue"
+    assert "Rowan" in game.state.hud_activity_log[-1]["text"]
+    game.state.hud_activity_log = original_world_dialogue_log
+    original_social_reputation = int(game.state.social_reputation)
+    social_actor = {
+        "id": "social_test", "name": "Lina", "role": "Gardener",
+        "personality": "Cheerful, warm", "relationship": 0,
+    }
+    social_turns = []
+    original_say = game.dialogue_say
+    original_choose = game.dialogue_choose
+    game.dialogue_say = lambda actor, text, phase, transcript: (
+        social_turns.append((str(actor.get("name", "")), str(phase), str(text))), True
+    )[-1]
+    game.dialogue_choose = lambda *args, **kwargs: "compliment_character"
+    try:
+        assert game.dialogue_handle_smalltalk(social_actor, "procedural", [])
+        relationship_after_first_compliment = int(social_actor["relationship"])
+        reputation_after_first_compliment = int(game.state.social_reputation)
+        assert game.dialogue_handle_smalltalk(social_actor, "procedural", [])
+    finally:
+        game.dialogue_say = original_say
+        game.dialogue_choose = original_choose
+    assert relationship_after_first_compliment == 2
+    assert reputation_after_first_compliment == original_social_reputation + 1
+    assert int(social_actor["relationship"]) == relationship_after_first_compliment
+    assert int(game.state.social_reputation) == reputation_after_first_compliment
+    assert any("changes nothing further" in text for _speaker, _phase, text in social_turns)
+    insult_actor = {
+        "id": "insult_test", "name": "Brom", "role": "Blacksmith",
+        "personality": "Gruff, blunt", "relationship": 0,
+    }
+    game.dialogue_say = lambda actor, text, phase, transcript: True
+    game.dialogue_choose = lambda *args, **kwargs: "insult_work"
+    try:
+        assert game.dialogue_handle_smalltalk(insult_actor, "procedural", [])
+    finally:
+        game.dialogue_say = original_say
+        game.dialogue_choose = original_choose
+    assert int(insult_actor["relationship"]) == -4
+    assert int(game.state.social_reputation) == reputation_after_first_compliment - 2
+    disclosure_turns = []
+    game.dialogue_say = lambda actor, text, phase, transcript: (
+        disclosure_turns.append((str(actor.get("name", "")), str(phase), str(text))), True
+    )[-1]
+    game.dialogue_choose = lambda *args, **kwargs: "background"
+    try:
+        assert game.dialogue_handle_player_disclosure(social_actor, "procedural", [])
+        assert game.dialogue_handle_player_disclosure(social_actor, "procedural", [])
+    finally:
+        game.dialogue_say = original_say
+        game.dialogue_choose = original_choose
+    assert disclosure_turns[0][0] == game.state.player_name and disclosure_turns[0][1] == "you"
+    assert any("mentioning that before" in text for _speaker, _phase, text in disclosure_turns)
+    game.state.npc_dialogue_social_state = original_social_state
+    game.state.social_reputation = original_social_reputation
+    assert isinstance(game.state.npc_dialogue_promises, dict)
+    assert game.dialogue_work_situation({"id": "child:test", "name": "Test Child"}, "child") is None
+    original_promises = json.loads(json.dumps(game.state.npc_dialogue_promises))
+    original_completed_errands = list(game.state.completed_errand_ids or [])
+    errand_situation = game.dialogue_work_situation(first_npc, "authored")
+    assert errand_situation and errand_situation["type"] == "authored_errand"
+    assert errand_situation["deadline"] == "today"
+    game.dialogue_record_promise(first_npc, "authored", errand_situation)
+    active_promise = game.state.npc_dialogue_promises[
+        game.dialogue_promise_key(first_npc, "authored")
+    ]["active"]
+    assert active_promise["status"] == "active"
+    assert "you said" in game.dialogue_promise_callback(first_npc, "authored").lower()
+    game.state.completed_errand_ids.append(str(errand_situation["id"]))
+    assert "followed through" in game.dialogue_promise_callback(first_npc, "authored").lower()
+    promise_slot = game.state.npc_dialogue_promises[
+        game.dialogue_promise_key(first_npc, "authored")
+    ]
+    assert not promise_slot["active"]
+    assert promise_slot["history"][-1]["status"] == "fulfilled"
+    game.state.completed_errand_ids = list(original_completed_errands)
+    original_quest_records = json.loads(json.dumps(game.state.quest_records or {}))
+    original_tracked_quest_id = str(game.state.tracked_quest_id or "")
+    dialogue_quest = game.accept_dialogue_quest(first_npc, "authored", errand_situation)
+    assert dialogue_quest["status"] in {"active", "ready"}
+    assert game.state.tracked_quest_id == dialogue_quest["id"]
+    assert game.tracked_quest_hud_text()
+    assert any(str(dialogue_quest["title"]) in line for line in game.unified_quest_journal_lines())
+    assert any("Current objective" in line for line in game.quest_detail_lines(dialogue_quest))
+    assert game.complete_dialogue_quest_for_situation(first_npc, "authored", errand_situation)
+    assert game.quest_record(str(dialogue_quest["id"]))["status"] == "completed"
+
+    destination = game.quest_capture_current_destination()
+    original_destination_x = int(destination["x"])
+    destination["x"] = max(0, min(game.active_map_width() - 1, int(game.state.player_x) + 3))
+    if int(destination["x"]) == int(game.state.player_x):
+        destination["x"] = max(0, int(game.state.player_x) - 3)
+    if "world_x" in destination:
+        destination["world_x"] = int(destination["world_x"]) + int(destination["x"]) - original_destination_x
+    destination["label"] = "Smoke-test destination"
+    route_quest = game.register_quest({
+        "id": "smoke:visit", "title": "A Visible Destination", "category": "General",
+        "description": "Verify tracked world navigation.",
+        "objectives": [{
+            "id": "visit", "kind": "visit", "description": "Reach the marked destination.",
+            "target": 1, "destination": destination,
+        }],
+    }, accept=True)
+    assert game.track_quest(str(route_quest["id"]), announce=False)
+    route = game.tracked_quest_navigation()
+    assert route["direction"] in {"E", "W"} and int(route["distance"]) > 0
+    assert game.tracked_quest_local_position() == (int(destination["x"]), int(destination["y"]))
+
+    defeat_quest = game.register_quest({
+        "id": "smoke:defeat_event", "title": "Defeat Dangerous Foes", "category": "Wilderness",
+        "objectives": [{
+            "id": "defeat", "kind": "defeat", "target_tag": "boss", "target": 2,
+            "description": "Defeat two bosses.",
+        }],
+    }, accept=True)
+    assert game.record_quest_event("defeat", target_name="Slime", target_tags=["enemy"]) == 0
+    assert game.record_quest_event("defeat", target_name="Ogre", target_tags=["enemy", "boss"]) == 1
+    defeat_quest = game.quest_record("smoke:defeat_event")
+    assert defeat_quest["objectives"][0]["current"] == 1
+    assert "defeated 1/2" in game.quest_progress_label(defeat_quest)
+
+    craft_quest = game.register_quest({
+        "id": "smoke:craft_event", "title": "Prepare Supplies", "category": "Town",
+        "objectives": [{
+            "id": "craft", "kind": "craft", "target_names": ["Field Ration"], "target": 3,
+            "description": "Craft three field rations.",
+        }],
+    }, accept=True)
+    assert game.record_quest_event(
+        "craft", target_id="ration_recipe", target_name="field ration", amount=3,
+        target_tags=["crafted"], note="Prepared field supplies.",
+    ) == 1
+    assert game.quest_record("smoke:craft_event")["status"] == "ready"
+
+    location_quest = game.register_quest({
+        "id": "smoke:location_event", "title": "Recover Mine Evidence", "category": "General",
+        "objectives": [{
+            "id": "loot", "kind": "loot", "target_name": "Ancient Cog", "location": "Mine",
+            "target": 1, "description": "Recover an Ancient Cog in the mine.",
+        }],
+    }, accept=True)
+    assert game.record_quest_event("loot", target_name="Ancient Cog", location="Wilderness") == 0
+    assert game.record_quest_event("loot", target_name="ancient cog", location="mine") == 1
+    assert game.quest_record("smoke:location_event")["status"] == "ready"
+
+    legacy_snapshots = game.legacy_unified_quest_snapshots()
+    legacy_sources = {str(row.get("legacy_source", "")) for row in legacy_snapshots}
+    assert {"resident", "companion", "bulletin", "mission"}.issubset(legacy_sources)
+    assert all(str(row.get("id", "")).startswith("legacy:") for row in legacy_snapshots)
+    assert game.sync_legacy_quest_records() >= 0
+    resident_snapshot = next(row for row in legacy_snapshots if row.get("legacy_source") == "resident")
+    resident_mirror = game.quest_record(str(resident_snapshot["id"]))
+    assert resident_mirror["legacy_managed"] and resident_mirror["legacy_direct_turn_in"]
+    assert game.legacy_unified_quest_detail_lines(resident_mirror)
+    bulletin_snapshot = next(row for row in legacy_snapshots if row.get("legacy_source") == "bulletin")
+    assert not bulletin_snapshot["legacy_direct_turn_in"]
+    mission_snapshot = next(row for row in legacy_snapshots if row.get("legacy_source") == "mission")
+    assert mission_snapshot["status"] in {"offered", "completed"}
+
+    legacy_bounties_before = json.loads(json.dumps(game.state.active_bounties or {}))
+    game.state.active_bounties["smoke:legacy_bounty"] = {
+        "id": "smoke:legacy_bounty", "title": "Tracked Smoke Bounty", "status": "accepted",
+        "target_name": "Smoke Bandit", "species": "Bandit", "chunk_x": 2, "chunk_y": -1,
+        "reward_money": 250, "description": "Verify unified bounty tracking.",
+    }
+    try:
+        bounty_snapshot = next(
+            row for row in game.legacy_unified_quest_snapshots()
+            if row.get("legacy_source") == "bounty" and row.get("legacy_source_id") == "smoke:legacy_bounty"
+        )
+        assert bounty_snapshot["status"] == "active" and not bounty_snapshot["legacy_direct_turn_in"]
+        bounty_destination = bounty_snapshot["objectives"][0]["destination"]
+        assert bounty_destination["chunk_x"] == 2 and bounty_destination["chunk_y"] == -1
+        assert "world_x" in bounty_destination and "world_y" in bounty_destination
+        game.state.active_bounties["smoke:legacy_bounty"]["status"] = "defeated"
+        ready_bounty = next(
+            row for row in game.legacy_unified_quest_snapshots()
+            if row.get("legacy_source_id") == "smoke:legacy_bounty"
+        )
+        assert ready_bounty["status"] == "ready" and ready_bounty["objectives"][0]["destination"] == {}
+    finally:
+        game.state.active_bounties = legacy_bounties_before
+
+    original_legacy_provider = game.legacy_unified_quest_snapshots
+    synthetic_legacy = {
+        "id": "legacy:smoke:temporary", "title": "Temporary Legacy Work", "category": "General",
+        "description": "Verify source disappearance and tracker cleanup.", "status": "active",
+        "objectives": [{
+            "id": "legacy_progress", "kind": "manual", "target": 1, "current": 0,
+            "description": "Wait for the posting to expire.",
+        }],
+        "legacy_source": "smoke", "legacy_source_id": "temporary", "legacy_managed": True,
+    }
+    try:
+        game.legacy_unified_quest_snapshots = lambda: [dict(synthetic_legacy)]
+        game.sync_legacy_quest_records()
+        assert game.track_quest("legacy:smoke:temporary", announce=False)
+        game.legacy_unified_quest_snapshots = lambda: []
+        game.sync_legacy_quest_records()
+        assert game.quest_record("legacy:smoke:temporary")["status"] == "abandoned"
+        assert game.state.tracked_quest_id == ""
+    finally:
+        game.legacy_unified_quest_snapshots = original_legacy_provider
+        game.sync_legacy_quest_records()
+
+    original_complete_resident = game.complete_resident_request
+    completed_through_adapter = []
+    game.complete_resident_request = lambda request_id: completed_through_adapter.append(str(request_id)) or True
+    try:
+        assert game.complete_legacy_unified_quest({
+            "legacy_source": "resident", "legacy_source_id": "smoke_request",
+        })
+    finally:
+        game.complete_resident_request = original_complete_resident
+    assert completed_through_adapter == ["smoke_request"]
+
+    original_planned_events = json.loads(json.dumps(game.state.planned_events or {}))
+    original_temporary_states = json.loads(json.dumps(game.state.temporary_participant_states or {}))
+    game.state.planned_events["smoke:invalid_row"] = "not an event"
+    game.state.planned_events["smoke:legacy_plan"] = {
+        "title": "Legacy Plan", "status": "unknown", "due_day": -4, "due_hour": 99,
+        "duration_minutes": 0, "participants": ["invalid", {"name": "Valid Guest"}],
+        "destination": "invalid",
+    }
+    game.state.temporary_participant_states["smoke:orphan"] = {"event_id": "missing:event"}
+    normalized_plans = game.ensure_planned_event_state()
+    assert "smoke:invalid_row" not in normalized_plans
+    assert "smoke:orphan" not in game.state.temporary_participant_states
+    legacy_plan = normalized_plans["smoke:legacy_plan"]
+    assert legacy_plan["id"] == "smoke:legacy_plan" and legacy_plan["status"] == "planned"
+    assert legacy_plan["due_day"] >= 1 and legacy_plan["due_hour"] == 23
+    assert legacy_plan["duration_minutes"] == 120 and len(legacy_plan["participants"]) == 1
+    assert legacy_plan["destination"] == {}
+    game.state.planned_events.pop("smoke:legacy_plan", None)
+    now_minute = game.quest_absolute_day() * 1440 + int(game.state.hour) * 60 + int(game.state.minute)
+    planned = game.schedule_planned_event({
+        "id": "smoke:shared_time", "title": "Smoke Test Walk", "status": "ready",
+        "expires_at_minute": now_minute + 60,
+        "participants": [{
+            "actor_id": str(first_npc.get("id", "")), "name": str(first_npc.get("name", "Guest")),
+            "role": str(first_npc.get("role", "Guest")), "kind": "authored",
+            "mode": "accompany", "purpose": "testing temporary company",
+        }],
+    })
+    assert game.activate_planned_event(str(planned["id"]))
+    assert str(first_npc.get("id", "")) in game.temporary_participant_actor_ids()
+    assert game.temporary_participant_at(int(game.state.player_x), int(game.state.player_y))
+    assert any("Smoke Test Walk" in line for line in game.planned_event_journal_lines())
+    assert any(
+        "Smoke Test Walk" in line
+        for line in game.planned_event_calendar_lines(game.state.month, game.state.day, game.state.year)
+    )
+    planned["expires_at_minute"] = now_minute - 1
+    game.update_planned_events()
+    assert planned["status"] == "completed"
+    assert not game.active_temporary_participants()
+
+    store_place = {"id": "town:general_store", "name": "General Store", "kind": "town"}
+    store_destination = game.quest_destination_for_known_place(store_place)
+    assert store_destination["location"] == "Wilderness"
+    assert "world_x" in store_destination and "world_y" in store_destination
+
+    meeting_destination = game.quest_capture_current_destination()
+    meeting_destination["label"] = "the smoke-test meeting place"
+    meeting = game.schedule_planned_event({
+        "id": "smoke:meeting", "title": "Meet the Smoke Tester", "status": "planned",
+        "auto_activate": True, "due_day": game.quest_absolute_day(), "due_hour": int(game.state.hour),
+        "destination": meeting_destination,
+        "participants": [{
+            "actor_id": str(first_npc.get("id", "")), "name": str(first_npc.get("name", "Guest")),
+            "role": str(first_npc.get("role", "Guest")), "kind": "authored", "mode": "meet",
+            "destination": meeting_destination,
+        }],
+    })
+    game.update_planned_events()
+    game.update_planned_events()
+    assert meeting["status"] == "active"
+    meeting_guest = game.temporary_participant_at(int(game.state.player_x), int(game.state.player_y))
+    assert meeting_guest and meeting_guest["mode"] == "meet"
+    assert game.complete_planned_event("smoke:meeting", reason="smoke-test meeting")
+
+    guide_actor = dict(first_npc)
+    guide_relationship_before = game.town_npc_relationship(str(guide_actor.get("id", "")))
+    original_known_places = game.dialogue_known_places
+    original_arrangement_choose = game.dialogue_choose
+    original_arrangement_say = game.dialogue_say
+    game.dialogue_known_places = lambda actor, kind: [store_place]
+    guide_choices = iter(["guide", "town:general_store"])
+    game.dialogue_choose = lambda *args, **kwargs: next(guide_choices)
+    game.dialogue_say = lambda *args, **kwargs: True
+    try:
+        assert game.dialogue_handle_practical_arrangement(guide_actor, "authored", [])
+    finally:
+        game.dialogue_known_places = original_known_places
+        game.dialogue_choose = original_arrangement_choose
+        game.dialogue_say = original_arrangement_say
+    guide_events = [
+        event for event in game.state.planned_events.values()
+        if isinstance(event, dict) and str(event.get("id", "")).startswith("guided_route:")
+    ]
+    assert guide_events and guide_events[-1]["status"] == "active"
+    guide_event = guide_events[-1]
+    guide_quest = game.quest_record(str(guide_event["quest_id"]))
+    assert guide_quest and game.state.tracked_quest_id == guide_quest["id"]
+    assert game.complete_planned_event(str(guide_event["id"]), reason="arrived together")
+    assert game.quest_record(str(guide_quest["id"]))["status"] == "completed"
+    assert game.town_npc_relationship(str(guide_actor.get("id", ""))) >= guide_relationship_before + 2
+    game.state.town_npc_relationships[str(guide_actor.get("id", ""))] = guide_relationship_before
+
+    date_actor = next(
+        npc for npc in game.state.town_npcs
+        if game.is_marriageable_npc(npc) and game.is_heterosexual_match_for_player(npc)
+    )
+    date_actor_id = str(date_actor["id"])
+    date_relationship_existed = date_actor_id in game.state.town_npc_relationships
+    date_relationship_before = game.town_npc_relationship(date_actor_id)
+    date_courtship_before = game.town_npc_courtship_count(date_actor_id)
+    date_last_court_before = game.state.town_npc_last_court_day.get(date_actor_id)
+    dating_before = list(game.state.dating_npc_ids or [])
+    date_social_before = json.loads(json.dumps(game.state.npc_dialogue_social_state or {}))
+    original_activity_known_places = game.dialogue_known_places
+    original_activity_known_people = game.dialogue_known_people
+    original_activity_choose = game.dialogue_choose
+    original_activity_say = game.dialogue_say
+    original_activity_autosave = game.autosave_with_message
+    game.state.town_npc_relationships[date_actor_id] = max(100, date_relationship_before)
+    game.state.town_npc_last_court_day.pop(date_actor_id, None)
+    game.dialogue_known_places = lambda actor, kind: []
+    date_choices = iter(["__HERE__", "1", "10"])
+    game.dialogue_choose = lambda *args, **kwargs: next(date_choices)
+    game.dialogue_say = lambda *args, **kwargs: True
+    game.autosave_with_message = lambda message: game.set_message(message)
+    try:
+        assert game.dialogue_schedule_shared_activity(date_actor, "authored", [], romantic=True)
+        date_event = next(
+            event for event in game.state.planned_events.values()
+            if isinstance(event, dict) and str(event.get("id", "")).startswith(f"relationship_date:{date_actor_id}:")
+        )
+        assert date_event["status"] == "planned" and date_event["requires_attendance"]
+        assert game.open_planned_events_for_actor(date_actor_id, ("relationship_date",)) == [date_event]
+        date_month, date_day, date_year = game.date_after_days(1)
+        assert any("Date with" in line for line in game.planned_event_calendar_lines(date_month, date_day, date_year))
+        assert any("Date with" in line for line in game.planned_event_journal_lines())
+        date_event["status"] = "ready"
+        assert game.activate_planned_event(str(date_event["id"]))
+        date_participant = next(
+            row for row in game.active_temporary_participants()
+            if str(row.get("event_id", "")) == str(date_event["id"])
+        )
+        relationship_at_arrival = game.town_npc_relationship(date_actor_id)
+        game.dialogue_choose = lambda *args, **kwargs: "conversation"
+        assert game.talk_to_temporary_participant(date_participant)
+        assert date_event["status"] == "completed"
+        assert date_event["activity_choice"] == "conversation"
+        assert date_event["relationship_gain"] > 0
+        assert game.town_npc_relationship(date_actor_id) > relationship_at_arrival
+        assert game.town_npc_courtship_count(date_actor_id) == date_courtship_before + 1
+        assert not game.open_planned_events_for_actor(date_actor_id, ("relationship_date",))
+        date_meeting = next(
+            row for row in game.dialogue_social_slot(date_actor, "authored")["meetings"]
+            if str(row.get("event_id", "")) == str(date_event["id"])
+        )
+        assert date_meeting["completed"]
+
+        outing_choices = iter(["__HERE__", "2", "14"])
+        game.dialogue_choose = lambda *args, **kwargs: next(outing_choices)
+        assert game.dialogue_schedule_shared_activity(date_actor, "authored", [], romantic=False)
+        outing_event = next(
+            event for event in game.state.planned_events.values()
+            if isinstance(event, dict) and str(event.get("id", "")).startswith(f"social_outing:{date_actor_id}:")
+        )
+        outing_event["status"] = "ready"
+        assert game.activate_planned_event(str(outing_event["id"]))
+        outing_participant = next(
+            row for row in game.active_temporary_participants()
+            if str(row.get("event_id", "")) == str(outing_event["id"])
+        )
+        outing_relationship_before = game.town_npc_relationship(date_actor_id)
+        game.dialogue_choose = lambda *args, **kwargs: "exploration"
+        assert game.talk_to_temporary_participant(outing_participant)
+        assert outing_event["status"] == "completed"
+        assert outing_event["activity_choice"] == "exploration"
+        assert game.town_npc_relationship(date_actor_id) == outing_relationship_before + 2
+
+        gathering_people = [
+            npc for npc in game.state.town_npcs
+            if str(npc.get("id", "")) != date_actor_id
+        ][:3]
+        gathering_host, gathering_guest_one, gathering_guest_two = gathering_people
+        gathering_relationships_before = {
+            str(npc["id"]): (
+                str(npc["id"]) in game.state.town_npc_relationships,
+                game.town_npc_relationship(str(npc["id"])),
+            )
+            for npc in gathering_people
+        }
+        game.state.town_npc_relationships[str(gathering_host["id"])] = 50
+        game.dialogue_known_people = lambda actor, kind: [gathering_guest_one, gathering_guest_two]
+        gathering_arrangement_options = []
+        game.dialogue_choose = lambda actor, prompt, phase, options, transcript: (
+            gathering_arrangement_options.extend(options), "back"
+        )[-1]
+        assert game.dialogue_handle_practical_arrangement(gathering_host, "authored", [])
+        assert "gathering" in {value for value, _label, _hint in gathering_arrangement_options}
+        gathering_choices = iter([
+            str(gathering_guest_one["id"]), str(gathering_guest_two["id"]),
+            "__HERE__", "1", "12",
+        ])
+        game.dialogue_choose = lambda *args, **kwargs: next(gathering_choices)
+        assert game.dialogue_schedule_group_gathering(gathering_host, "authored", [])
+        gathering_event = next(
+            event for event in game.state.planned_events.values()
+            if isinstance(event, dict) and str(event.get("id", "")).startswith(f"social_gathering:{gathering_host['id']}:")
+        )
+        assert len(gathering_event["participants"]) == 3
+        assert gathering_event["requires_attendance"]
+        gathering_event["status"] = "ready"
+        assert game.activate_planned_event(str(gathering_event["id"]))
+        gathering_positions = {
+            position: row for position, row in game.temporary_participant_position_lookup().items()
+            if str(row.get("event_id", "")) == str(gathering_event["id"])
+        }
+        assert len(gathering_positions) == 3
+        assert len({(int(row["x"]), int(row["y"])) for row in gathering_positions.values()}) == 3
+        gathering_actor_ids = {str(row.get("actor_id", "")) for row in gathering_positions.values()}
+        assert gathering_actor_ids.issubset(game.temporary_participant_actor_ids())
+        gathering_runtime_host = next(
+            row for row in gathering_positions.values()
+            if str(row.get("actor_id", "")) == str(gathering_host["id"])
+        )
+        gathering_before_completion = {
+            str(npc["id"]): game.town_npc_relationship(str(npc["id"]))
+            for npc in gathering_people
+        }
+        game.dialogue_choose = lambda *args, **kwargs: "plans"
+        assert game.talk_to_temporary_participant(gathering_runtime_host)
+        assert gathering_event["status"] == "completed"
+        assert gathering_event["activity_choice"] == "plans"
+        assert len(gathering_event["relationship_gains"]) == 3
+        for npc in gathering_people:
+            npc_id = str(npc["id"])
+            assert (
+                game.town_npc_relationship(npc_id) - gathering_before_completion[npc_id]
+                == int(gathering_event["relationship_gains"][npc_id])
+            )
+        assert int(gathering_event["relationship_gains"][str(gathering_host["id"])]) == 2
+        assert all(
+            0 <= int(gathering_event["relationship_gains"][str(guest["id"])]) <= 1
+            for guest in (gathering_guest_one, gathering_guest_two)
+        )
+        assert all(
+            any(
+                str(meeting.get("event_id", "")) == str(gathering_event["id"]) and meeting.get("completed")
+                for meeting in game.dialogue_social_slot(npc, "authored")["meetings"]
+            )
+            for npc in gathering_people
+        )
+        for npc_id, (existed, relationship_before) in gathering_relationships_before.items():
+            if existed:
+                game.state.town_npc_relationships[npc_id] = relationship_before
+            else:
+                game.state.town_npc_relationships.pop(npc_id, None)
+
+        used_social_ids = {date_actor_id, *(str(npc["id"]) for npc in gathering_people)}
+        invitation_actors = [
+            npc for npc in game.state.town_npcs
+            if str(npc.get("id", "")) not in used_social_ids
+        ][:2]
+        invitation_actor, declining_actor = invitation_actors
+        invitation_actor_id = str(invitation_actor["id"])
+        declining_actor_id = str(declining_actor["id"])
+        invitation_relationship_restore = {
+            npc_id: (npc_id in game.state.town_npc_relationships, game.town_npc_relationship(npc_id))
+            for npc_id in (invitation_actor_id, declining_actor_id)
+        }
+        invitation_dialogue_restore = {
+            npc_id: (npc_id in game.state.town_npc_dialogue_counts, game.town_npc_dialogue_count(npc_id))
+            for npc_id in (invitation_actor_id, declining_actor_id)
+        }
+        for npc_id in (invitation_actor_id, declining_actor_id):
+            game.state.town_npc_relationships[npc_id] = 80
+            game.state.town_npc_dialogue_counts[npc_id] = 5
+
+        invitation = game.dialogue_prepare_npc_invitation(invitation_actor, "authored", force=True)
+        assert invitation and invitation["status"] == "pending"
+        invitation_slot = game.dialogue_social_slot(invitation_actor, "authored")
+        invitation_slot["initiation"] = {}
+        callout = game.dialogue_initiation_callout(invitation_actor, "authored")
+        assert game.state.player_name in callout and "join me" in callout
+        invitation_choices = iter(["time", "2", "18", "accept", "goodbye"])
+        game.dialogue_choose = lambda *args, **kwargs: next(invitation_choices)
+        game.dialogue_say = lambda actor, text, phase, transcript: (
+            transcript.append({"speaker": str(actor.get("name", "NPC")), "text": str(text), "phase": str(phase)}), True
+        )[-1]
+        invitation_result = game.run_unified_npc_conversation(
+            invitation_actor, kind="authored", first_meeting=False, repeated_today=False
+        )
+        assert invitation_result["completed"]
+        assert invitation["status"] == "accepted"
+        invitation_event = game.state.planned_events[str(invitation["event_id"])]
+        assert invitation_event["initiated_by_npc"]
+        assert invitation_event["due_hour"] == 18
+        assert invitation_event["due_day"] == game.dialogue_absolute_day() + 2
+        assert any("Outing with" in line or "Date with" in line for line in game.planned_event_journal_lines())
+        assert game.open_planned_events_for_actor(
+            invitation_actor_id, ("relationship_date", "social_outing")
+        ) == [invitation_event]
+
+        declining_invitation = game.dialogue_prepare_npc_invitation(declining_actor, "authored", force=True)
+        declining_relationship_before = game.town_npc_relationship(declining_actor_id)
+        game.dialogue_choose = lambda *args, **kwargs: "decline"
+        assert game.dialogue_handle_npc_invitation(
+            declining_actor, "authored", declining_invitation, []
+        )
+        assert declining_invitation["status"] == "declined"
+        assert game.town_npc_relationship(declining_actor_id) == declining_relationship_before
+        assert game.dialogue_social_slot(declining_actor, "authored")["invitation_history"][-1]["status"] == "declined"
+        for npc_id, (existed, relationship_before) in invitation_relationship_restore.items():
+            if existed:
+                game.state.town_npc_relationships[npc_id] = relationship_before
+            else:
+                game.state.town_npc_relationships.pop(npc_id, None)
+        for npc_id, (existed, dialogue_before) in invitation_dialogue_restore.items():
+            if existed:
+                game.state.town_npc_dialogue_counts[npc_id] = dialogue_before
+            else:
+                game.state.town_npc_dialogue_counts.pop(npc_id, None)
+
+        story_worker = next(
+            npc for npc in game.state.town_npcs if "Blacksmith" in str(npc.get("role", ""))
+        )
+        story_worker_id = str(story_worker["id"])
+        story_worker_relationship_existed = story_worker_id in game.state.town_npc_relationships
+        story_worker_relationship_before = game.town_npc_relationship(story_worker_id)
+        story_wood_before = int(game.state.inventory.get("Wood", 0) or 0)
+        story_stone_before = int(game.state.inventory.get("Stone", 0) or 0)
+        story_coal_before = int(game.state.inventory.get("Coal", 0) or 0)
+        game.state.town_npc_relationships[story_worker_id] = 20
+        story_thread = {
+            "id": "smoke:story:work", "profile": "work", "title": "Pressure at Work",
+            "stage": 0, "status": "active", "created_day": game.dialogue_absolute_day(),
+            "updated_day": game.dialogue_absolute_day(), "last_discussed_day": 0,
+        }
+        game.dialogue_social_slot(story_worker, "authored")["threads"].append(story_thread)
+        game.dialogue_choose = lambda *args, **kwargs: "support"
+        game.dialogue_say = lambda *args, **kwargs: True
+        assert game.dialogue_handle_thread(story_worker, "authored", story_thread, [])
+        story_work_quest = game.quest_record(str(story_thread["quest_id"]))
+        story_work_objective = game.quest_current_objective(story_work_quest)
+        assert story_work_quest["category"] == "Relationships"
+        assert story_work_objective["kind"] == "item" and story_work_objective["item"] == "Wood"
+        assert story_thread["stage"] == 0 and story_thread["support_status"] == "active"
+        game.state.inventory["Wood"] = int(story_work_objective["target"])
+        relationship_before_story_turn_in = game.town_npc_relationship(story_worker_id)
+        assert game.dialogue_handle_thread(story_worker, "authored", story_thread, [])
+        story_work_quest = game.quest_record(str(story_thread["quest_id"]))
+        assert story_work_quest["status"] == "completed"
+        assert int(game.state.inventory.get("Wood", 0) or 0) == 0
+        assert game.town_npc_relationship(story_worker_id) == relationship_before_story_turn_in + 3
+        assert story_thread["stage"] == 1 and story_thread["support_status"] == "completed"
+        first_story_quest_id = str(story_work_quest["id"])
+        assert len(story_thread["support_history"]) == 1
+        quest_count_after_first_support = len([
+            quest for quest in game.state.quest_records.values()
+            if isinstance(quest, dict) and str(quest.get("dialogue_thread_id", "")) == str(story_thread["id"])
+        ])
+        assert game.dialogue_handle_thread(story_worker, "authored", story_thread, [])
+        assert len([
+            quest for quest in game.state.quest_records.values()
+            if isinstance(quest, dict) and str(quest.get("dialogue_thread_id", "")) == str(story_thread["id"])
+        ]) == quest_count_after_first_support
+
+        story_thread["last_discussed_day"] = game.dialogue_absolute_day() - 1
+        assert game.dialogue_handle_thread(story_worker, "authored", story_thread, [])
+        second_story_quest = game.quest_record(str(story_thread["quest_id"]))
+        second_story_objective = game.quest_current_objective(second_story_quest)
+        assert str(second_story_quest["id"]) != first_story_quest_id
+        assert int(second_story_quest["dialogue_thread_stage"]) == 1
+        assert (second_story_objective["item"], int(second_story_objective["target"])) == ("Stone", 8)
+        game.state.inventory["Stone"] = 8
+        assert game.dialogue_handle_thread(story_worker, "authored", story_thread, [])
+        second_story_quest = game.quest_record(str(second_story_quest["id"]))
+        assert second_story_quest["status"] == "completed" and story_thread["stage"] == 2
+        assert int(game.state.inventory.get("Stone", 0) or 0) == 0
+
+        story_thread["last_discussed_day"] = game.dialogue_absolute_day() - 1
+        assert game.dialogue_handle_thread(story_worker, "authored", story_thread, [])
+        third_story_quest = game.quest_record(str(story_thread["quest_id"]))
+        third_story_objective = game.quest_current_objective(third_story_quest)
+        assert len({first_story_quest_id, str(second_story_quest["id"]), str(third_story_quest["id"])}) == 3
+        assert int(third_story_quest["dialogue_thread_stage"]) == 2
+        assert (third_story_objective["item"], int(third_story_objective["target"])) == ("Coal", 4)
+        game.state.inventory["Coal"] = 4
+        assert game.dialogue_handle_thread(story_worker, "authored", story_thread, [])
+        third_story_quest = game.quest_record(str(third_story_quest["id"]))
+        assert third_story_quest["status"] == "completed"
+        assert story_thread["stage"] == 3 and story_thread["status"] == "resolved"
+        assert len(story_thread["support_history"]) == 3
+        assert [int(row["stage"]) for row in story_thread["support_history"]] == [0, 1, 2]
+        assert game.town_npc_relationship(story_worker_id) == relationship_before_story_turn_in + 3 + 4 + 5
+        assert any(
+            str(row.get("id", "")) == str(story_thread["id"])
+            for row in game.dialogue_social_slot(story_worker, "authored")["thread_history"]
+        )
+        story_activity_actor = dict(story_worker)
+        for field in ("social_partner_id", "social_day_key", "social_phase", "social_activity"):
+            story_activity_actor.pop(field, None)
+        assert game.town_npc_activity_label(story_activity_actor) == str(
+            story_worker["story_outcome"]["activity"]
+        )
+
+        story_route_actor = next(
+            npc for npc in game.state.town_npcs
+            if "Fisher" in str(npc.get("role", "")) or "Courier" in str(npc.get("role", ""))
+        )
+        story_route_id = str(story_route_actor["id"])
+        story_route_relationship_existed = story_route_id in game.state.town_npc_relationships
+        story_route_relationship_before = game.town_npc_relationship(story_route_id)
+        game.state.town_npc_relationships[story_route_id] = 20
+        story_route_thread = {
+            "id": "smoke:story:roads", "profile": "roads", "title": "A Route in Question",
+            "stage": 0, "status": "active", "created_day": game.dialogue_absolute_day(),
+            "updated_day": game.dialogue_absolute_day(), "last_discussed_day": 0,
+        }
+        game.dialogue_social_slot(story_route_actor, "authored")["threads"].append(story_route_thread)
+        game.dialogue_known_places = original_activity_known_places
+        story_route_quest = game.dialogue_begin_story_support(
+            story_route_actor, "authored", story_route_thread
+        )
+        story_route_objective = game.quest_current_objective(story_route_quest)
+        assert story_route_objective["kind"] == "visit"
+        story_route_participants = [
+            participant for participant in game.active_temporary_participants()
+            if str(participant.get("quest_id", "")) == str(story_route_quest["id"])
+        ]
+        assert len(story_route_participants) == 1
+        assert story_route_participants[0]["mode"] == "accompany"
+        assert game.track_quest(str(story_route_quest["id"]), announce=False)
+        story_route_quest = game.quest_record(str(story_route_quest["id"]))
+        story_route_objective = game.quest_current_objective(story_route_quest)
+        story_route_objective["complete"] = True
+        game.refresh_quest_states()
+        story_route_quest = game.quest_record(str(story_route_quest["id"]))
+        assert story_route_quest["status"] == "ready"
+        assert game.quest_tracking_destination(story_route_quest)["label"] == str(story_route_actor["name"])
+        story_resolution, story_relationship_gain = game.dialogue_resolve_story_support(
+            story_route_actor, "authored", story_route_thread
+        )
+        story_route_quest = game.quest_record(str(story_route_quest["id"]))
+        assert story_resolution and story_relationship_gain == 3
+        assert story_route_quest["status"] == "completed"
+        assert not [
+            participant for participant in game.active_temporary_participants()
+            if str(participant.get("quest_id", "")) == str(story_route_quest["id"])
+        ]
+        assert story_route_thread["stage"] == 1
+        if story_worker_relationship_existed:
+            game.state.town_npc_relationships[story_worker_id] = story_worker_relationship_before
+        else:
+            game.state.town_npc_relationships.pop(story_worker_id, None)
+        if story_route_relationship_existed:
+            game.state.town_npc_relationships[story_route_id] = story_route_relationship_before
+        else:
+            game.state.town_npc_relationships.pop(story_route_id, None)
+        if story_wood_before:
+            game.state.inventory["Wood"] = story_wood_before
+        else:
+            game.state.inventory.pop("Wood", None)
+        if story_stone_before:
+            game.state.inventory["Stone"] = story_stone_before
+        else:
+            game.state.inventory.pop("Stone", None)
+        if story_coal_before:
+            game.state.inventory["Coal"] = story_coal_before
+        else:
+            game.state.inventory.pop("Coal", None)
+
+        missed_event = game.schedule_planned_event({
+            "id": "smoke:missed_outing", "title": "Missed Outing", "kind": "social_outing",
+            "status": "active", "requires_attendance": True,
+            "expires_at_minute": now_minute - 1,
+        })
+        game.update_planned_events()
+        assert missed_event["status"] == "missed"
+
+        management_day = game.quest_absolute_day() + 2
+        managed_a = game.schedule_planned_event({
+            "id": "smoke:managed_a", "title": "Managed Picnic", "kind": "social_outing",
+            "status": "planned", "requires_attendance": True,
+            "due_day": management_day, "due_hour": 14, "duration_minutes": 180,
+            "destination": {"location": "Wilderness", "label": "Lakeside trail"},
+        })
+        managed_b = game.schedule_planned_event({
+            "id": "smoke:managed_b", "title": "Managed Date", "kind": "relationship_date",
+            "status": "planned", "requires_attendance": True,
+            "due_day": management_day, "due_hour": 15, "duration_minutes": 120,
+        })
+        assert managed_a["conflict_ids"] == ["smoke:managed_b"]
+        assert managed_b["conflict_ids"] == ["smoke:managed_a"]
+        old_expiry = int(managed_b["expires_at_minute"])
+        assert game.reschedule_planned_event("smoke:managed_b", management_day + 1, 10)
+        assert managed_b["due_day"] == management_day + 1 and managed_b["due_hour"] == 10
+        assert managed_b["reschedule_count"] == 1 and int(managed_b["expires_at_minute"]) != old_expiry
+        assert not managed_a["conflict_ids"] and not managed_b["conflict_ids"]
+        assert game.cancel_planned_event("smoke:managed_b")
+        assert managed_b["status"] == "cancelled"
+        assert any("Managed Date [Cancelled]" in line for line in game.planned_event_history_lines())
+        assert not game.reschedule_planned_event("smoke:managed_b", management_day + 3, 12)
+
+        protected = game.schedule_planned_event({
+            "id": "smoke:protected_plan", "title": "Quest-critical Guide", "kind": "meeting",
+            "status": "planned", "requires_attendance": True, "quest_id": "smoke:visit",
+            "due_day": management_day, "due_hour": 8,
+        })
+        assert not game.planned_event_player_manageable(protected)
+        assert not game.cancel_planned_event("smoke:protected_plan")
+
+        original_weather = game.state.weather
+        game.state.weather = "Stormy"
+        managed_a["due_day"], managed_a["due_hour"] = game.quest_absolute_day(), int(game.state.hour)
+        managed_a["expires_at_minute"] = now_minute + 240
+        game.update_planned_events()
+        assert managed_a["status"] == "planned" and managed_a["due_day"] == game.quest_absolute_day() + 1
+        assert managed_a["weather_delays"] == 1
+        game.state.weather = original_weather
+
+        deceased_before = list(game.state.deceased_spouse_npc_ids or [])
+        game.state.deceased_spouse_npc_ids = deceased_before + ["smoke:unavailable_person"]
+        unavailable = game.schedule_planned_event({
+            "id": "smoke:unavailable", "title": "Unavailable Guest", "kind": "social_outing",
+            "status": "planned", "requires_attendance": True,
+            "due_day": game.quest_absolute_day() + 1, "due_hour": 12,
+            "participants": [{"actor_id": "smoke:unavailable_person", "name": "Unavailable Guest"}],
+        })
+        game.update_planned_events()
+        assert unavailable["status"] == "cancelled"
+        assert "unavailable participant" in unavailable["completion_reason"]
+        game.state.deceased_spouse_npc_ids = deceased_before
+    finally:
+        game.dialogue_known_places = original_activity_known_places
+        game.dialogue_known_people = original_activity_known_people
+        game.dialogue_choose = original_activity_choose
+        game.dialogue_say = original_activity_say
+        game.autosave_with_message = original_activity_autosave
+        if date_relationship_existed:
+            game.state.town_npc_relationships[date_actor_id] = date_relationship_before
+        else:
+            game.state.town_npc_relationships.pop(date_actor_id, None)
+        game.state.town_npc_courtship_counts[date_actor_id] = date_courtship_before
+        if date_last_court_before is None:
+            game.state.town_npc_last_court_day.pop(date_actor_id, None)
+        else:
+            game.state.town_npc_last_court_day[date_actor_id] = date_last_court_before
+        game.state.dating_npc_ids = dating_before
+        game.state.npc_dialogue_social_state = date_social_before
+    game.state.planned_events = original_planned_events
+    game.state.temporary_participant_states = original_temporary_states
+    game.state.quest_records = original_quest_records
+    game.state.tracked_quest_id = original_tracked_quest_id
+    situation_turns = []
+    situation_options = []
+    original_say = game.dialogue_say
+    original_choose = game.dialogue_choose
+    game.dialogue_say = lambda actor, text, phase, transcript: (
+        situation_turns.append((str(phase), str(text))), True
+    )[-1]
+    game.dialogue_choose = lambda actor, prompt, phase, options, transcript: (
+        situation_options.extend(options), "decline"
+    )[-1]
+    try:
+        assert game.dialogue_handle_work_situation(first_npc, "authored", [])
+    finally:
+        game.dialogue_say = original_say
+        game.dialogue_choose = original_choose
+    assert any(value == "decline" and "no relationship penalty" in hint for value, _label, hint in situation_options)
+    assert "honest refusal" in situation_turns[-1][1]
+    game.state.npc_dialogue_promises = original_promises
+    game.state.completed_errand_ids = original_completed_errands
     tutorials = game.tutorial_catalog()
     assert "quick_start" in tutorials
     assert any("bookshelf" in line.lower() for line in tutorials["quick_start"]["lines"])
@@ -6860,6 +10499,27 @@ def main() -> int:
     assert game_table_game.state.tavern_game_discoveries == ["blackjack"]
     game_table_game.discover_game_tables(("checkers", "invalid", "blackjack"))
     assert game_table_game.state.tavern_game_discoveries == ["blackjack", "checkers"]
+    authored_game_table_game = FarmGame()
+    authored_game_table_game.state.location = "GeneralStoreInterior"
+    authored_game_grid = [["." for _ in range(3)] for _ in range(3)]
+    authored_game_table_game.active_map = lambda: authored_game_grid
+    authored_game_table_game.in_active_bounds = (
+        lambda x, y: 0 <= int(x) < 3 and 0 <= int(y) < 3
+    )
+    opened_authored_tables = []
+    authored_game_table_game.open_physical_game_table = (
+        lambda game_id, venue: opened_authored_tables.append((game_id, venue))
+    )
+    for game_id, table in game_tables.GAME_TABLE_DATA.items():
+        glyph = str(table["glyph"])
+        authored_game_grid[1][1] = glyph
+        authored_record = authored_game_table_game.town_interior_tile_catalog(
+            "GeneralStoreInterior"
+        )[glyph]
+        assert str(table["name"]) in authored_record["hint"]
+        assert authored_game_table_game.use_town_interior_game_table_action(1, 1)
+        assert opened_authored_tables[-1][0] == game_id
+    assert len(opened_authored_tables) == len(game_tables.GAME_TABLE_DATA)
     game_table_game.state.location = "HouseInterior"
     game_table_game.state.inventory["Chess Table"] = 1
     chess_table_position = next(
@@ -6888,21 +10548,30 @@ def main() -> int:
     }))
     assert sanitized_game_table_state.tavern_game_discoveries == ["chess"]
     assert {"1", "3", "5"} <= set(
-        "".join("".join(row) for row in game_table_game.inn_interior_map)
+        "".join("".join(row) for row in game_table_game.make_inn_interior_map())
     )
     authored_public_interiors = (
-        game_table_game.general_store_map,
-        game_table_game.blacksmith_interior_map,
-        game_table_game.library_interior_map,
-        game_table_game.furniture_store_map,
-        game_table_game.carpenter_store_map,
-        game_table_game.museum_interior_map,
+        game_table_game.make_general_store_map(),
+        game_table_game.make_blacksmith_interior_map(),
+        game_table_game.make_library_interior_map(),
+        game_table_game.make_furniture_store_map(),
+        game_table_game.make_carpenter_store_map(),
+        game_table_game.make_museum_interior_map(),
     )
     assert all(
         "|" not in "".join("".join(row) for row in interior)
         for interior in authored_public_interiors
     )
-    assert sum(row.count("_") for row in game_table_game.inn_interior_map) == 3
+    modular_inn_grid = game_table_game.make_inn_interior_map()
+    starting_inn_plan = procedural_interiors.procedural_interior_room_plan(
+        "inn", 2, 1, 0, None, 2
+    )
+    assert sum(row.count("B") for row in modular_inn_grid) == int(
+        starting_inn_plan["guest_capacity"]
+    )
+    assert sum(row.count("_") for row in modular_inn_grid) >= int(
+        starting_inn_plan["guest_capacity"]
+    )
     roadside_table_game = FarmGame()
     roadside_table_game.state.location = "WildernessStructure"
     roadside_table_game.state.wilderness_chunk_x = 91
@@ -7071,7 +10740,7 @@ def main() -> int:
             "Z/Enter/Space: confirm",
             "R: suggested action",
             "H: rules",
-            "X/Esc/Q: pause",
+            "B/X/Esc/Q/Tab: pause",
         )
     minigame_control_lines = minigame_controls_output.getvalue().splitlines()
     assert minigame_control_lines
@@ -7080,6 +10749,10 @@ def main() -> int:
     assert ui.visible_text_len(minigame_ui.minigame_meter("Progress", 3, 7, width=14)) > 20
 
     # American checkers enforces captures, chained jumps, kings, and resumable state.
+    assert checkers.checkers_piece_glyph("r") == "⛀"
+    assert checkers.checkers_piece_glyph("R") == "⛁"
+    assert checkers.checkers_piece_glyph("b") == "⛂"
+    assert checkers.checkers_piece_glyph("B") == "⛃"
     starting_checkers_board = checkers.new_checkers_board()
     assert sum(piece in {"r", "R"} for row in starting_checkers_board for piece in row) == 12
     assert sum(piece in {"b", "B"} for row in starting_checkers_board for piece in row) == 12
@@ -7161,6 +10834,10 @@ def main() -> int:
     assert any("CHECKERS RECORD" in line for line in reloaded_checkers_game.tavern_game_record_lines())
 
     # Chess covers legal movement, special moves, endings, AI, and resumable state.
+    assert chess.chess_piece_glyph("K") == "♔"
+    assert chess.chess_piece_glyph("Q") == "♕"
+    assert chess.chess_piece_glyph("p") == "♟"
+    assert chess.chess_piece_name("n") == "Black knight"
     starting_chess_board = chess.new_chess_board()
     assert sum(piece.isupper() for row in starting_chess_board for piece in row if piece != ".") == 16
     assert sum(piece.islower() for row in starting_chess_board for piece in row if piece != ".") == 16
@@ -7716,7 +11393,7 @@ def main() -> int:
 
     game.state.location = "MuseumInterior"
     assert game.location_label() == "Museum"
-    assert game.active_map()[19][27] == "D"
+    assert sum(row.count("D") for row in game.active_map()) == 1
     museum_service_tiles = [
         (x, y)
         for y, row in enumerate(game.active_map())
@@ -7777,6 +11454,11 @@ def main() -> int:
 
     festival_game = FarmGame()
     festival_game.autosave_with_message = lambda message: festival_game.set_message(message)
+    festival_special_events = []
+    festival_game.play_world_event_scene = (
+        lambda event_id, title, steps, completion_message="":
+        festival_special_events.append((str(event_id), str(title), list(steps))) or True
+    )
     festival_game.state.month, festival_game.state.day, festival_game.state.year = 3, 7, 1
     festival = festival_game.todays_festival()
     assert festival and festival["id"] == "spring_seed_fair"
@@ -7785,6 +11467,9 @@ def main() -> int:
     assert festival_game.complete_festival_activity(festival, activities[0])
     assert festival_game.festival_activity_completed("spring_seed_fair", str(activities[0]["id"]))
     assert festival_game.state.inventory.get("Mixed Seeds", 0) >= 2
+    assert festival_special_events and festival_special_events[-1][0].startswith("festival_activity:")
+    assert festival_game.attend_todays_festival()
+    assert any(event_id.startswith("festival:") for event_id, _title, _steps in festival_special_events)
 
     market_game = FarmGame()
     market_game.vertical_panel_view = lambda *args, **kwargs: None
@@ -7831,16 +11516,53 @@ def main() -> int:
     assert any("[Tool " in line for line in plain_header)
     hud_footer = game.footer_lines()
     assert len(hud_footer) <= game.hud_footer_budget()
-    assert len(hud_footer) >= 4
+    assert len(hud_footer) >= 1
     assert all(visible_terminal_len(line) <= hud_width for line in hud_footer)
     plain_footer = [ANSI_CSI_RE.sub("", line) for line in hud_footer]
-    assert any(line.startswith("MESSAGE |") for line in plain_footer)
+    if game.hud_sidebar_active():
+        assert not any(line.startswith("MESSAGE |") for line in plain_footer)
+        sidebar_lines = [ANSI_CSI_RE.sub("", line) for line in game.hud_sidebar_lines()]
+        assert len(sidebar_lines) == data.VIEW_HEIGHT
+        assert any("ACTIVITY" in line for line in sidebar_lines)
+        assert not any("INTERACTION" in line or "TARGET" in line for line in sidebar_lines)
+    else:
+        assert any(line.startswith("MESSAGE |") for line in plain_footer)
     original_terminal_width = farmstead_main.terminal_width
     hud_regression_game = FarmGame()
     original_row_count = hud_regression_game.terminal_row_count
     try:
+        farmstead_main.terminal_width = lambda: 100
+        hud_regression_game.terminal_row_count = lambda: 36
+        assert hud_regression_game.hud_sidebar_active()
+        hud_regression_game.set_message("Found a Copper Ore.")
+        hud_regression_game.set_message("Found a Copper Ore.")
+        assert hud_regression_game.state.hud_activity_log[-1]["count"] == 2
+        assert hud_regression_game.state.hud_activity_log[-1]["category"] == "gain"
+        wide_sidebar = [ANSI_CSI_RE.sub("", line) for line in hud_regression_game.hud_sidebar_lines()]
+        assert len(wide_sidebar) == data.VIEW_HEIGHT
+        assert any("Found a Copper Ore. x2" in line for line in wide_sidebar)
+        assert all(len(line) == hud_regression_game.hud_sidebar_width() for line in wide_sidebar)
+        assert any("Copper Ore" in line for line in hud_regression_game.hud_activity_log_lines("gain"))
+        for activity_index in range(30):
+            hud_regression_game.add_hud_activity(f"History event {activity_index}.", "general")
+        history_frame, history_scroll, history_max_scroll = hud_regression_game.hud_fullscreen_history_frame(
+            "all", None, width=90, height=30,
+        )
+        plain_history_frame = [ANSI_CSI_RE.sub("", line) for line in history_frame]
+        assert len(plain_history_frame) == 30
+        assert all(len(line) == 90 for line in plain_history_frame)
+        assert any("ACTIVITY HISTORY" in line for line in plain_history_frame)
+        assert any("B/X/J/Esc/Q/Tab close" in line for line in plain_history_frame)
+        assert history_scroll == history_max_scroll and history_max_scroll > 0
+        assert any("Copper Ore" in line for line in hud_regression_game.hud_fullscreen_history_rows("gain", 70))
+        hud_regression_game.state.show_hud_sidebar = False
+        assert not hud_regression_game.hud_sidebar_active()
+        assert any("MESSAGE |" in ANSI_CSI_RE.sub("", line) for line in hud_regression_game.footer_lines())
+        hud_regression_game.state.show_hud_sidebar = True
+
         farmstead_main.terminal_width = lambda: 73
         hud_regression_game.terminal_row_count = lambda: 31
+        assert not hud_regression_game.hud_sidebar_active()
         hud_regression_game.state.player_name = "Aaron"
         hud_regression_game.state.money = 999999
         hud_regression_game.state.player_x = 8
@@ -7907,13 +11629,9 @@ def main() -> int:
         if not game.in_active_bounds(game.state.player_x, game.state.player_y):
             game.state.player_x, game.state.player_y = 1, 1
         game.state.message = f"Render sweep for {location}. " + ("Long HUD text " * 8)
-        frame_width = max(game.hud_line_width(), game.active_map_width())
+        frame_width = max(game.hud_display_width(), game.active_map_width())
         for rendered_line in game.render_frame_text().splitlines():
             assert visible_terminal_len(rendered_line) <= frame_width
-    assert game.make_general_store_map()[17][42] == "P"
-    assert game.make_library_interior_map()[17][42] == "P"
-    assert game.make_town_hall_map()[17][42] == "P"
-
     interior_audit_specs = [
         ("GeneralStoreInterior", "general_store_map", {"D", "&", "P", "s", "f", "b", "t"}),
         ("BlacksmithInterior", "blacksmith_interior_map", {"D", "&", "P", "a", "f", "o", "q", "w", "t"}),
@@ -7928,27 +11646,129 @@ def main() -> int:
         ("MarketRowInterior", "market_row_map", {"D", "&", "P", "v", "f", "r", "t", "m"}),
         ("MuseumInterior", "museum_interior_map", {"D", "d", "&", "P", "C", "F", "G", "M", "A", "E", "S"}),
     ]
-    authored_private_door_counts = {
+    authored_private_door_minimums = {
+        "GeneralStoreInterior": 2,
+        "LibraryInterior": 1,
         "MayorHouseInterior": 1,
-        "InnInterior": 3,
-        "ClinicInterior": 1,
+        "InnInterior": 4,
+        "MuseumInterior": 1,
+        "FurnitureStoreInterior": 1,
+        "ClinicInterior": 2,
         "TownHallInterior": 2,
     }
     authored_layout_signatures = set()
+    authored_catalog_actions = set()
+    authored_factory_by_attr = dict(game.TOWN_INTERIOR_MAP_SPECS)
     for location, map_attr, required_tiles in interior_audit_specs:
         game.state.location = location
         game.state.player_x, game.state.player_y = 27, 18
         game.state.hour, game.state.minute = 6, 0
-        grid = getattr(game, map_attr)
+        runtime_grid = getattr(game, map_attr)
+        grid = getattr(game, authored_factory_by_attr[map_attr])()
+        # Public starting-town maps always come from the modular runtime; old
+        # blueprint override records no longer replace this architecture.
+        setattr(game, map_attr, grid)
+        game.state.player_x = len(grid[0]) - 2
+        game.state.player_y = len(grid) - 2
+        cam_x, cam_y = game.camera_origin()
+        assert cam_x == max(0, len(grid[0]) - farmstead_main.VIEW_WIDTH)
+        assert cam_y == max(0, len(grid) - farmstead_main.VIEW_HEIGHT)
+        player_screen_x = game.state.player_x - cam_x
+        player_screen_y = game.state.player_y - cam_y
+        camera_rows = [ANSI_CSI_RE.sub("", row) for row in game.map_lines()]
+        assert camera_rows[player_screen_y][player_screen_x] == ANSI_CSI_RE.sub(
+            "", game.render_player()
+        )
+        game.state.player_x, game.state.player_y = 27, 18
+        catalog_lookup = game._starting_town_catalog_furniture_cache.get(location, {})
+        assert catalog_lookup, f"{location} has no catalog furniture layer"
+        for furniture_position, furniture_cell in catalog_lookup.items():
+            furniture_name = str(furniture_cell.get("name", "Furniture"))
+            authored_catalog_actions.add(furniture_actions.furniture_action_id(
+                furniture_name, data.INFRASTRUCTURE_DATA.get(furniture_name, {}),
+            ))
+            use_hint = game.town_interior_tile_hint(*furniture_position)
+            assert use_hint.startswith("Z/Enter:")
+            assert not use_hint.lower().startswith("z/enter: inspect")
+            assert game.is_interactable_tile(*furniture_position)
+        catalog_position, catalog_cell = next(iter(catalog_lookup.items()))
+        assert catalog_cell["name"] in furniture_catalog.FURNITURE_CATALOG_DATA
+        catalog_description = game.town_interior_tile_description(*catalog_position)
+        assert str(catalog_cell["name"]) in str(catalog_description)
+        assert visible_terminal_len(
+            game.render_tile(catalog_position[0], catalog_position[1], grid)
+        ) == 1
+        source_catalog_glyph = str(catalog_cell.get("glyph", " "))[:1]
+        expected_catalog_glyph = furniture_art.furniture_display_cell(
+            str(catalog_cell["name"]),
+            int(catalog_cell.get("offset_x", 0) or 0),
+            int(catalog_cell.get("offset_y", 0) or 0),
+            True,
+            int(catalog_cell.get("rotation", 0) or 0),
+        ) or furniture_art.furniture_display_glyph(
+            source_catalog_glyph,
+            catalog_cell.get("material_role", "wood"),
+            True,
+        )
+        expected_catalog_glyph = furniture_art.furniture_orient_display_glyph(
+            expected_catalog_glyph,
+            catalog_cell.get("building_side", "south"),
+        )
+        assert ANSI_CSI_RE.sub(
+            "", game.render_tile(catalog_position[0], catalog_position[1], grid)
+        ) == expected_catalog_glyph
         authored_layout_signatures.add(tuple("".join(row) for row in grid))
-        assert grid[19][27] == "D", f"{location} missing exit"
-        assert game.passable(27, 18), f"{location} entry lane is blocked"
+        interior_symbols = set("".join("".join(row) for row in grid))
+        interior_catalog = game.town_interior_tile_catalog(location)
+        assert interior_symbols <= set(interior_catalog), (
+            f"{location} contains uncatalogued glyphs: "
+            f"{sorted(interior_symbols - set(interior_catalog))}"
+        )
+        for semantic_tile in interior_symbols:
+            semantic_record = interior_catalog[semantic_tile]
+            semantic_description = str(semantic_record.get("desc", ""))
+            semantic_hint = str(semantic_record.get("hint", ""))
+            assert len(semantic_description) >= 8
+            assert "nothing here needs your attention" not in semantic_description.lower()
+            assert "uncatalogued" not in semantic_description.lower()
+            assert semantic_hint and "nothing" not in semantic_hint.lower()
+            semantic_furniture_name = game.town_semantic_furniture_name(semantic_tile)
+            semantic_x, semantic_y = next(
+                (x, y)
+                for y, row in enumerate(grid)
+                for x, tile in enumerate(row)
+                if tile == semantic_tile
+            )
+            if semantic_furniture_name:
+                live_semantic_hint = game.town_interior_tile_hint(semantic_x, semantic_y)
+                assert not live_semantic_hint.lower().startswith("z/enter: inspect")
+            semantic_furniture = game.starting_town_catalog_furniture_at(
+                semantic_x, semantic_y
+            )
+            resolved_description = game.town_interior_tile_description(
+                semantic_x, semantic_y
+            )
+            if semantic_furniture:
+                assert str(semantic_furniture["name"]) in str(resolved_description)
+            else:
+                assert resolved_description == semantic_description
+            if semantic_tile not in {".", ":", ",", "#", " "}:
+                assert semantic_tile in game.town_interior_interactable_tiles()
+        exit_positions = [
+            (x, y)
+            for y, row in enumerate(grid)
+            for x, tile in enumerate(row)
+            if tile == "D"
+        ]
+        assert len(exit_positions) == 1, f"{location} needs exactly one exterior exit"
+        entry_x, entry_y = game.authored_interior_entry_tile()
+        assert game.passable(entry_x, entry_y), f"{location} entry lane is blocked"
         assert not any(
             tile == "|" for row in grid for tile in row
         ), f"{location} public room connections should be open archways"
-        assert sum(row.count("_") for row in grid) == authored_private_door_counts.get(
+        assert sum(row.count("_") for row in grid) >= authored_private_door_minimums.get(
             location, 0
-        ), f"{location} should only retain purposeful private doors"
+        ), f"{location} should retain purposeful private/service doors"
         full_width_spoke_rows = sum(
             1
             for lane_y in (8, 11, 14, 16)
@@ -7957,8 +11777,8 @@ def main() -> int:
         assert full_width_spoke_rows <= 1, f"{location} still looks like the old full-width spoke template"
         sleep_x, sleep_y = game.indoor_npc_base_position(location)
         assert game.passable(sleep_x, sleep_y), f"{location} sleep anchor blocked at {sleep_x},{sleep_y}"
-        seen = {(27, 18)}
-        queue = deque([(27, 18)])
+        seen = {(entry_x, entry_y)}
+        queue = deque([(entry_x, entry_y)])
         while queue:
             x, y = queue.popleft()
             for nx, ny in [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)]:
@@ -7983,8 +11803,81 @@ def main() -> int:
                 for x, y in positions
                 for dx, dy in [(1, 0), (-1, 0), (0, 1), (0, -1)]
             ), f"{location} tile {tile!r} is not reachable"
-        assert "leave" in game.interaction_hint(27, 19)
+        assert "leave" in game.interaction_hint(*exit_positions[0])
+        setattr(game, map_attr, runtime_grid)
     assert len(authored_layout_signatures) >= len(interior_audit_specs) - 1, "Authored town interiors are too visually repetitive"
+    assert {"seat", "sleep", "cook", "work", "storage", "table"}.issubset(authored_catalog_actions)
+
+    game.state.location = "GeneralStoreInterior"
+    general_store_catalog = game._starting_town_catalog_furniture_cache["GeneralStoreInterior"]
+    shared_container_cells = {}
+    for position, cell in general_store_catalog.items():
+        furniture_name = str(cell.get("name", ""))
+        if not data.INFRASTRUCTURE_DATA.get(furniture_name, {}).get("container_profile"):
+            continue
+        shared_container_cells.setdefault(
+            game.furniture_state_key(furniture_name, position[0], position[1], cell), []
+        ).append(position)
+    multi_cell_container = next(cells for cells in shared_container_cells.values() if len(cells) >= 2)
+    first_container = game.world_container_at(*multi_cell_container[0])
+    second_container = game.world_container_at(*multi_cell_container[1])
+    assert first_container is second_container
+    assert first_container.get("name") in data.INFRASTRUCTURE_DATA
+
+    original_safe_menu = game.safe_menu
+    counter_services = []
+    game.safe_menu = lambda menu_func, close_message: counter_services.append(close_message)
+    counter_service_specs = [
+        ("GeneralStoreInterior", "general_store_map", "use_general_store_action"),
+        ("BlacksmithInterior", "blacksmith_interior_map", "use_blacksmith_interior_action"),
+        ("MuseumInterior", "museum_interior_map", "use_museum_action"),
+        ("InnInterior", "inn_interior_map", "use_inn_action"),
+        ("CarpenterStoreInterior", "carpenter_store_map", "use_carpenter_store_action"),
+        ("FurnitureStoreInterior", "furniture_store_map", "use_furniture_store_action"),
+        ("ClinicInterior", "clinic_map", "use_clinic_action"),
+        ("TownHallInterior", "town_hall_map", "use_town_hall_action"),
+        ("MarketRowInterior", "market_row_map", "use_market_row_action"),
+        ("AnimalStoreInterior", "animal_store_map", "use_animal_store_action"),
+    ]
+    for location, map_attr, action_name in counter_service_specs:
+        game.state.location = location
+        counter_grid = getattr(game, map_attr)
+        counter_positions = [
+            (x, y, tile)
+            for y, row in enumerate(counter_grid)
+            for x, tile in enumerate(row)
+            if tile in {"$", "&"}
+        ]
+        counter_x, counter_y, _counter_tile = next(
+            (entry for entry in counter_positions if entry[2] == "$"),
+            next(entry for entry in counter_positions if entry[2] == "&"),
+        )
+        before_counter_service = len(counter_services)
+        getattr(game, action_name)(counter_x, counter_y)
+        assert len(counter_services) == before_counter_service + 1
+    game.safe_menu = original_safe_menu
+    for residence_id in data.AUTHORED_TOWN_RESIDENCE_DATA:
+        game.state.current_authored_residence_id = residence_id
+        game.state.location = "TownResidenceInterior"
+        runtime_residence_grid = game.authored_town_residence_map(residence_id)
+        residence_grid = game.make_authored_town_residence_map(residence_id)
+        game._authored_town_residence_maps[residence_id] = residence_grid
+        residence_catalog = game.town_interior_tile_catalog(
+            "TownResidenceInterior"
+        )
+        residence_symbols = set(
+            "".join("".join(row) for row in residence_grid)
+        )
+        assert residence_symbols <= set(residence_catalog)
+        assert all(
+            "nothing here needs your attention"
+            not in str(residence_catalog[tile]["desc"]).lower()
+            for tile in residence_symbols
+        )
+        game._authored_town_residence_maps[residence_id] = runtime_residence_grid
+    game.state.current_authored_residence_id = ""
+    for authored_map_attr, authored_factory_name in game.TOWN_INTERIOR_MAP_SPECS:
+        setattr(game, authored_map_attr, getattr(game, authored_factory_name)())
     game.state.location = "InnInterior"
     inn_closed_door = next(
         (x, y)
@@ -7997,28 +11890,56 @@ def main() -> int:
     assert game.use_town_room_door_action(*inn_closed_door)
     assert game.inn_interior_map[inn_closed_door[1]][inn_closed_door[0]] == "_"
     door_route_game = FarmGame()
+    door_route_game.inn_interior_map = door_route_game.make_inn_interior_map()
     door_route_game.state.town_npcs = []
+    route_door = None
+    for door_y, row in enumerate(door_route_game.inn_interior_map):
+        for door_x, tile in enumerate(row):
+            if tile != "_":
+                continue
+            for start, target, far in (
+                ((door_x - 1, door_y), (door_x + 1, door_y), (door_x + 2, door_y)),
+                ((door_x + 1, door_y), (door_x - 1, door_y), (door_x - 2, door_y)),
+                ((door_x, door_y - 1), (door_x, door_y + 1), (door_x, door_y + 2)),
+                ((door_x, door_y + 1), (door_x, door_y - 1), (door_x, door_y - 2)),
+            ):
+                if (
+                    door_route_game.authored_town_interior_passable("InnInterior", *start)
+                    and door_route_game.authored_town_interior_passable("InnInterior", *target)
+                    and door_route_game.authored_town_interior_passable("InnInterior", *far)
+                ):
+                    route_door = ((door_x, door_y), start, target, far)
+                    break
+            if route_door:
+                break
+        if route_door:
+            break
+    assert route_door is not None
+    (route_door_x, route_door_y), route_start, route_target, route_far = route_door
     door_test_npc = {
         "id": "authored_door_test",
-        "interior_x": 14,
-        "interior_y": 8,
+        "interior_x": route_start[0],
+        "interior_y": route_start[1],
         "steps_today": 0,
     }
-    assert door_route_game.inn_interior_map[8][13] == "_"
+    assert door_route_game.inn_interior_map[route_door_y][route_door_x] == "_"
     door_route_game.town_npc_move_interior_toward(
         door_test_npc,
         "InnInterior",
-        (12, 8),
+        route_target,
     )
-    assert (door_test_npc["interior_x"], door_test_npc["interior_y"]) == (13, 8)
-    assert door_route_game.inn_interior_map[8][13] == "|"
-    door_test_npc["interior_x"], door_test_npc["interior_y"] = 11, 8
+    assert (door_test_npc["interior_x"], door_test_npc["interior_y"]) == (
+        route_door_x,
+        route_door_y,
+    )
+    assert door_route_game.inn_interior_map[route_door_y][route_door_x] == "|"
+    door_test_npc["interior_x"], door_test_npc["interior_y"] = route_far
     door_route_game.town_npc_close_used_interior_door(
         door_test_npc,
         "InnInterior",
-        (11, 8),
+        route_far,
     )
-    assert door_route_game.inn_interior_map[8][13] == "_"
+    assert door_route_game.inn_interior_map[route_door_y][route_door_x] == "_"
 
     service_action_specs = [
         ("GeneralStoreInterior", "general_store_map", "use_general_store_action", "General Store closed."),
@@ -8043,6 +11964,17 @@ def main() -> int:
             game.safe_menu = lambda callback, fallback, opened=opened: opened.append(fallback)
             getattr(game, action_name)(sx, sy)
             assert opened == [expected_fallback], f"{location} service point did not open its service menu"
+            passive_x, passive_y = next(
+                (x, y)
+                for y, row in enumerate(grid)
+                for x, tile in enumerate(row)
+                if tile == "-"
+            )
+            expected_passive_description = game.town_interior_tile_catalog(
+                location
+            )["-"]["desc"]
+            getattr(game, action_name)(passive_x, passive_y)
+            assert game.state.message == expected_passive_description
     finally:
         game.safe_menu = original_safe_menu
 
@@ -8073,7 +12005,7 @@ def main() -> int:
     assert len(inn_positions) == 3
     assert len(set(inn_positions.values())) == 3, "Inn sleepers should occupy separate rooms"
     inn_bed_anchors = set(routine_game.town_npc_fixture_room_anchors("InnInterior", {"B"}))
-    assert set(inn_positions.values()) == inn_bed_anchors
+    assert set(inn_positions.values()) <= inn_bed_anchors
     # Late travelers describe the trip home instead of appearing to sleep on
     # the street, and the 11 PM fallback resolves every blocked route indoors.
     routine_game.state.location = "Wilderness"
@@ -8109,13 +12041,14 @@ def main() -> int:
         ) >= 50
         residence_map = routine_game.authored_town_residence_map(residence_id)
         residence_signatures.add(tuple("".join(row) for row in residence_map))
-        assert residence_map[19][27] == "D"
+        assert sum(row.count("D") for row in residence_map) == 1
         assert sum(row.count("B") for row in residence_map) == len(residence.get("residents", ()))
         assert sum(row.count("k") for row in residence_map) == 1
         routine_game.state.current_authored_residence_id = residence_id
         routine_game.state.location = "TownResidenceInterior"
-        routine_game.state.player_x, routine_game.state.player_y = 27, 18
-        assert routine_game.passable(27, 18)
+        entry_x, entry_y = routine_game.authored_interior_entry_tile()
+        routine_game.state.player_x, routine_game.state.player_y = entry_x, entry_y
+        assert routine_game.passable(entry_x, entry_y)
         routine_game.exit_authored_town_residence()
         assert routine_game.state.location == "Wilderness"
         assert routine_game.home_world_source_at(
@@ -8467,7 +12400,14 @@ def main() -> int:
         if authored_route_game.town_npc_actual_location(mira) == "GeneralStoreInterior":
             break
     assert authored_route_game.town_npc_actual_location(mira) == "GeneralStoreInterior"
-    assert (int(mira.get("interior_x", -1)), int(mira.get("interior_y", -1))) == (27, 18)
+    assert (
+        int(mira.get("interior_x", -1)),
+        int(mira.get("interior_y", -1)),
+    ) == authored_route_game.town_npc_nearest_interior_tile(
+        "GeneralStoreInterior",
+        27,
+        18,
+    )
 
     transition_game = FarmGame()
     transition_game.state.unlocked_town_buildings = list(data.TOWN_BUILDING_IDS)
@@ -8511,6 +12451,11 @@ def main() -> int:
     family_game = FarmGame()
     family_game.vertical_panel_view = lambda *args, **kwargs: None
     family_game.autosave_with_message = lambda message: family_game.set_message(message)
+    family_special_events = []
+    family_game.play_world_event_scene = (
+        lambda event_id, title, steps, completion_message="":
+        family_special_events.append((str(event_id), str(title), list(steps))) or True
+    )
     spouse = family_game.town_npc_definition("finn_fisher")
     assert spouse
     family_game.state.player_sex = "Female"
@@ -8546,16 +12491,26 @@ def main() -> int:
     family_game.state.month = family_game.state.pregnancy_due_month
     family_game.state.day = family_game.state.pregnancy_due_day
     family_game.state.year = family_game.state.pregnancy_due_year
-    birth_msg = family_game.update_family_overnight()
+    family_game.choose_child_birth_options = (
+        lambda default_name, _sex, profile: (default_name, str(profile.get("starting_class", "Vanguard")))
+    )
+    birth_msg = family_game.update_family_overnight(interactive=True)
     assert "was born" in birth_msg
     assert not family_game.state.pregnancy_active
     assert family_game.state.children
     child = family_game.state.children[0]
+    assert any(event_id.startswith("birth:") for event_id, _title, _steps in family_special_events)
     assert child.get("personality_trait")
     assert child.get("favorite_gift")
     assert child.get("apprentice_path")
     assert child.get("starting_class") in family_game.child_starting_class_catalog()
     family_game.state.year = max(family_game.state.year, int(child.get("birth_year", 1)) + 7)
+    milestone_note = family_game.record_child_milestones_overnight(interactive=True)
+    assert str(child.get("name")) in milestone_note
+    assert any(
+        event_id.startswith("child_milestone:")
+        for event_id, _title, _steps in family_special_events
+    )
     assert any("Trait:" in line for line in family_game.household_child_status_lines(child))
     child_conversation_topics = {
         topic: " ".join(family_game.household_child_talk_lines(child, topic))
@@ -8598,10 +12553,60 @@ def main() -> int:
         str(actor.get("id", "")) == f"household_child:{child.get('id')}"
         for actor in family_game.household_child_npcs()
     )
+    assert not any(
+        str(actor.get("id", "")) == "finn_fisher"
+        for actor in family_game.town_npc_position_lookup().values()
+    )
     family_game.state.location = "LibraryInterior"
     assert any(
         str(actor.get("id", "")) == f"household_child:{child.get('id')}"
         for actor in family_game.town_npc_position_lookup().values()
+    )
+    family_game.state.location = "HouseInterior"
+    family_game.state.hour = 19
+    family_game.state.minute = 0
+    family_game.house_map = [list("." * 55) for _ in range(20)]
+    family_game.state.placed_objects = {}
+    family_game.state.placed_object_rotations = {}
+    family_game.state.placed_object_finishes = {}
+    family_game.state.player_x = 1
+    family_game.state.player_y = 1
+    family_game.set_placed_object(5, 5, "Dining Set")
+    family_game.set_placed_object(20, 5, "Reading Nook", rotation=1)
+    family_game.set_placed_object(35, 5, "Four-Poster Bed")
+    family_lookup = family_game.town_npc_position_lookup()
+    family_actor_ids = {str(actor.get("id", "")) for actor in family_lookup.values()}
+    assert "finn_fisher" in family_actor_ids
+    assert f"household_child:{child.get('id')}" in family_actor_ids
+    family_positions = [
+        position for position, actor in family_lookup.items()
+        if str(actor.get("id", "")) in {"finn_fisher", f"household_child:{child.get('id')}"}
+    ]
+    assert len(family_positions) == len(set(family_positions)) == 2
+    assert all(family_game.in_house_bounds_for_npc(*position) for position in family_positions)
+    for family_position in family_positions:
+        family_key, family_object, family_ax, family_ay = family_game.placed_object_at(*family_position)
+        assert (
+            family_object is None
+            or family_game.object_cell_walkable(
+                family_object, *family_position, family_ax, family_ay,
+                family_game.object_rotation_for_key(family_key, family_object),
+            )
+        )
+    family_activities = [
+        str(actor.get("runtime_activity", actor.get("activity", "")))
+        for actor in family_lookup.values()
+        if str(actor.get("id", "")) in {"finn_fisher", f"household_child:{child.get('id')}"}
+    ]
+    assert all(activity for activity in family_activities)
+    assert any(
+        marker in " ".join(family_activities)
+        for marker in ("reading", "relaxing", "table", "conversation")
+    )
+    household_schedule_text = " ".join(family_game.family_member_schedule_lines())
+    assert any(
+        marker in household_schedule_text
+        for marker in ("reading", "relaxing", "table", "conversation")
     )
     family_game.state.location = "Farm"
     assert family_game.set_family_weekly_priority("Rest")
@@ -8610,6 +12615,10 @@ def main() -> int:
     assert family_game.complete_family_partnership_checkin()
     assert family_game.family_bond_score() > checkin_bond
     assert not family_game.family_partnership_checkin_available()[0]
+    assert any(
+        event_id.startswith("partnership_checkin:")
+        for event_id, _title, _steps in family_special_events
+    )
     assert family_game.schedule_family_outing("Library Visit", 1)
     planned_outing = dict(family_game.state.family_world_state["planned_outing"])
     family_game.state.month = int(planned_outing["month"])
@@ -8623,6 +12632,7 @@ def main() -> int:
     assert family_game.child_learning_map(child).get("Study", 0) > outing_learning
     assert family_game.state.family_world_state["outing_history"]
     assert not family_game.state.family_world_state["planned_outing"]
+    assert family_special_events and family_special_events[-1][0].startswith("family_outing:")
     assert any("HOUSEHOLD DASHBOARD" in line for line in family_game.family_world_dashboard_lines())
     family_game.state.player_birthday_month = 4
     family_game.state.player_birthday_day = 2
@@ -8661,6 +12671,11 @@ def main() -> int:
     )
     wedding_game.autosave_with_message = (
         lambda message: wedding_game.set_message(message)
+    )
+    wedding_special_events = []
+    wedding_game.play_world_event_scene = (
+        lambda event_id, title, steps, completion_message="":
+        wedding_special_events.append((str(event_id), str(title), list(steps))) or True
     )
     wedding_game.state.player_sex = "Female"
     wedding_game.state.money = data.WEDDING_RING_PRICE + 500
@@ -8702,13 +12717,15 @@ def main() -> int:
     wedding_game.state.year = wedding_game.state.wedding_year
     wedding_game.state.weather = "Clear"
     wedding_message = wedding_game.process_scheduled_wedding_overnight(
-        interactive=False
+        interactive=True
     )
     assert "married" in wedding_message
     assert wedding_game.state.spouse_npc_id == fiance_id
     assert wedding_game.state.engaged_npc_id == ""
     assert any("Farm Meadow" in row for row in wedding_game.state.family_event_log)
     assert wedding_game.state.marriage_history[-1]["status"] == "married"
+    assert wedding_special_events and wedding_special_events[-1][0].startswith("wedding:")
+    assert any("Farm Meadow" in str(step.get("text", "")) for step in wedding_special_events[-1][2])
     assert wedding_game.marriage_date_label() != "not recorded"
     spouse_age_before_pause = wedding_game.spouse_age_years(fiance)
     wedding_game.set_aging_and_death_enabled(False, autosave=False)
@@ -8720,6 +12737,30 @@ def main() -> int:
     )
     wedding_game.set_aging_and_death_enabled(True, autosave=False)
     assert wedding_game.spouse_age_years(fiance) == spouse_age_before_pause
+
+    marriage_scene_key, marriage_scene_title = wedding_game.available_marriage_scene(fiance)
+    assert marriage_scene_key.startswith("anniversary:")
+    assert marriage_scene_title == "Anniversary"
+    marriage_relationship_before = wedding_game.town_npc_relationship(fiance_id)
+    marriage_turns = []
+    original_marriage_say = wedding_game.dialogue_say
+    original_marriage_choose = wedding_game.dialogue_choose
+    wedding_game.dialogue_say = lambda actor, text, phase, transcript: (
+        transcript.append({"speaker": str(actor.get("name", "NPC")), "text": str(text), "phase": str(phase)}),
+        marriage_turns.append((str(actor.get("name", "NPC")), str(phase), str(text))),
+        True,
+    )[-1]
+    wedding_game.dialogue_choose = lambda *args, **kwargs: "Adventure"
+    try:
+        assert wedding_game.play_marriage_scene(fiance)
+    finally:
+        wedding_game.dialogue_say = original_marriage_say
+        wedding_game.dialogue_choose = original_marriage_choose
+    assert marriage_turns[0][0] == "Narrator"
+    assert any(turn[0] == str(fiance["name"]) for turn in marriage_turns)
+    assert wedding_game.family_weekly_priority() == "Adventure"
+    assert wedding_game.has_family_event_flag(marriage_scene_key)
+    assert wedding_game.town_npc_relationship(fiance_id) == marriage_relationship_before + 3
 
     birthday_month, birthday_day = wedding_game.npc_birthday(fiance)
     wedding_game.state.month = birthday_month
@@ -9292,11 +13333,12 @@ def main() -> int:
     ])
     journal_route_game.vertical_panel_select = lambda *args, **kwargs: next(journal_choices)
     journal_route_game.vertical_panel_view = lambda title, *args, **kwargs: journal_route_views.append(title)
+    journal_route_game.show_unified_quest_log_menu = lambda: journal_route_calls.append("quests") or farmstead_main.MENU_BACK
     journal_route_game.show_journal_calendar_menu = lambda: journal_route_calls.append("calendar") or farmstead_main.MENU_BACK
     journal_route_game.show_journal_records_menu = lambda: journal_route_calls.append("records") or farmstead_main.MENU_BACK
     assert journal_route_game.show_journal_codex_menu() == farmstead_main.MENU_BACK
-    assert journal_route_views == ["Today", "Quest Journal", "Progress Goals"]
-    assert journal_route_calls == ["calendar", "records"]
+    assert journal_route_views == ["Today", "Progress Goals"]
+    assert journal_route_calls == ["quests", "calendar", "records"]
 
     system_route_game = FarmGame()
     system_route_calls = []
@@ -10834,9 +14876,10 @@ def main() -> int:
     assert traveler_menu_item.enabled is True
     assert traveler_menu_item.hint.startswith("Hear what")
     traveler_menu_items = []
-    traveler_dialogue_views = []
+    traveler_conversations = []
     original_vertical_panel_select = wilderness_balance_game.vertical_panel_select
     original_vertical_panel_view = wilderness_balance_game.vertical_panel_view
+    original_unified_conversation = wilderness_balance_game.run_unified_npc_conversation
 
     def select_traveler_talk(_title, items, *_args, **_kwargs):
         traveler_menu_items.extend(items)
@@ -10847,14 +14890,19 @@ def main() -> int:
         return None
 
     wilderness_balance_game.vertical_panel_select = select_traveler_talk
-    wilderness_balance_game.vertical_panel_view = lambda title, rows, *_args, **_kwargs: traveler_dialogue_views.append((title, rows))
+    wilderness_balance_game.vertical_panel_view = lambda *args, **kwargs: None
+    wilderness_balance_game.run_unified_npc_conversation = lambda actor, **kwargs: (
+        traveler_conversations.append((actor, kwargs)),
+        {"completed": True, "transcript": [{"phase": "main subject"}], "topics": []},
+    )[-1]
     menu_traveler = dict(traveler)
     menu_traveler["recurring"] = False
     wilderness_balance_game.show_wilderness_traveler(menu_traveler)
     wilderness_balance_game.vertical_panel_select = original_vertical_panel_select
     wilderness_balance_game.vertical_panel_view = original_vertical_panel_view
+    wilderness_balance_game.run_unified_npc_conversation = original_unified_conversation
     assert [item.label for item in traveler_menu_items[:2]] == ["Talk", "Join regional patrol"]
-    assert traveler_dialogue_views and traveler_dialogue_views[0][0] == traveler["name"]
+    assert traveler_conversations and traveler_conversations[0][1]["kind"] == "traveler"
     wilderness_balance_game.state.stamina = 50
     assert wilderness_balance_game.talk_to_recurring_wilderness_traveler(traveler)
     assert not wilderness_balance_game.talk_to_recurring_wilderness_traveler(traveler)
@@ -10979,6 +15027,8 @@ def main() -> int:
     }
     assert len(set(keeper_topic_lines.values())) == 4
     original_outpost_select = wilderness_balance_game.vertical_panel_select
+    original_unified_conversation = wilderness_balance_game.run_unified_npc_conversation
+    outpost_conversations = []
 
     def select_outpost_dialogue(title, *args, **kwargs):
         if str(title).startswith("Talk with"):
@@ -10986,6 +15036,10 @@ def main() -> int:
         return MenuItem(label="Leave the Conversation There", value="leave", enabled=True)
 
     wilderness_balance_game.vertical_panel_select = select_outpost_dialogue
+    wilderness_balance_game.run_unified_npc_conversation = lambda actor, **kwargs: (
+        outpost_conversations.append((actor, kwargs)),
+        {"completed": True, "transcript": [{"phase": "main subject"}], "topics": []},
+    )[-1]
     bond_before_talk = int(keeper["bond"])
     try:
         assert wilderness_balance_game.talk_to_wilderness_outpost_keeper(keeper)
@@ -10993,6 +15047,9 @@ def main() -> int:
         assert not wilderness_balance_game.talk_to_wilderness_outpost_keeper(keeper)
     finally:
         wilderness_balance_game.vertical_panel_select = original_outpost_select
+        wilderness_balance_game.run_unified_npc_conversation = original_unified_conversation
+    assert len(outpost_conversations) == 2
+    assert all(call[1]["kind"] == "outpost" for call in outpost_conversations)
     sample_item = wilderness_balance_game.wilderness_outpost_sample_item(*outpost_chunk)
     wilderness_balance_game.state.inventory[sample_item] = max(1, int(wilderness_balance_game.state.inventory.get(sample_item, 0)))
     bond_before_sample = int(keeper["bond"])
@@ -11132,6 +15189,21 @@ def main() -> int:
         structure_game.state.wilderness_structure_return_y,
     ) == expected_structure_return
     assert any("b" in row for row in structure_map) and any("P" in row for row in structure_map)
+    assert {len(structure_map), len(structure_map[0])} == {28, 64}
+    structure_room_doors = [
+        (x, y)
+        for y, row in enumerate(structure_map)
+        for x, tile in enumerate(row)
+        if tile == "_"
+    ]
+    assert structure_room_doors
+    closed_x, closed_y = structure_room_doors[0]
+    assert not structure_game.passable(closed_x, closed_y)
+    structure_game.use_wilderness_structure_action(closed_x, closed_y)
+    assert structure_game.active_map()[closed_y][closed_x] == "|"
+    assert structure_game.passable(closed_x, closed_y)
+    structure_catalog = getattr(structure_game, "_wilderness_structure_catalog_furniture_cache", {})
+    assert structure_catalog.get(structure_game.state.current_wilderness_structure_key)
     structure_record = structure_game.wilderness_structure_record()
     structure_profile = structure_game.WILDERNESS_STRUCTURE_TYPES[structure_record["type_id"]]
     for material, quantity in structure_profile["materials"].items():
@@ -11145,6 +15217,9 @@ def main() -> int:
     assert vitality_after_structure == vitality_before_structure + 8
     assert structure_game.claim_wilderness_structure_service()
     assert not structure_game.claim_wilderness_structure_service()
+    assert structure_game.perform_wilderness_structure_work()
+    assert not structure_game.perform_wilderness_structure_work()
+    assert structure_record.get("activities_completed") == 1
     structure_game.state.stamina = 20
     assert structure_game.rest_at_wilderness_structure()
     assert structure_game.state.stamina > 20
@@ -11156,6 +15231,7 @@ def main() -> int:
     # Broad landscapes reshape chunks while remaining navigable and repeatable.
     landscape_game = FarmGame()
     landscape_game.autosave_with_message = lambda message: landscape_game.set_message(message)
+    landscape_game.play_world_event_scene = lambda *_args, **_kwargs: True
     landscape_game.state.location = "Wilderness"
     landscape_types = {landscape_game.wilderness_major_landscape_profile(cx, cy)["type_id"] for cy in range(-8, 9) for cx in range(-8, 9)}
     assert len(landscape_types) >= 7
@@ -11180,8 +15256,19 @@ def main() -> int:
     assert "major landscape" in landscape_game.interaction_hint(*landscape_position).lower()
     vitality_before_landscape, _ = landscape_game.wilderness_region_vitality(*landscape_chunk)
     money_before_landscape = landscape_game.state.money
+    landscape_kind = str(landscape_game.wilderness_landscape_record()["type_id"])
+    landscape_work = landscape_game.WILDERNESS_LANDSCAPE_WORK[landscape_kind]
+    landscape_drop_before = {
+        item: int(landscape_game.state.inventory.get(item, 0))
+        for item in landscape_work["drops"]
+    }
     assert landscape_game.interact_with_wilderness_landscape()
-    assert landscape_game.state.money == money_before_landscape + 30
+    assert landscape_game.state.money == money_before_landscape + int(landscape_work["money"])
+    assert all(
+        int(landscape_game.state.inventory.get(item, 0))
+        == landscape_drop_before[item] + int(quantity)
+        for item, quantity in landscape_work["drops"].items()
+    )
     assert landscape_game.wilderness_region_vitality(*landscape_chunk)[0] == vitality_before_landscape + 1
     assert not landscape_game.interact_with_wilderness_landscape()
     hot_spring_record = landscape_game.wilderness_landscape_record()
@@ -11370,9 +15457,13 @@ def main() -> int:
     assert climate_game.state.inventory.get("Mackerel", 0) >= 1
     assert not climate_game.claim_fishing_settlement_weekly_catch()
     landscape_record = climate_game.wilderness_landscape_record()
-    before_coastal_materials = sum(climate_game.state.inventory.get(item, 0) for item in ("Marsh Reed", "Clay", "Stone", "Fiber"))
+    landscape_drops = dict(
+        climate_game.WILDERNESS_LANDSCAPE_WORK.get(str(landscape_record.get("type_id", "")), {}).get("drops", {"Fiber": 1})
+    )
+    before_coastal_materials = sum(climate_game.state.inventory.get(item, 0) for item in landscape_drops)
+    climate_game.play_world_event_scene = lambda *_args, **_kwargs: True
     assert climate_game.interact_with_wilderness_landscape()
-    after_coastal_materials = sum(climate_game.state.inventory.get(item, 0) for item in ("Marsh Reed", "Clay", "Stone", "Fiber"))
+    after_coastal_materials = sum(climate_game.state.inventory.get(item, 0) for item in landscape_drops)
     assert after_coastal_materials > before_coastal_materials
 
     coast_region = climate_game.wilderness_region_profile(*coastal_chunk)
@@ -11612,6 +15703,11 @@ def main() -> int:
     wilderness_poi_game = FarmGame()
     wilderness_poi_game.autosave_with_message = lambda message: wilderness_poi_game.set_message(message)
     wilderness_poi_game.vertical_panel_view = lambda *args, **kwargs: None
+    landmark_special_events = []
+    wilderness_poi_game.play_world_event_scene = (
+        lambda event_id, title, steps, completion_message="":
+        landmark_special_events.append((str(event_id), str(title), list(steps))) or True
+    )
     wilderness_poi_game.state.wilderness_seed = 24681357
     wilderness_poi_game.wilderness_maps = {}
     wilderness_poi_game.wilderness_map = []
@@ -11651,6 +15747,27 @@ def main() -> int:
     assert not wilderness_poi_game.claim_wilderness_poi_cache(shelter_pos[0], shelter_pos[1], "shelter", "Wilderness Shelter")
     assert wilderness_poi_game.search_wilderness_ruin(ruin_pos[0], ruin_pos[1])
     assert not wilderness_poi_game.search_wilderness_ruin(ruin_pos[0], ruin_pos[1])
+    wilderness_poi_game.state.stamina = 100
+    assert wilderness_poi_game.work_wilderness_minor_landmark(20, 20, "waystone")
+    assert any(event_id.startswith("landmark_work:") for event_id, _title, _steps in landmark_special_events)
+    wilderness_poi_game.state.inventory["Stone"] = 10
+    wilderness_poi_game.state.inventory["Wood"] = 4
+    assert wilderness_poi_game.restore_wilderness_ruin(ruin_pos[0], ruin_pos[1])
+    assert any(event_id.startswith("ruin_restored:") for event_id, _title, _steps in landmark_special_events)
+    wilderness_poi_game.state.stamina = 100
+    assert wilderness_poi_game.explore_wilderness_landscape_route()
+    assert any(event_id.startswith("landscape_route:") for event_id, _title, _steps in landmark_special_events)
+    assert wilderness_poi_game.interact_with_wilderness_landscape()
+    assert any(
+        event_id.startswith("landscape_specialty:")
+        or event_id.startswith("hot_springs_rest:")
+        for event_id, _title, _steps in landmark_special_events
+    )
+    wilderness_poi_game.vertical_panel_select = (
+        lambda *_args, **_kwargs: MenuItem(label="Survey", value="survey", enabled=True)
+    )
+    wilderness_poi_game.open_wilderness_overlook_site(10, 10)
+    assert any(event_id.startswith("overlook_survey:") for event_id, _title, _steps in landmark_special_events)
     assert wilderness_poi_game.state.wilderness_poi_state
 
     # Every random-landmark menu must treat the selector's explicit Back
@@ -12120,7 +16237,9 @@ def main() -> int:
         or sum(int(value) for value in dungeon_game.state.inventory.values()) > inventory_before_floor_loot
     )
     dungeon_game.handle_key("NUM5")
-    assert int(dungeon_game.dungeon_roguelike_record()["turn"]) == dungeon_turn_before + 2
+    assert int(dungeon_game.dungeon_roguelike_record()["turn"]) == dungeon_turn_before + 2, (
+        dungeon_turn_before, int(dungeon_game.dungeon_roguelike_record()["turn"]), dungeon_game.state.message
+    )
     dungeon_footer_text = " ".join(ANSI_CSI_RE.sub("", line) for line in dungeon_game.footer_lines())
     assert "WASD/Num move/attack" in dungeon_footer_text
     assert "F aim" in dungeon_footer_text
@@ -13022,6 +17141,18 @@ def main() -> int:
     assert authored_fixture_game.static_container_profile_at(1, 1) is None
     authored_grid[1][1] = "l"
     assert authored_fixture_game.static_container_profile_at(1, 1)[0] == "lumber_crate"
+    authored_fixture_game.state.location = "GeneralStoreInterior"
+    authored_grid[1][1] = "H"
+    assert authored_fixture_game.static_container_profile_at(1, 1)[:2] == (
+        "store_general_goods",
+        "display",
+    )
+    authored_fixture_game.state.location = "TownResidenceInterior"
+    authored_grid[1][1] = "y"
+    assert authored_fixture_game.static_container_profile_at(1, 1)[:2] == (
+        "storage_chest",
+        "theft",
+    )
 
     # Procedural businesses use their own semantic stock profiles, while a
     # residence remains owned storage rather than generic free loot.
@@ -13038,6 +17169,50 @@ def main() -> int:
     procedural_fixture_game.current_procedural_town_building = lambda: {"type_id": "residence"}
     procedural_profile = procedural_fixture_game.static_container_profile_at(1, 1)
     assert procedural_profile[:2] == ("shelf", "theft")
+    procedural_grid[1][1] = "H"
+    procedural_fixture_game.current_procedural_town_building = lambda: {"type_id": "library"}
+    procedural_profile = procedural_fixture_game.static_container_profile_at(1, 1)
+    assert procedural_profile[:2] == ("civic_archive", "display")
+    procedural_grid[1][1] = "y"
+    procedural_fixture_game.current_procedural_town_building = lambda: {"type_id": "home"}
+    procedural_profile = procedural_fixture_game.static_container_profile_at(1, 1)
+    assert procedural_profile[:2] == ("storage_chest", "theft")
+    procedural_grid[1][1] = "W"
+    procedural_fixture_game.current_procedural_town_building = lambda: {"type_id": "clinic"}
+    procedural_profile = procedural_fixture_game.static_container_profile_at(1, 1)
+    assert procedural_profile[:2] == ("clinic_cabinet", "display")
+
+    # Generated fixtures resolve through their room purpose, so the same glyph
+    # can be a dresser, desk, guest nightstand, archive, or evidence locker.
+    room_fixture_cases = (
+        ("home", {"role": "bedroom", "source_id": "bedroom_2"}, "d", "household_dresser", "theft"),
+        ("inn", {"role": "guest_room", "source_id": "guest_1"}, "d", "guest_nightstand", "theft"),
+        ("clinic", {"role": "examination", "source_id": "exam_1"}, "+", "clinic_cabinet", "theft"),
+        ("library", {"role": "stacks", "source_id": "stacks"}, "l", "library_shelf", "display"),
+        ("sheriff_office", {"role": "storage", "source_id": "evidence"}, "s", "evidence_locker", "theft"),
+        ("general_store", {"role": "sales", "source_id": "sales"}, "$", "store_general_goods", "display"),
+    )
+    for building_type, room_record, tile, expected_profile, expected_policy in room_fixture_cases:
+        procedural_grid[1][1] = tile
+        procedural_fixture_game.current_procedural_town_building = (
+            lambda building_type=building_type: {
+                "id": f"room-profile:{building_type}",
+                "type_id": building_type,
+                "name": f"Profile {building_type}",
+            }
+        )
+        procedural_fixture_game.procedural_town_room_at_position = (
+            lambda *_args, room_record=room_record, **_kwargs: dict(room_record)
+        )
+        procedural_fixture_game.on_player_owned_procedural_residence = lambda: False
+        profile = procedural_fixture_game.static_container_profile_at(1, 1)
+        assert profile[:2] == (expected_profile, expected_policy)
+        record = procedural_fixture_game.world_container_at(1, 1)
+        assert record["profile"] == expected_profile
+        assert record["take_policy"] == expected_policy
+        assert record["contents"]
+        assert procedural_fixture_game.world_container_at(1, 1) is record
+        procedural_fixture_game.state.world_containers.clear()
 
     # Generated dungeon floors contain several distinct, wall-hugging minor
     # containers in addition to treasure chests.

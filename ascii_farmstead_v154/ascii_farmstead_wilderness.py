@@ -9,6 +9,12 @@ from ascii_farmstead_data import MENU_BACK
 from ascii_farmstead_inventory import add_inventory_items, format_drops
 from ascii_farmstead_visuals import actor_style
 from ascii_farmstead_game_tables import GAME_TABLE_DATA, venue_game_ids
+from ascii_farmstead_custom_extended import (
+    BUILDING_TEMPLATE_FURNISHING_DATA,
+    BUILDING_TEMPLATE_GENERIC_FIXTURE_DATA,
+    building_template_functional_furniture_name,
+)
+from ascii_farmstead_procedural_interiors import build_procedural_ground_floor
 
 
 FIELD_SITE_SYMBOL = "E"
@@ -291,15 +297,34 @@ class WildernessRevampMixin:
         return True
 
     WILDERNESS_STRUCTURE_TYPES = {
-        "abandoned_cabin": {"name": "Abandoned Cabin", "materials": {"Wood": 8, "Stone": 3}, "role": "Trapper", "benefit": "A safe bunk and weekly trail supplies."},
-        "watchtower": {"name": "Old Watchtower", "materials": {"Wood": 10, "Stone": 6}, "role": "Lookout", "benefit": "A staffed survey point that strengthens the region."},
-        "wayside_shrine": {"name": "Wayside Shrine", "materials": {"Stone": 8, "Fiber": 4}, "role": "Pilgrim", "benefit": "A quiet place for recovery and regional stories."},
-        "research_hut": {"name": "Derelict Research Hut", "materials": {"Wood": 8, "Stone": 4, "Fiber": 4}, "role": "Researcher", "benefit": "Weekly ecological samples and field observations."},
-        "hunting_lodge": {"name": "Weathered Hunting Lodge", "materials": {"Wood": 12, "Stone": 5}, "role": "Hunter", "benefit": "A safe lodge with provisions and wildlife reports."},
-        "roadside_inn": {"name": "Shuttered Roadside Inn", "materials": {"Wood": 14, "Stone": 6, "Fiber": 6}, "role": "Innkeeper", "benefit": "A staffed rest stop with meals and traveler news."},
-        "desert_caravanserai": {"name": "Abandoned Desert Caravanserai", "materials": {"Stone": 12, "Clay": 10, "Fiber": 6}, "role": "Desert Host", "benefit": "Shade, water stores, and weekly crossing supplies."},
-        "tundra_wayhouse": {"name": "Snowbound Tundra Wayhouse", "materials": {"Wood": 12, "Stone": 8, "Fiber": 10}, "role": "Winter Keeper", "benefit": "A heated refuge with weekly cold-weather provisions."},
-        "coastal_ferry_house": {"name": "Abandoned Coastal Ferry House", "materials": {"Wood": 14, "Stone": 8, "Fiber": 8}, "role": "Ferry Keeper", "benefit": "A sheltered landing with weekly boat and fishing supplies."},
+        "abandoned_cabin": {"name": "Abandoned Cabin", "materials": {"Wood": 8, "Stone": 3}, "role": "Trapper", "benefit": "A safe bunk and weekly trail supplies.", "interior_type": "home", "activity": "Walk the old trapline"},
+        "watchtower": {"name": "Old Watchtower", "materials": {"Wood": 10, "Stone": 6}, "role": "Lookout", "benefit": "A staffed survey point that strengthens the region.", "interior_type": "sheriff_office", "activity": "Complete a horizon survey"},
+        "wayside_shrine": {"name": "Wayside Shrine", "materials": {"Stone": 8, "Fiber": 4}, "role": "Pilgrim", "benefit": "A quiet place for recovery and regional stories.", "interior_type": "library", "activity": "Tend the pilgrim way"},
+        "research_hut": {"name": "Derelict Research Hut", "materials": {"Wood": 8, "Stone": 4, "Fiber": 4}, "role": "Researcher", "benefit": "Weekly ecological samples and field observations.", "interior_type": "library", "activity": "Process field samples"},
+        "hunting_lodge": {"name": "Weathered Hunting Lodge", "materials": {"Wood": 12, "Stone": 5}, "role": "Hunter", "benefit": "A safe lodge with provisions and wildlife reports.", "interior_type": "home", "activity": "Survey the game trails"},
+        "roadside_inn": {"name": "Shuttered Roadside Inn", "materials": {"Wood": 14, "Stone": 6, "Fiber": 6}, "role": "Innkeeper", "benefit": "A staffed rest stop with meals and traveler news.", "interior_type": "inn", "activity": "Help with the traveler rush"},
+        "desert_caravanserai": {"name": "Abandoned Desert Caravanserai", "materials": {"Stone": 12, "Clay": 10, "Fiber": 6}, "role": "Desert Host", "benefit": "Shade, water stores, and weekly crossing supplies.", "interior_type": "inn", "activity": "Prepare a desert caravan"},
+        "tundra_wayhouse": {"name": "Snowbound Tundra Wayhouse", "materials": {"Wood": 12, "Stone": 8, "Fiber": 10}, "role": "Winter Keeper", "benefit": "A heated refuge with weekly cold-weather provisions.", "interior_type": "inn", "activity": "Maintain the winter route"},
+        "coastal_ferry_house": {"name": "Abandoned Coastal Ferry House", "materials": {"Wood": 14, "Stone": 8, "Fiber": 8}, "role": "Ferry Keeper", "benefit": "A sheltered landing with weekly boat and fishing supplies.", "interior_type": "workshop", "activity": "Inspect the ferry route"},
+    }
+
+    WILDERNESS_LANDSCAPE_WORK = {
+        "large_lake": {"route": "Walk the complete shoreline circuit", "special": "Conduct a lake-life census", "drops": {"Marsh Reed": 2, "Tide Sardine": 1}, "money": 55, "stamina": 4},
+        "floodplain": {"route": "Follow and clear the flood channels", "special": "Measure silt and water levels", "drops": {"Clay": 2, "Marsh Reed": 2}, "money": 50, "stamina": 5},
+        "pine_forest": {"route": "Maintain the marked pine trail", "special": "Survey windfall and fire risk", "drops": {"Wood": 3, "Fiber": 1}, "money": 45, "stamina": 5},
+        "birch_grove": {"route": "Trace the birch grove footpath", "special": "Collect a seasonal seed survey", "drops": {"Mixed Seeds": 2, "Wild Herbs": 1}, "money": 50, "stamina": 4},
+        "flower_field": {"route": "Walk the pollinator transect", "special": "Complete the bloom census", "drops": {"Wildflower": 3, "Wild Honey": 1}, "money": 55, "stamina": 4},
+        "moorland": {"route": "Cross the old moorland causeway", "special": "Mark safe ground through the mire", "drops": {"Fiber": 2, "Coal": 1}, "money": 50, "stamina": 5},
+        "rocky_valley": {"route": "Climb the valley survey circuit", "special": "Log exposed mineral seams", "drops": {"Stone": 3, "Copper Ore": 1}, "money": 60, "stamina": 6},
+        "snowy_highlands": {"route": "Reach the highland cairns", "special": "Repair the winter route markers", "drops": {"Stone": 2, "Winter Root": 2}, "money": 65, "stamina": 7},
+        "ravine": {"route": "Traverse the ravine rim trail", "special": "Inspect ropes, bridges, and ledges", "drops": {"Stone": 2, "Fiber": 2}, "money": 60, "stamina": 6},
+        "hot_springs": {"route": "Circle the spring terraces", "special": "Take a restorative mineral soak", "drops": {"Wild Herbs": 2}, "money": 0, "stamina": 0},
+        "waterfall": {"route": "Climb the waterfall stair trail", "special": "Gauge the falls and clear debris", "drops": {"Stone": 2, "Marsh Reed": 1}, "money": 60, "stamina": 5},
+        "desert_dunes": {"route": "Follow the dune-marker circuit", "special": "Reposition storm-buried route posts", "drops": {"Clay": 3, "Stone": 1}, "money": 70, "stamina": 7},
+        "tundra_plain": {"route": "Cross the tundra windbreak route", "special": "Maintain emergency snow markers", "drops": {"Fiber": 2, "Winter Root": 2}, "money": 70, "stamina": 7},
+        "archipelago": {"route": "Survey the island-hopping route", "special": "Chart reefs and safe channels", "drops": {"Marsh Reed": 2, "Mackerel": 1}, "money": 75, "stamina": 6},
+        "tropical_isles": {"route": "Trace the tropical island circuit", "special": "Survey reef and grove health", "drops": {"Wildflower": 2, "Tide Sardine": 2}, "money": 80, "stamina": 6},
+        "desert_isles": {"route": "Chart the dry-island crossings", "special": "Locate and mark fresh water", "drops": {"Clay": 2, "Marsh Reed": 1}, "money": 80, "stamina": 7},
     }
 
     def connect_wilderness_site_to_regional_road(
@@ -506,6 +531,13 @@ class WildernessRevampMixin:
 
     def wilderness_region_structure_chunk(self, chunk_x: int, chunk_y: int) -> Tuple[int, int]:
         rx, ry = self.wilderness_region_coords(chunk_x, chunk_y)
+        cache_key = (int(self.state.wilderness_seed), int(rx), int(ry))
+        cache = getattr(self, "_wilderness_region_structure_chunk_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._wilderness_region_structure_chunk_cache = cache
+        if cache_key in cache:
+            return tuple(cache[cache_key])
         candidates = self.wilderness_region_chunks(chunk_x, chunk_y)
         outpost = self.wilderness_region_outpost_chunk(chunk_x, chunk_y)
         safe_candidates = [
@@ -528,7 +560,9 @@ class WildernessRevampMixin:
             )
         ]
         rng = random.Random(self.wilderness_chunk_seed(rx, ry) + 88902)
-        return candidates[rng.randrange(len(candidates))]
+        result = candidates[rng.randrange(len(candidates))]
+        cache[cache_key] = tuple(result)
+        return tuple(result)
 
     def wilderness_chunk_has_structure(self, chunk_x: int, chunk_y: int) -> bool:
         if hasattr(self, "home_world_chunk_is_authored") and self.home_world_chunk_is_authored(chunk_x, chunk_y):
@@ -673,6 +707,44 @@ class WildernessRevampMixin:
         )
         self.connect_wilderness_site_to_regional_road(grid, (outside_x, outside_y), road_targets)
 
+    @staticmethod
+    def _wilderness_structure_fixture_cell(
+        grid: List[List[str]], tile: str, seed: int
+    ) -> Optional[Tuple[int, int]]:
+        """Place a required fixture without closing a room's circulation path."""
+        candidates = []
+        for y in range(2, len(grid) - 2):
+            for x in range(2, len(grid[y]) - 2):
+                if grid[y][x] != ".":
+                    continue
+                open_neighbors = sum(
+                    grid[y + dy][x + dx] in {".", ",", ":", "|"}
+                    for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1))
+                )
+                if open_neighbors < 3:
+                    continue
+                edge_bias = min(x, len(grid[y]) - 1 - x, y, len(grid) - 1 - y)
+                score = edge_bias * 37 + ((x * 92821 + y * 68917 + seed) & 0xFFFF)
+                candidates.append((score, x, y))
+        if not candidates:
+            return None
+        _score, x, y = min(candidates)
+        grid[y][x] = str(tile)[:1]
+        return x, y
+
+    @staticmethod
+    def _wilderness_structure_rotated_cell(
+        x: int, y: int, width: int, height: int, side: str
+    ) -> Tuple[int, int]:
+        side = str(side or "south").lower()
+        if side == "north":
+            return int(x), int(height - 1 - y)
+        if side == "west":
+            return int(height - 1 - y), int(x)
+        if side == "east":
+            return int(y), int(width - 1 - x)
+        return int(x), int(y)
+
     def wilderness_structure_map(self) -> List[List[str]]:
         key = str(self.state.current_wilderness_structure_key or self.wilderness_chunk_key())
         try:
@@ -682,52 +754,106 @@ class WildernessRevampMixin:
         record = self.wilderness_structure_record(cx, cy)
         type_id = str(record.get("type_id", "abandoned_cabin"))
         repaired = bool(record.get("repaired", False))
-        width, height = (35, 19) if type_id in {"hunting_lodge", "roadside_inn", "desert_caravanserai", "tundra_wayhouse", "coastal_ferry_house"} else (29, 15)
-        grid = [[" " for _ in range(width)] for _ in range(height)]
-        for y in range(1, height - 1):
-            for x in range(1, width - 1):
-                grid[y][x] = "."
-        for x in range(width):
-            grid[0][x] = grid[-1][x] = "#"
-        for y in range(height):
-            grid[y][0] = grid[y][-1] = "#"
-        grid[-1][width // 2] = "D"
-        grid[3][4], grid[4][4], grid[4][5] = "b", "t", "c"
-        grid[3][width - 5], grid[4][width - 5] = "f", "s"
-        grid[3][width // 2] = "P"
-        if type_id in {"watchtower", "research_hut"}:
-            for x in range(8, width - 8): grid[7][x] = "-"
-            grid[7][width // 2] = "|"
-            grid[5][width // 2] = "d"
-        elif type_id in {"hunting_lodge", "roadside_inn", "desert_caravanserai", "tundra_wayhouse", "coastal_ferry_house"}:
-            for y in range(2, height - 4): grid[y][width // 2] = "-"
-            grid[height // 2][width // 2] = "|"
-            grid[6][7], grid[6][8], grid[7][7], grid[7][8] = "t", "c", "c", "t"
-            if type_id == "roadside_inn":
-                grid[5][width // 2 - 3] = "&"
-            if type_id == "desert_caravanserai":
-                grid[5][width // 2 - 3] = "&"
-                grid[5][5] = grid[5][width - 6] = "P"
-            if type_id == "tundra_wayhouse":
-                grid[5][width // 2 - 3] = "&"
-                grid[5][5] = grid[5][width - 6] = "b"
-            if type_id == "coastal_ferry_house":
-                grid[5][width // 2 - 3] = "&"
-                grid[5][5], grid[5][width - 6] = "s", "P"
-            if type_id in {"roadside_inn", "desert_caravanserai", "tundra_wayhouse"}:
-                games = venue_game_ids(key, type_id, count=2)
-                for table_x, game_id in zip((6, 11), games):
-                    grid[7][table_x] = str(GAME_TABLE_DATA[game_id]["glyph"])
-                    grid[6][table_x] = "c"
-        elif type_id == "wayside_shrine":
-            grid[5][width // 2] = "+"
-            grid[6][width // 2 - 2] = grid[6][width // 2 + 2] = "c"
-        grid[3][width // 2 - 2 if type_id in {"hunting_lodge", "roadside_inn", "desert_caravanserai", "tundra_wayhouse", "coastal_ferry_house"} else width // 2] = "P"
-        if repaired:
-            grid[5][width // 2 + 2] = "@"
-        return self.orient_south_door_interior(
-            grid, getattr(self.state, "wilderness_structure_door_side", "south")
+        side = str(getattr(self.state, "wilderness_structure_door_side", "south"))
+        cache_key = (key, type_id, repaired, side)
+        map_cache = getattr(self, "_wilderness_structure_map_cache", None)
+        if not isinstance(map_cache, dict):
+            map_cache = {}
+            self._wilderness_structure_map_cache = map_cache
+        if cache_key in map_cache:
+            return map_cache[cache_key]
+
+        profile = self.WILDERNESS_STRUCTURE_TYPES.get(
+            type_id, self.WILDERNESS_STRUCTURE_TYPES["abandoned_cabin"]
         )
+        seed = self.wilderness_chunk_seed(cx, cy) + 88931
+        rng = random.Random(seed)
+        interior_type = str(profile.get("interior_type", "home"))
+        game_ids = (
+            venue_game_ids(key, type_id, count=2)
+            if type_id in {"roadside_inn", "desert_caravanserai", "tundra_wayhouse"}
+            else ()
+        )
+        placements: List[Dict[str, object]] = []
+        grid = build_procedural_ground_floor(
+            interior_type,
+            rng.randrange(4),
+            rng.randrange(12),
+            1,
+            game_table_glyphs=tuple(
+                str(GAME_TABLE_DATA[game_id]["glyph"])
+                for game_id in game_ids
+                if game_id in GAME_TABLE_DATA
+            ),
+            program_variant=rng.randrange(3),
+            furniture_placements=placements,
+        )
+
+        # Every site retains the mechanics promised by its exterior: a bunk,
+        # records, supplies, and a purpose-specific workstation. The room
+        # generator decides the architecture; these only fill unused wall-side
+        # floor cells and never replace doors or halls.
+        required = ["b", "P", "s"]
+        specialty = {
+            "abandoned_cabin": "a",
+            "watchtower": "d",
+            "wayside_shrine": "+",
+            "research_hut": "l",
+            "hunting_lodge": "a",
+            "roadside_inn": "k",
+            "desert_caravanserai": "X",
+            "tundra_wayhouse": "f",
+            "coastal_ferry_house": "w",
+        }.get(type_id, "d")
+        required.append(specialty)
+        for index, tile in enumerate(required):
+            if not any(tile in row for row in grid):
+                self._wilderness_structure_fixture_cell(grid, tile, seed + index * 101)
+        if repaired:
+            self._wilderness_structure_fixture_cell(grid, "@", seed + 991)
+
+        original_height = len(grid)
+        original_width = len(grid[0]) if grid else 0
+        oriented = self.orient_south_door_interior(grid, side)
+        lookup: Dict[Tuple[int, int], Dict[str, object]] = {}
+        for placement in placements:
+            if not isinstance(placement, dict):
+                continue
+            common = {
+                field: placement.get(field)
+                for field in (
+                    "name", "collection", "form", "room_id", "room_role",
+                    "rotation", "width", "height",
+                )
+            }
+            for cell in placement.get("cells", ()) or ():
+                if not isinstance(cell, dict):
+                    continue
+                tx, ty = self._wilderness_structure_rotated_cell(
+                    int(cell.get("x", 0)), int(cell.get("y", 0)),
+                    original_width, original_height, side,
+                )
+                cell_record = dict(common)
+                cell_record.update(cell)
+                cell_record["x"], cell_record["y"] = tx, ty
+                lookup[(tx, ty)] = cell_record
+        catalog_cache = getattr(self, "_wilderness_structure_catalog_furniture_cache", None)
+        if not isinstance(catalog_cache, dict):
+            catalog_cache = {}
+            self._wilderness_structure_catalog_furniture_cache = catalog_cache
+        catalog_cache[key] = lookup
+        map_cache[cache_key] = oriented
+        return oriented
+
+    def wilderness_structure_catalog_furniture_at(
+        self, x: int, y: int
+    ) -> Optional[Dict[str, object]]:
+        if str(getattr(self.state, "location", "")) != "WildernessStructure":
+            return None
+        key = str(self.state.current_wilderness_structure_key or self.wilderness_chunk_key())
+        self.wilderness_structure_map()
+        cache = getattr(self, "_wilderness_structure_catalog_furniture_cache", {})
+        return cache.get(key, {}).get((int(x), int(y))) if isinstance(cache, dict) else None
 
     def enter_wilderness_structure(self, x: int, y: int):
         if not self.current_wilderness_structure_door_at(x, y):
@@ -844,10 +970,158 @@ class WildernessRevampMixin:
         self.autosave_with_message(f"Received weekly support from {record['name']}: {format_drops(drops)}.{suffix}")
         return True
 
+    def perform_wilderness_structure_work(self) -> bool:
+        """Run the site's repeatable job instead of reducing it to an inspection."""
+        record = self.wilderness_structure_record()
+        if not record.get("repaired"):
+            self.set_message("Restore and staff this structure before taking on its regional work.")
+            return False
+        week = self.stronghold_cache_week_key()
+        if record.get("activity_week") == week:
+            self.set_message("This structure's regional work is already complete for the week.")
+            return False
+        type_id = str(record.get("type_id", "abandoned_cabin"))
+        activity = str(self.WILDERNESS_STRUCTURE_TYPES[type_id].get("activity", "Complete regional work"))
+        rewards = {
+            "abandoned_cabin": ({"Fiber": 2, "Wood": 2, "Wild Herbs": 1}, 35, 5, 55),
+            "watchtower": ({"Fiber": 1, "Field Snack": 1}, 75, 4, 45),
+            "wayside_shrine": ({"Wild Herbs": 2, "Wildflower": 1}, 45, 3, 40),
+            "research_hut": ({"Mushrooms": 2, "Strange Spores": 1}, 90, 5, 60),
+            "hunting_lodge": ({"Fiber": 2, "Field Snack": 2}, 60, 6, 65),
+            "roadside_inn": ({"Field Snack": 2}, 85, 5, 70),
+            "desert_caravanserai": ({"Clay": 2, "Wild Herbs": 1}, 95, 6, 75),
+            "tundra_wayhouse": ({"Fiber": 2, "Winter Root": 1}, 95, 6, 75),
+            "coastal_ferry_house": ({"Wood": 2, "Marsh Reed": 2}, 90, 5, 65),
+        }.get(type_id, ({"Field Snack": 1}, 40, 4, 45))
+        drops, money, stamina, minutes = rewards
+        if not self.spend_stamina(stamina):
+            return False
+        add_inventory_items(self.state.inventory, drops)
+        self.state.money += int(money)
+        mapped = 0
+        if type_id in {"watchtower", "coastal_ferry_house"}:
+            mapped = self.map_nearby_wilderness_chunks(2)
+        if type_id in {"desert_caravanserai", "tundra_wayhouse"}:
+            self.set_wilderness_climate_prepared(str(record["name"]))
+        self.advance_time(minutes)
+        record["activity_week"] = week
+        record["activities_completed"] = int(record.get("activities_completed", 0)) + 1
+        self.add_wilderness_region_vitality(
+            self.state.wilderness_chunk_x,
+            self.state.wilderness_chunk_y,
+            2,
+            activity.lower(),
+        )
+        map_note = f", charted {mapped} area(s)" if mapped else ""
+        self.autosave_with_message(
+            f"{activity}: +{money}g, {format_drops(drops)}, +2 regional vitality{map_note}."
+        )
+        return True
+
+    def talk_to_wilderness_structure_caretaker(self) -> None:
+        record = self.wilderness_structure_record()
+        profile = self.WILDERNESS_STRUCTURE_TYPES[str(record["type_id"])]
+        role = str(profile["role"])
+        choice = self.vertical_panel_select(
+            role,
+            [
+                self._wilderness_menu_item("conversation", "Talk", "Have a proper conversation about the caretaker, their work, people, news, and known routes."),
+                self._wilderness_menu_item("work", str(profile.get("activity", "Regional work")), "Help with this site's practical weekly responsibility."),
+                self._wilderness_menu_item("service", "Request regional support", str(profile["benefit"])),
+                self._wilderness_menu_item("routes", "Discuss local routes", "Learn trail conditions and chart the immediate area."),
+            ],
+            50, 20, return_back=True,
+        )
+        if not choice or choice.value == MENU_BACK:
+            return
+        if choice.value == "conversation":
+            caretaker = {
+                "id": f"structure_caretaker:{self.state.wilderness_chunk_x}:{self.state.wilderness_chunk_y}",
+                "name": role,
+                "role": role,
+                "activity": str(profile.get("activity", "maintaining this wilderness site")).lower(),
+                "origin": str(record.get("name", profile.get("name", "the regional wilderness"))),
+                "bond": int(record.get("caretaker_bond", 0) or 0),
+                "conversations": int(record.get("caretaker_conversations", 0) or 0),
+            }
+            day = self.errand_day_key()
+            repeated = record.get("caretaker_conversation_day") == day
+            result = self.run_unified_npc_conversation(
+                caretaker,
+                kind="caretaker",
+                first_meeting=int(caretaker["conversations"]) <= 0,
+                repeated_today=repeated,
+                agenda_override=(
+                    f"I am responsible for {str(profile.get('activity', 'the weekly regional work')).lower()}. "
+                    f"{profile.get('benefit', 'This place supports the surrounding routes.')}"
+                ),
+            )
+            if result.get("completed") or result.get("transcript"):
+                if not repeated:
+                    record["caretaker_conversation_day"] = day
+                    record["caretaker_bond"] = int(record.get("caretaker_bond", 0) or 0) + 1
+                record["caretaker_conversations"] = int(record.get("caretaker_conversations", 0) or 0) + 1
+                self.autosave_with_message(
+                    f"Spoke with the {role.lower()}." + (" Trust +1." if not repeated else "")
+                )
+        elif choice.value == "work":
+            self.perform_wilderness_structure_work()
+        elif choice.value == "service":
+            self.claim_wilderness_structure_service()
+        elif choice.value == "routes":
+            day = self.errand_day_key()
+            if record.get("caretaker_route_day") == day:
+                self.set_message(f"The {role.lower()} has already shared today's route report.")
+                return
+            mapped = self.map_nearby_wilderness_chunks(1)
+            record["caretaker_route_day"] = day
+            record["caretaker_bond"] = int(record.get("caretaker_bond", 0)) + 1
+            self.advance_time(10)
+            self.autosave_with_message(
+                f"Compared trail notes with the {role.lower()}; charted {mapped} area(s) and strengthened your working relationship."
+            )
+
+    def open_wilderness_structure_activity_menu(self) -> None:
+        record = self.wilderness_structure_record()
+        profile = self.WILDERNESS_STRUCTURE_TYPES[str(record["type_id"])]
+        items = [
+            self._wilderness_menu_item("status", "Review restoration and site records", "See the site's role, history, and recurring benefits."),
+            self._wilderness_menu_item("rest", "Use the public bunk", "Recover stamina once per day."),
+        ]
+        if record.get("repaired"):
+            items.extend([
+                self._wilderness_menu_item("work", str(profile.get("activity", "Complete regional work")), "Perform the site's active weekly job for pay, materials, and regional vitality."),
+                self._wilderness_menu_item("service", "Collect regional support", str(profile["benefit"])),
+            ])
+        else:
+            items.append(self._wilderness_menu_item("repair", f"Restore site - {format_drops(profile['materials'])}", "Rebuild the rooms, staff the site, and unlock its work."))
+        choice = self.vertical_panel_select(str(record["name"]), items, 54, 23, return_back=True)
+        if not choice or choice.value == MENU_BACK:
+            return
+        if choice.value == "status":
+            self.vertical_panel_view(str(record["name"]), self.wilderness_structure_lines(), 54, 23)
+        elif choice.value == "rest":
+            self.rest_at_wilderness_structure()
+        elif choice.value == "work":
+            self.perform_wilderness_structure_work()
+        elif choice.value == "service":
+            self.claim_wilderness_structure_service()
+        elif choice.value == "repair":
+            self.repair_wilderness_structure()
+
     def use_wilderness_structure_action(self, x: int, y: int):
         tile = self.active_map()[y][x]
         record = self.wilderness_structure_record()
         if tile == "D": self.exit_wilderness_structure()
+        elif tile == "_":
+            self.active_map()[y][x] = "|"
+            self.set_message("Opened the room door.")
+        elif tile == "|":
+            if (int(self.state.player_x), int(self.state.player_y)) == (int(x), int(y)):
+                self.set_message("You are standing in the doorway.")
+            else:
+                self.active_map()[y][x] = "_"
+                self.set_message("Closed the room door.")
         elif tile == "b": self.rest_at_wilderness_structure()
         elif (
             self.game_table_fixture_id(tile)
@@ -866,11 +1140,24 @@ class WildernessRevampMixin:
                     str(record.get("name", "Roadside Inn")),
                 )
         elif tile in {"s", "&"}: self.claim_wilderness_structure_service()
-        elif tile == "P": self.vertical_panel_view(str(record["name"]), self.wilderness_structure_lines(), 52, 22)
+        elif tile == "P": self.open_wilderness_structure_activity_menu()
         elif tile == "@":
-            role = self.WILDERNESS_STRUCTURE_TYPES[str(record["type_id"])]["role"]
-            self.set_message(f"The {role.lower()} shares current trail conditions and thanks you for restoring this place.")
-        else: self.set_message(f"You examine the interior of {record['name']}.")
+            self.talk_to_wilderness_structure_caretaker()
+        else:
+            catalog_record = self.wilderness_structure_catalog_furniture_at(x, y)
+            if isinstance(catalog_record, dict) and self.use_functional_furniture(
+                str(catalog_record.get("name", "Furniture")), x, y,
+                catalog_record=catalog_record,
+            ):
+                return
+            fixture = BUILDING_TEMPLATE_FURNISHING_DATA.get(str(tile))
+            if not isinstance(fixture, dict):
+                fixture = BUILDING_TEMPLATE_GENERIC_FIXTURE_DATA.get(str(tile))
+            if isinstance(fixture, dict) and self.use_functional_furniture(
+                building_template_functional_furniture_name(fixture), x, y,
+            ):
+                return
+            self.set_message(f"There is no usable fixture at that part of {record['name']}.")
 
     def wilderness_region_coords(self, chunk_x: int, chunk_y: int) -> Tuple[int, int]:
         """Return the anchor of the nearest organic region.
@@ -880,6 +1167,13 @@ class WildernessRevampMixin:
         remaining deterministic and cheap to query anywhere in the world.
         """
         cx, cy = int(chunk_x), int(chunk_y)
+        cache_key = (int(self.state.wilderness_seed), cx, cy)
+        cache = getattr(self, "_wilderness_region_coords_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._wilderness_region_coords_cache = cache
+        if cache_key in cache:
+            return tuple(cache[cache_key])
         cell_size = 5
         gx, gy = cx // cell_size, cy // cell_size
         best = None
@@ -891,7 +1185,12 @@ class WildernessRevampMixin:
                 candidate = (distance, ax, ay, sx, sy)
                 if best is None or candidate < best:
                     best = candidate
-        return int(best[1]), int(best[2])
+        result = (int(best[1]), int(best[2]))
+        cache[cache_key] = result
+        if len(cache) > 20000:
+            for old_key in list(cache)[:4000]:
+                cache.pop(old_key, None)
+        return result
 
     def wilderness_region_chunks(self, chunk_x: int, chunk_y: int) -> List[Tuple[int, int]]:
         """Enumerate all persistent chunks belonging to an organic region."""
@@ -1108,6 +1407,7 @@ class WildernessRevampMixin:
     def interact_with_wilderness_landscape(self) -> bool:
         record = self.wilderness_landscape_record()
         kind, day, week = str(record["type_id"]), self.errand_day_key(), self.stronghold_cache_week_key()
+        work = self.WILDERNESS_LANDSCAPE_WORK.get(kind, {})
         if kind == "hot_springs":
             if record.get("rest_day") == day:
                 self.set_message("You already soaked in these hot springs today.")
@@ -1116,28 +1416,48 @@ class WildernessRevampMixin:
             self.restore_stamina(28)
             self.advance_time(40)
             record["rest_day"] = day
-            self.autosave_with_message(f"Soaked in {record['name']}: +{int(self.state.stamina) - before} stamina.")
+            restored = int(self.state.stamina) - before
+            if hasattr(self, "play_world_event_scene"):
+                self.play_world_event_scene(
+                    f"hot_springs_rest:{self.state.wilderness_chunk_x}:{self.state.wilderness_chunk_y}:{day}",
+                    f"Rest at {record['name']}",
+                    [
+                        {"type": "narration", "text": "Steam drifts over the spring while you leave your pack within reach and settle into the mineral water."},
+                        {"type": "narration", "text": f"Forty quiet minutes restore {restored} stamina. The spring is a real refuge on this route, though another soak today would provide no further benefit."},
+                    ],
+                    f"Rested at {record['name']}. Stamina +{restored}.",
+                )
+            self.autosave_with_message(f"Soaked in {record['name']}: +{restored} stamina.")
             return True
         if record.get("survey_week") == week:
-            self.set_message(f"You already recorded this week's observations at {record['name']}.")
+            self.set_message(f"You already completed this week's specialty work at {record['name']}.")
             return False
-        self.advance_time(15)
-        self.state.money += 30
-        coastal_drops = {}
-        if self.wilderness_region_profile(
-            self.state.wilderness_chunk_x,
-            self.state.wilderness_chunk_y,
-        ).get("biome") == "[":
-            coastal_drops = {
-                "archipelago": {"Fiber": 1, "Marsh Reed": 1},
-                "floodplain": {"Clay": 1, "Marsh Reed": 2},
-                "rocky_valley": {"Stone": 2, "Fiber": 1},
-            }.get(kind, {"Marsh Reed": 1})
-            add_inventory_items(self.state.inventory, coastal_drops)
+        stamina = int(work.get("stamina", 4))
+        if stamina and not self.spend_stamina(stamina):
+            return False
+        drops = dict(work.get("drops", {"Fiber": 1}))
+        money = int(work.get("money", 40))
+        add_inventory_items(self.state.inventory, drops)
+        self.state.money += money
+        self.advance_time(35 + stamina * 5)
         record["survey_week"] = week
+        record["specialty_completions"] = int(record.get("specialty_completions", 0)) + 1
         self.add_wilderness_region_vitality(self.state.wilderness_chunk_x, self.state.wilderness_chunk_y, 1, f"surveyed {record['name']}")
-        gathered = f", plus {format_drops(coastal_drops)}" if coastal_drops else ""
-        self.autosave_with_message(f"Recorded changing conditions at {record['name']}: +30g and +1 regional vitality{gathered}.")
+        activity = str(work.get("special", f"Survey {record['name']}"))
+        if hasattr(self, "play_world_event_scene"):
+            self.play_world_event_scene(
+                f"landscape_specialty:{self.state.wilderness_chunk_x}:{self.state.wilderness_chunk_y}:{kind}:{week}",
+                activity,
+                [
+                    {"type": "narration", "text": f"You carry out the site's actual fieldwork across {record['name']}, following its terrain, facilities, and marked work area."},
+                    {"type": "narration", "text": f"The completed work earns {money}g and {format_drops(drops)}. Its records and care improve regional vitality by 1."},
+                    {"type": "narration", "text": f"This is specialty completion {record['specialty_completions']} at this landmark; returning in a later week can continue its practical history."},
+                ],
+                f"{activity}: +{money}g, {format_drops(drops)}, and +1 regional vitality.",
+            )
+        self.autosave_with_message(
+            f"{activity}: +{money}g, {format_drops(drops)}, and +1 regional vitality."
+        )
         return True
 
     def place_wilderness_dock(self, grid: List[List[str]], chunk_x: int, chunk_y: int):
@@ -2148,14 +2468,23 @@ class WildernessRevampMixin:
 
     def wilderness_region_outpost_chunk(self, chunk_x: int, chunk_y: int) -> Tuple[int, int]:
         rx, ry = self.wilderness_region_coords(chunk_x, chunk_y)
+        cache_key = (int(self.state.wilderness_seed), int(rx), int(ry))
+        cache = getattr(self, "_wilderness_region_outpost_chunk_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._wilderness_region_outpost_chunk_cache = cache
+        if cache_key in cache:
+            return tuple(cache[cache_key])
         candidates = self.wilderness_region_chunks(chunk_x, chunk_y)
         for cx, cy in candidates:
             if (cx, cy) == (0, 0):
                 continue
             if self.wilderness_chunk_has_procedural_settlement(cx, cy) or self.wilderness_chunk_has_stronghold(cx, cy) or self.wilderness_chunk_has_dungeon_site(cx, cy) or self.is_claimable_wilderness_chunk(cx, cy):
                 continue
+            cache[cache_key] = (cx, cy)
             return cx, cy
-        return candidates[0]
+        cache[cache_key] = tuple(candidates[0])
+        return tuple(candidates[0])
 
     def wilderness_chunk_has_outpost(self, chunk_x: int, chunk_y: int) -> bool:
         return (int(chunk_x), int(chunk_y)) == self.wilderness_region_outpost_chunk(chunk_x, chunk_y)
@@ -2368,53 +2697,29 @@ class WildernessRevampMixin:
         ]
 
     def talk_to_wilderness_outpost_keeper(self, keeper: Dict[str, object]) -> bool:
-        topic_items = [
-            self._wilderness_menu_item("work", "Ask About Their Work", str(keeper.get("role", "Trail Caretaker"))),
-            self._wilderness_menu_item("region", "Ask About This Region", "Vitality, routes, and inhabitants"),
-            self._wilderness_menu_item("event", "Ask About This Week's Event", "Visible environmental changes"),
-            self._wilderness_menu_item("personal", "Ask Why They Stay", self.wilderness_outpost_keeper_bond_label(keeper)),
-        ]
-        choice = self.vertical_panel_select(
-            f"Talk with {keeper.get('name', 'Regional Steward')}",
-            topic_items,
-            52,
-            23,
-            return_back=True,
-        )
-        if not choice or choice.value == MENU_BACK:
-            return False
         day = self.errand_day_key()
         gained = keeper.get("last_conversation_day") != day
+        agenda_lines = self.wilderness_outpost_keeper_lines(keeper, "work")
+        agenda = next(
+            (str(line).strip().strip('"“”') for line in agenda_lines if str(line).strip().startswith(('"', '“'))),
+            "I am keeping the regional routes and records usable this week.",
+        )
+        result = self.run_unified_npc_conversation(
+            keeper,
+            kind="outpost",
+            first_meeting=int(keeper.get("conversations", 0) or 0) <= 0,
+            repeated_today=not gained,
+            agenda_override=agenda,
+        )
+        if not result.get("completed") and not result.get("transcript"):
+            return False
         if gained:
             keeper["last_conversation_day"] = day
             keeper["bond"] = int(keeper.get("bond", 0)) + 1
             keeper["conversations"] = int(keeper.get("conversations", 0)) + 1
-        self.vertical_panel_view(str(keeper.get("name", "Regional Steward")), self.wilderness_outpost_keeper_lines(keeper, str(choice.value)), 52, 24)
-        response = self.npc_dialogue_response_choice(
-            keeper,
-            influence_available=gained,
-            title=f"Respond to {keeper.get('name', 'Them')}",
-        )
-        response_effect = int(response.get("effect", 0) or 0) if gained else 0
-        if response_effect:
-            keeper["bond"] = max(0, min(250, int(keeper.get("bond", 0)) + response_effect))
-        self.vertical_panel_view(
-            str(keeper.get("name", "Regional Steward")),
-            [
-                str(response.get("reaction", "The steward returns to the regional records.")),
-                "",
-                f"Regional trust influence: {response_effect:+}"
-                if response_effect
-                else "No further trust influence today."
-                if not gained
-                else "No trust change.",
-            ],
-            52,
-            23,
-        )
         self.autosave_with_message(
             f"Spoke with {keeper.get('name', 'the regional steward')}."
-            + (f" Trust {1 + response_effect:+}." if gained else "")
+            + (" Trust +1." if gained else "")
         )
         return gained
 
@@ -3416,14 +3721,15 @@ class WildernessRevampMixin:
     ) -> Dict[Tuple[int, int], Dict[str, object]]:
         cx = int(self.state.wilderness_chunk_x if chunk_x is None else chunk_x)
         cy = int(self.state.wilderness_chunk_y if chunk_y is None else chunk_y)
-        if not self.on_wilderness() or self.procedural_town_plan(cx, cy) or self.wilderness_chunk_has_stronghold(cx, cy) or self.wilderness_chunk_has_structure(cx, cy) or self.owned_wilderness_claim(cx, cy):
-            return {}
         cache_key = f"{cx},{cy}:{self.stronghold_cache_week_key()}"
         cache = getattr(self, "_wilderness_event_visual_cache", None)
         if not isinstance(cache, dict):
             cache = {}
             self._wilderness_event_visual_cache = cache
         if cache_key in cache:
+            return cache[cache_key]
+        if not self.on_wilderness() or self.procedural_town_plan(cx, cy) or self.wilderness_chunk_has_stronghold(cx, cy) or self.wilderness_chunk_has_structure(cx, cy) or self.owned_wilderness_claim(cx, cy):
+            cache[cache_key] = {}
             return cache[cache_key]
         if grid is None:
             grid = self.active_map() if (cx, cy) == (int(self.state.wilderness_chunk_x), int(self.state.wilderness_chunk_y)) else self.wilderness_stream_map(cx, cy)
@@ -4605,74 +4911,26 @@ class WildernessRevampMixin:
         if not choice or choice.value == MENU_BACK:
             return
         if choice.value == "talk":
-            topic_items = [
-                self._wilderness_menu_item("route", "Ask About Their Route", str(traveler.get("activity", "Traveling"))),
-                self._wilderness_menu_item("work", "Ask About Their Work", str(traveler.get("role", "Traveler"))),
-                self._wilderness_menu_item("region", "Ask About This Region", "Vitality, terrain, and travel"),
-                self._wilderness_menu_item("event", "Ask What They've Seen", str(self.wilderness_weekly_event_profile(self.state.wilderness_chunk_x, self.state.wilderness_chunk_y).get("name", "Weekly event"))),
-            ]
-            if traveler.get("recurring"):
-                topic_items.extend([
-                    self._wilderness_menu_item("home", "Ask About Their Home", str(traveler.get("home_name", "Regional outpost"))),
-                    self._wilderness_menu_item("schedule", "Ask About Their Routine", str(traveler.get("activity", "Regional fieldwork"))),
-                    self._wilderness_menu_item("personal", "Ask Why They Stay", "Requires repeated meetings for a full answer"),
-                ])
-            topic_choice = self.vertical_panel_select(
-                f"Talk with {traveler.get('name', 'Traveler')}",
-                topic_items,
-                52,
-                23,
-                return_back=True,
-            )
-            if not topic_choice:
-                return
-            self.vertical_panel_view(
-                str(traveler.get("name", "Traveler")),
-                self.wilderness_traveler_lines(traveler, str(topic_choice.value)),
-                52,
-                23,
-            )
             influence_available = False
             if traveler.get("recurring"):
                 influence_available = self.talk_to_recurring_wilderness_traveler(traveler, quiet=True)
             elif traveler.get("regional_circulation") and hasattr(self, "talk_to_regional_circulation_traveler"):
                 influence_available = self.talk_to_regional_circulation_traveler(traveler)
-            response = self.npc_dialogue_response_choice(
-                traveler,
-                influence_available=influence_available,
-                title=f"Respond to {traveler.get('name', 'Them')}",
+            route_lines = self.wilderness_traveler_lines(traveler, "route")
+            agenda = next(
+                (str(line).strip().strip('"“”') for line in route_lines if str(line).strip().startswith(('"', '“'))),
+                str(traveler.get("activity", "I am following the regional roads today.")),
             )
-            response_effect = int(response.get("effect", 0) or 0) if influence_available else 0
-            if response_effect and traveler.get("recurring"):
-                record = self.recurring_wilderness_traveler_record(
-                    self.state.wilderness_chunk_x,
-                    self.state.wilderness_chunk_y,
-                )
-                record["bond"] = max(0, min(250, int(record.get("bond", 0)) + response_effect))
-            elif response_effect and traveler.get("regional_circulation"):
-                traveler_id = str(traveler.get("id", "regional_visitor"))
-                if traveler.get("authored_resident_trip"):
-                    self.adjust_town_npc_relationship(traveler_id, response_effect)
-                else:
-                    bonds = self.regional_town_life_state().setdefault("visitor_bonds", {})
-                    bonds[traveler_id] = max(0, min(250, int(bonds.get(traveler_id, 0) or 0) + response_effect))
-            self.vertical_panel_view(
-                str(traveler.get("name", "Traveler")),
-                [
-                    str(response.get("reaction", "The traveler turns their attention back to the route.")),
-                    "",
-                    f"Connection influence: {response_effect:+}"
-                    if response_effect
-                    else "No further connection influence today."
-                    if not influence_available
-                    else "No connection change.",
-                ],
-                52,
-                23,
+            self.run_unified_npc_conversation(
+                traveler,
+                kind="traveler",
+                first_meeting=int(traveler.get("bond", 0) or 0) <= 0,
+                repeated_today=not influence_available,
+                agenda_override=agenda,
             )
             self.autosave_with_message(
                 f"Spoke with {traveler.get('name', 'the traveler')}."
-                + (f" Connection {1 + response_effect:+}." if influence_available else "")
+                + (" Connection +1." if influence_available else "")
             )
         elif choice.value == "patrol":
             self.patrol_with_wilderness_traveler(traveler)

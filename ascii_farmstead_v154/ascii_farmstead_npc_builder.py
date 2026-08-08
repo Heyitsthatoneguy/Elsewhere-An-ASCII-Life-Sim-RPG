@@ -10,16 +10,24 @@ settlement buildings and can later be activated by a procedural town runtime.
 import copy
 import random
 import re
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
-from ascii_farmstead_custom_extended import custom_building_template_records
+from ascii_farmstead_custom_extended import (
+    custom_building_template_override,
+    custom_building_template_records,
+)
+from ascii_farmstead_procedural_interiors import (
+    procedural_building_room_capacity,
+    procedural_interior_room_plan,
+    sanitize_procedural_room_overrides,
+)
 from ascii_farmstead_town_builder import (
     SETTLEMENT_BUILDING_CATALOG,
     settlement_chunk_key,
 )
 
 
-PROCEDURAL_POPULATION_VERSION = 1
+PROCEDURAL_POPULATION_VERSION = 3
 PROCEDURAL_AGE_GROUPS = ("Child", "Teen", "Adult", "Elder")
 PROCEDURAL_SEXES = ("Female", "Male")
 PROCEDURAL_ROUTINE_PHASES = (
@@ -59,11 +67,80 @@ MALE_GIVEN_NAMES = (
     "Ivo", "Jonas", "Kellan", "Leo", "Milo", "Noel", "Oren", "Perrin",
     "Reed", "Silas", "Tobin", "Ulric", "Vance", "Wes", "Yorin", "Zane",
 )
+ADDITIONAL_FEMALE_GIVEN_NAMES = (
+    "Abigail", "Adeline", "Aileen", "Alina", "Amara", "Annika", "April", "Arden", "Ariadne", "Astrid",
+    "Audrey", "Autumn", "Aveline", "Blythe", "Bonnie", "Bria", "Bridget", "Brynn", "Calla", "Camille",
+    "Cara", "Celeste", "Cerys", "Cora", "Dahlia", "Daphne", "Delia", "Eden", "Edith", "Eira",
+    "Elise", "Elodie", "Elsie", "Esme", "Estelle", "Etta", "Evelyn", "Faye", "Felicity", "Flora",
+    "Freya", "Gemma", "Georgia", "Giselle", "Gwen", "Harlow", "Hazel", "Helena", "Holly", "Hope",
+    "Ida", "Ilona", "Imogen", "Ines", "Isla", "Ivy", "Jade", "Jessa", "Joanna", "Josie",
+    "Judith", "Julia", "Juliette", "Kallie", "Kara", "Keira", "Kira", "Laurel", "Leona", "Lila",
+    "Lilian", "Liora", "Lorelei", "Lucia", "Lucy", "Lyra", "Mabel", "Maisie", "Maren", "Marigold",
+    "Matilda", "Mina", "Mira", "Moira", "Nadia", "Naomi", "Nora", "Nola", "Olive", "Orla",
+    "Paige", "Pearl", "Phoebe", "Pippa", "Quinn", "Ramona", "Reina", "Renata", "Robin", "Rosa",
+    "Rosalie", "Rowan", "Ruby", "Sabine", "Sadie", "Sage", "Selene", "Seren", "Simone", "Stella",
+    "Summer", "Sylvie", "Tabitha", "Tessa", "Thea", "Thora", "Una", "Valerie", "Violet", "Vivian",
+    "Winifred", "Winter", "Xanthe", "Yasmin", "Yvette", "Zelda", "Asha", "Belen", "Celine", "Danica",
+    "Elara", "Fallon", "Gia", "Hattie", "Isolde", "Juno", "Katia", "Linnea", "Marisol", "Neve",
+    "Odessa", "Petra", "Rina", "Saskia", "Thalia", "Verity", "Willow", "Xiomara", "Zinnia", "Amina",
+)
+ADDITIONAL_MALE_GIVEN_NAMES = (
+    "Abel", "Adrian", "Alaric", "Amos", "Anders", "Ansel", "Archer", "Arlen", "Arthur", "Asher",
+    "August", "Barrett", "Basil", "Beckett", "Bennett", "Blaine", "Bowen", "Byron", "Caius", "Callum",
+    "Cedric", "Cian", "Cormac", "Cyrus", "Damon", "Darius", "Declan", "Desmond", "Eamon", "Edgar",
+    "Elias", "Elliot", "Ellis", "Elric", "Eric", "Evander", "Everett", "Ezra", "Felix", "Fletcher",
+    "Ford", "Forrest", "Gideon", "Graham", "Grant", "Griffin", "Harris", "Harvey", "Heath", "Hector",
+    "Henry", "Holden", "Hugo", "Ian", "Jasper", "Joel", "Julian", "Kai", "Keaton", "Kier",
+    "Lachlan", "Leif", "Lennox", "Linden", "Lorcan", "Lucian", "Marcus", "Marek", "Martin", "Mason",
+    "Micah", "Morgan", "Nathan", "Niall", "Nico", "Nolan", "Oliver", "Orson", "Oscar", "Otis",
+    "Owen", "Paul", "Peter", "Phineas", "Quentin", "Rafferty", "Remy", "Rhys", "Ronan", "Rory",
+    "Russell", "Samir", "Sawyer", "Sebastian", "Seth", "Simon", "Soren", "Stefan", "Stellan", "Theo",
+    "Thomas", "Tiernan", "Tristan", "Troy", "Vaughn", "Victor", "Vincent", "Walden", "Warren", "Whitaker",
+    "Wilder", "William", "Wyatt", "Xavier", "Yannick", "Yusuf", "Zachary", "Aidan", "Alistair", "Ambrose",
+    "Anton", "Bastian", "Caspian", "Conrad", "Dominic", "Duncan", "Edwin", "Ewan", "Fabian", "Gareth",
+    "Hadrian", "Henrik", "Isaac", "Jareth", "Killian", "Lionel", "Magnus", "Matthias", "Merrick", "Nikolai",
+    "Orion", "Pascal", "Rafe", "Roland", "Solomon", "Tavish", "Valentin", "Wallace", "Xander", "Zephyr",
+)
+FEMALE_GIVEN_NAMES += ADDITIONAL_FEMALE_GIVEN_NAMES
+MALE_GIVEN_NAMES += ADDITIONAL_MALE_GIVEN_NAMES
 SURNAMES = (
     "Ash", "Bell", "Briar", "Brook", "Cairn", "Dale", "Ember", "Fallow",
     "Grove", "Hearth", "Juniper", "Kestrel", "Lark", "Moss", "North", "Oak",
     "Pine", "Quill", "Reeve", "Stone", "Thorne", "Vale", "Ward", "Wren",
 )
+ADDITIONAL_SURNAMES = (
+    "Alder", "Amber", "Archer", "Arbor", "Aster", "Autumn", "Badger", "Banks", "Barley", "Basin",
+    "Bay", "Beech", "Birch", "Bloom", "Bluff", "Boulder", "Bramble", "Branch", "Brindle", "Buckle",
+    "Burrow", "Candle", "Canyon", "Cedar", "Chalk", "Cherry", "Clay", "Cliff", "Clover", "Cobalt",
+    "Copper", "Coral", "Creek", "Crow", "Dawn", "Dune", "Elm", "Falcon", "Farrow", "Finch",
+    "Fir", "Flint", "Ford", "Forest", "Fox", "Frost", "Gale", "Garnet", "Glade", "Glen",
+    "Gold", "Granite", "Gray", "Green", "Harbor", "Hare", "Hart", "Haven", "Hawthorn", "Hazel",
+    "Heather", "Heron", "Hill", "Holly", "Honey", "Ivy", "Jade", "Lake", "Laurel", "Leaf",
+    "Light", "Lily", "Linden", "Marsh", "Maple", "Meadow", "Meridian", "Mill", "Mist", "Moon",
+    "Moor", "Morning", "Night", "Orchard", "Otter", "Owl", "Pebble", "Petal", "Plum", "Pond",
+    "Prairie", "Rain", "Raven", "Ridge", "River", "Robin", "Rose", "Rowan", "Rush", "Sage",
+    "Sand", "Shade", "Shore", "Silver", "Sky", "Snow", "Sparrow", "Spring", "Star", "Steel",
+    "Storm", "Summer", "Sun", "Swift", "Timber", "Valley", "Violet", "Water", "Wheat", "Willow",
+    "Wind", "Winter", "Wolf", "Wood", "Yarrow", "Acorn", "Apple", "Bracken", "Bright", "Cinder",
+    "Cloud", "Crane", "Dew", "Drift", "Echo", "Elder", "Fawn", "Feather", "Field", "Fire",
+    "Foxglove", "Garden", "Grain", "Grass", "Hollow", "Iron", "Jasper", "Lantern", "Marble", "Mosswood",
+    "Nettle", "Ocean", "Pearl", "Quartz", "Reed", "Root", "Scarlet", "Shell", "Slate", "Smoke",
+    "Sorrel", "Thistle", "Tide", "Topaz", "Trail", "Tulip", "Vine", "Wave", "Wild", "Zephyr",
+    "Alderbrook", "Alderfield", "Alderwood", "Amberfall", "Amberley", "Ashdown", "Ashford", "Ashgrove", "Ashwell", "Asterfield",
+    "Barrowfield", "Bayberry", "Beecham", "Birchfield", "Birchwood", "Bloomfield", "Bluewater", "Brambleby", "Bramblewood", "Brightwater",
+    "Brookfield", "Brookshire", "Cedarfall", "Cedarfield", "Cedarwood", "Claybourne", "Clearwater", "Cliffside", "Cloverfield", "Copperfield",
+    "Cranehill", "Creekside", "Crowley", "Dawnfield", "Dewberry", "Driftwood", "Dunewell", "Eastbrook", "Easton", "Elderwood",
+    "Fairweather", "Falconer", "Farfield", "Fernbrook", "Fernley", "Finchley", "Firestone", "Flintlock", "Flowerdew", "Forestall",
+    "Foxfield", "Foxworth", "Frostfield", "Frostwell", "Galehaven", "Glenbrook", "Glenfield", "Goldfinch", "Goldwater", "Grayling",
+    "Greenbriar", "Greenfield", "Greenwood", "Harborwell", "Hartfield", "Hawkridge", "Hawthorne", "Hazelbrook", "Heatherby", "Highwater",
+    "Hillcrest", "Holloway", "Honeyfield", "Ironwood", "Ivybridge", "Jasperfield", "Lakewood", "Larkspur", "Laurelwood", "Lightfoot",
+    "Lilypond", "Lindenbrook", "Longfield", "Maplewood", "Marshfield", "Meadowbrook", "Merriweather", "Millstone", "Mistwood", "Moonfall",
+    "Moorfield", "Morningstar", "Nightingale", "Northfield", "Oakley", "Orchardwell", "Otterburn", "Pearlfield", "Pinehurst", "Rainwater",
+    "Ravenwood", "Redfern", "Ridgeway", "Riverstone", "Robinwood", "Rosefield", "Rowanwood", "Rushmore", "Sagebrush", "Sandford",
+    "Silverbrook", "Silverton", "Skyfield", "Snowberry", "Southwell", "Sparrowhawk", "Springwell", "Starling", "Stormfield", "Summerfield",
+    "Sunfield", "Swiftwater", "Timberlake", "Valleybrook", "Waterford", "Westbrook", "Wheatley", "Willowby", "Windermere", "Winterbourne",
+)
+SURNAMES += ADDITIONAL_SURNAMES
 
 
 ROLE_PREFERENCE_DATA: Dict[str, Dict[str, object]] = {
@@ -558,6 +635,27 @@ def stable_text_seed(text: object) -> int:
     return total
 
 
+def weighted_custom_building_template(
+    templates: Sequence[Dict[str, object]],
+    seed: int,
+) -> Optional[Dict[str, object]]:
+    """Select a template using its bounded editor-authored pool weight."""
+    weighted = [
+        (template, max(1, min(10, int(template.get("generation_weight", 5) or 5))))
+        for template in templates
+        if isinstance(template, dict)
+    ]
+    total_weight = sum(weight for _template, weight in weighted)
+    if total_weight <= 0:
+        return None
+    roll = int(seed) % total_weight
+    for template, weight in weighted:
+        if roll < weight:
+            return template
+        roll -= weight
+    return weighted[-1][0] if weighted else None
+
+
 def procedural_custom_building_template(
     plan: Dict[str, object],
     building: Dict[str, object],
@@ -565,9 +663,6 @@ def procedural_custom_building_template(
 ) -> Optional[Dict[str, object]]:
     type_id = str(building.get("type_id", ""))
     if not type_id:
-        return None
-    templates = custom_building_template_records(type_id, enabled_only=enabled_only)
-    if not templates:
         return None
     same_type_ids = sorted(
         str(candidate.get("id", ""))
@@ -579,10 +674,28 @@ def procedural_custom_building_template(
         same_type_index = same_type_ids.index(str(building.get("id", "")))
     except ValueError:
         same_type_index = 0
+    variant_seed = stable_text_seed(
+        f"{plan.get('seed')}:{type_id}:{building.get('id')}:interior-variants"
+    )
+    layout_variant = (variant_seed + same_type_index) % 4
+    builtin_override = custom_building_template_override(
+        f"procedural:{type_id}:{layout_variant}"
+    )
+    if builtin_override is not None and (
+        not enabled_only or bool(builtin_override.get("enabled", True))
+    ):
+        return builtin_override
+
+    templates = custom_building_template_records(type_id, enabled_only=enabled_only)
+    if not templates:
+        return None
     template_seed = stable_text_seed(
         f"{plan.get('seed')}:{building.get('id')}:{type_id}:custom-building-template"
     )
-    return templates[(template_seed + same_type_index) % len(templates)]
+    return weighted_custom_building_template(
+        templates,
+        template_seed + same_type_index,
+    )
 
 
 def procedural_building_capacity(
@@ -598,11 +711,218 @@ def procedural_building_capacity(
             bedroom_zones = [
                 zone
                 for zone in template.get("zones", []) or []
-                if isinstance(zone, dict) and str(zone.get("kind")) == "bedroom"
+                if isinstance(zone, dict)
+                and str(zone.get("kind")) in {"bedroom", "guest_room"}
             ]
             if bedroom_zones:
                 capacity = min(capacity, len(bedroom_zones))
+    elif str(building.get("type_id")) in {"home", "inn"}:
+        type_id = str(building.get("type_id"))
+        same_type_ids = sorted(
+            str(candidate.get("id", ""))
+            for candidate in plan.get("buildings", {}).values()
+            if isinstance(candidate, dict)
+            and str(candidate.get("type_id", "")) == type_id
+        )
+        try:
+            same_type_index = same_type_ids.index(str(building.get("id", "")))
+        except ValueError:
+            same_type_index = 0
+        variant_seed = stable_text_seed(
+            f"{plan.get('seed')}:{type_id}:{building.get('id')}:interior-variants"
+        )
+        layout_variant = (variant_seed + same_type_index) % 4
+        floor_count = max(1, min(4, int(building.get("floor_count", 1) or 1)))
+        derived_capacity = procedural_building_room_capacity(
+            type_id,
+            layout_variant,
+            floor_count,
+            None,
+            procedural_building_program_variant(plan, building),
+        )
+        if derived_capacity > 0:
+            capacity = derived_capacity
     return max(0, min(24, capacity))
+
+
+def procedural_building_layout_variant(
+    plan: Dict[str, object],
+    building: Dict[str, object],
+) -> int:
+    type_id = str(building.get("type_id", "home"))
+    same_type_ids = sorted(
+        str(candidate.get("id", ""))
+        for candidate in plan.get("buildings", {}).values()
+        if isinstance(candidate, dict)
+        and str(candidate.get("type_id", "")) == type_id
+    )
+    try:
+        same_type_index = same_type_ids.index(str(building.get("id", "")))
+    except ValueError:
+        same_type_index = 0
+    variant_seed = stable_text_seed(
+        f"{plan.get('seed')}:{type_id}:{building.get('id')}:interior-variants"
+    )
+    return (variant_seed + same_type_index) % 4
+
+
+def procedural_building_program_variant(
+    plan: Dict[str, object],
+    building: Dict[str, object],
+) -> int:
+    """Return the persisted compact/standard/expanded architectural program."""
+    try:
+        stored = int(building.get("room_program_variant", -1))
+    except Exception:
+        stored = -1
+    if stored not in {0, 1, 2}:
+        seed = stable_text_seed(
+            f"{plan.get('seed')}:{building.get('type_id')}:{building.get('id')}:room-program"
+        )
+        stored = seed % 3
+        building["room_program_variant"] = stored
+    return stored
+
+
+def procedural_building_sleeping_rooms(
+    plan: Dict[str, object],
+    building: Dict[str, object],
+) -> List[Dict[str, object]]:
+    """Return stable sleeping-room slots for generated or authored templates."""
+    type_id = str(building.get("type_id", "home"))
+    if type_id not in {"home", "inn"}:
+        return []
+    template = procedural_custom_building_template(plan, building)
+    rooms: List[Dict[str, object]] = []
+    if template is not None:
+        for index, zone in enumerate(template.get("zones", []) or []):
+            if not isinstance(zone, dict):
+                continue
+            kind = str(zone.get("kind", ""))
+            if kind not in {"bedroom", "primary_bedroom", "guest_room", "nursery"}:
+                continue
+            floor = max(0, int(zone.get("floor", 0) or 0))
+            x1, y1 = int(zone.get("x1", 0)), int(zone.get("y1", 0))
+            x2, y2 = int(zone.get("x2", x1)), int(zone.get("y2", y1))
+            area = max(1, abs(x2 - x1) + 1) * max(1, abs(y2 - y1) + 1)
+            if type_id == "inn":
+                capacity = 1
+                role = "guest_room"
+            else:
+                capacity = 2 if kind == "primary_bedroom" or area >= 48 else 1
+                role = kind
+            rooms.append({
+                "id": f"floor:{floor}:zone:{index}",
+                "source_id": f"zone:{index}",
+                "floor": floor,
+                "role": role,
+                "size": "large" if area >= 70 else "standard" if area >= 48 else "small",
+                "capacity": capacity,
+                "label": (
+                    f"Guest Room {len(rooms) + 1}"
+                    if type_id == "inn"
+                    else "Primary Bedroom"
+                    if kind == "primary_bedroom"
+                    else "Nursery"
+                    if kind == "nursery"
+                    else f"Bedroom {len(rooms) + 1}"
+                ),
+                "zone": dict(zone),
+            })
+        return rooms
+
+    floor_count = max(1, min(4, int(building.get("floor_count", 1) or 1)))
+    layout_variant = procedural_building_layout_variant(plan, building)
+    program_variant = procedural_building_program_variant(plan, building)
+    room_overrides = sanitize_procedural_room_overrides(
+        building.get("room_conversions", {})
+    )
+    for floor_index in range(floor_count):
+        floor_plan = procedural_interior_room_plan(
+            type_id,
+            layout_variant,
+            floor_count,
+            floor_index,
+            room_overrides,
+            program_variant,
+        )
+        for room in floor_plan.get("rooms", ()):
+            if not isinstance(room, dict) or str(room.get("occupancy_kind", "")) not in {"resident", "guest"}:
+                continue
+            source_id = str(room.get("id", "bedroom"))
+            role = str(room.get("role", "bedroom"))
+            rooms.append({
+                "id": f"floor:{floor_index}:{source_id}",
+                "source_id": source_id,
+                "floor": floor_index,
+                "role": role,
+                "size": str(room.get("actual_size", room.get("size", "standard"))),
+                "capacity": max(1, int(room.get("capacity", 1) or 1)),
+                "label": (
+                    f"Guest Room {sum(1 for value in rooms if value.get('role') == 'guest_room') + 1}"
+                    if role == "guest_room"
+                    else "Primary Bedroom"
+                    if role == "primary_bedroom"
+                    else "Nursery"
+                    if role == "nursery"
+                    else f"Bedroom {sum(1 for value in rooms if value.get('role') in {'primary_bedroom', 'bedroom'}) + 1}"
+                ),
+                "rect": tuple(room.get("rect", (0, 0, 0, 0))),
+            })
+    return rooms
+
+
+def procedural_household_room_conversions(
+    plan: Dict[str, object],
+    building: Dict[str, object],
+    members: Sequence[Dict[str, object]],
+    married_ids: Sequence[str] = (),
+) -> Dict[str, str]:
+    """Adapt generated-home studies when a household needs another room."""
+    if (
+        str(building.get("type_id", "")) != "home"
+        or procedural_custom_building_template(plan, building) is not None
+    ):
+        return {}
+    floor_count = max(1, min(4, int(building.get("floor_count", 1) or 1)))
+    layout_variant = procedural_building_layout_variant(plan, building)
+    program_variant = procedural_building_program_variant(plan, building)
+    base_bedrooms = 0
+    primary_can_share = False
+    flexible_rooms: List[str] = []
+    for floor_index in range(floor_count):
+        room_plan = procedural_interior_room_plan(
+            "home",
+            layout_variant,
+            floor_count,
+            floor_index,
+            None,
+            program_variant,
+        )
+        for room in room_plan.get("rooms", ()):
+            if not isinstance(room, dict):
+                continue
+            role = str(room.get("role", ""))
+            if str(room.get("occupancy_kind", "")) == "resident":
+                base_bedrooms += 1
+                if role == "primary_bedroom" and int(room.get("capacity", 1) or 1) >= 2:
+                    primary_can_share = True
+            elif role == "study":
+                flexible_rooms.append(f"floor:{floor_index}:{room.get('id', 'study')}")
+
+    member_ids = {str(member.get("id", "")) for member in members}
+    valid_married_ids = [str(value) for value in married_ids if str(value) in member_ids][:2]
+    effective_capacity = base_bedrooms + (
+        1 if len(valid_married_ids) == 2 and primary_can_share else 0
+    )
+    conversions: Dict[str, str] = {}
+    if any(str(member.get("age_group", "")) == "Child" for member in members) and flexible_rooms:
+        conversions[flexible_rooms.pop(0)] = "nursery"
+        effective_capacity += 1
+    while effective_capacity < len(members) and flexible_rooms:
+        conversions[flexible_rooms.pop(0)] = "bedroom"
+        effective_capacity += 1
+    return conversions
 
 
 def procedural_completed_buildings(plan: Dict[str, object]) -> List[Dict[str, object]]:
@@ -698,6 +1018,19 @@ def sanitize_procedural_settlement_populations(value: object) -> Dict[str, Dict[
             home_id = str(raw_household.get("home_building_id", "") or "")
             if not household_id or not home_id:
                 continue
+            room_assignments = {
+                str(room_id): list(dict.fromkeys(
+                    str(resident_id)
+                    for resident_id in resident_ids
+                    if str(resident_id or "").strip()
+                ))
+                for room_id, resident_ids in (
+                    raw_household.get("room_assignments", {}).items()
+                    if isinstance(raw_household.get("room_assignments"), dict)
+                    else []
+                )
+                if str(room_id or "").strip() and isinstance(resident_ids, list)
+            }
             households[household_id] = {
                 "id": household_id,
                 "name": str(raw_household.get("name", "Household")),
@@ -733,7 +1066,36 @@ def sanitize_procedural_settlement_populations(value: object) -> Dict[str, Dict[
                     )
                     if str(resident_id or "").strip()
                 ][:2],
+                "room_assignment_version": max(0, int(raw_household.get("room_assignment_version", 0) or 0)),
+                "architectural_capacity": max(0, int(raw_household.get("architectural_capacity", 0) or 0)),
+                "practical_room_capacity": max(0, int(raw_household.get("practical_room_capacity", 0) or 0)),
+                "room_conversions": sanitize_procedural_room_overrides(
+                    raw_household.get("room_conversions", {})
+                ),
+                "room_assignments": room_assignments,
+                "room_labels": {
+                    str(room_id): str(label)
+                    for room_id, label in (
+                        raw_household.get("room_labels", {}).items()
+                        if isinstance(raw_household.get("room_labels"), dict)
+                        else []
+                    )
+                    if str(room_id) in room_assignments
+                },
+                "unassigned_room_member_ids": [
+                    str(resident_id)
+                    for resident_id in (
+                        raw_household.get("unassigned_room_member_ids", [])
+                        if isinstance(raw_household.get("unassigned_room_member_ids"), list)
+                        else []
+                    )
+                    if str(resident_id or "").strip()
+                ],
             }
+            if int(households[household_id]["room_assignment_version"]) <= 0:
+                households[household_id]["unassigned_room_member_ids"] = list(
+                    households[household_id]["member_ids"]
+                )
 
         residents: Dict[str, Dict[str, object]] = {}
         for raw_resident_id, raw_resident in (
@@ -813,6 +1175,10 @@ def sanitize_procedural_settlement_populations(value: object) -> Dict[str, Dict[
                 "household_id": household_id,
                 "household_role": str(raw_resident.get("household_role", "Resident") or "Resident"),
                 "home_building_id": home_id,
+                "assigned_room_id": str(raw_resident.get("assigned_room_id", "") or ""),
+                "assigned_room_floor": max(0, min(3, int(raw_resident.get("assigned_room_floor", 0) or 0))),
+                "assigned_room_role": str(raw_resident.get("assigned_room_role", "") or ""),
+                "assigned_room_label": str(raw_resident.get("assigned_room_label", "") or ""),
                 "workplace_building_id": str(raw_resident.get("workplace_building_id", "") or ""),
                 "family_member_ids": [
                     str(family_id)
@@ -980,6 +1346,7 @@ def sanitize_procedural_settlement_populations(value: object) -> Dict[str, Dict[
                 "runtime_day_key": str(raw_resident.get("runtime_day_key", "") or ""),
                 "runtime_weather": str(raw_resident.get("runtime_weather", "") or ""),
                 "runtime_activity": str(raw_resident.get("runtime_activity", "") or ""),
+                "runtime_fixture_symbol": str(raw_resident.get("runtime_fixture_symbol", "") or "")[:1],
                 "runtime_facing": str(raw_resident.get("runtime_facing", "DOWN") or "DOWN"),
                 "runtime_steps_today": max(0, int(raw_resident.get("runtime_steps_today", 0) or 0)),
                 "romanceable": age_group in {"Adult", "Elder"},
@@ -1008,6 +1375,32 @@ def sanitize_procedural_settlement_populations(value: object) -> Dict[str, Dict[
                 for resident_id in household["married_couple_ids"]
                 if resident_id in household["member_ids"]
             ][:2]
+            household["room_assignments"] = {
+                room_id: [
+                    resident_id for resident_id in occupant_ids
+                    if resident_id in household["member_ids"]
+                ]
+                for room_id, occupant_ids in household["room_assignments"].items()
+                if any(
+                    resident_id in household["member_ids"]
+                    for resident_id in occupant_ids
+                )
+            }
+            household["room_labels"] = {
+                room_id: label
+                for room_id, label in household["room_labels"].items()
+                if room_id in household["room_assignments"]
+            }
+            assigned_ids = {
+                resident_id
+                for occupant_ids in household["room_assignments"].values()
+                for resident_id in occupant_ids
+            }
+            household["unassigned_room_member_ids"] = [
+                resident_id
+                for resident_id in household["member_ids"]
+                if resident_id not in assigned_ids
+            ]
         for resident in residents.values():
             household_members = set(
                 households.get(resident["household_id"], {}).get("member_ids", [])
@@ -1038,6 +1431,13 @@ def sanitize_procedural_settlement_populations(value: object) -> Dict[str, Dict[
             for link_field in ("courtship_partner_id", "npc_spouse_id"):
                 if resident[link_field] not in valid_resident_ids:
                     resident[link_field] = ""
+            household = households.get(resident["household_id"], {})
+            assigned_room_id = str(resident.get("assigned_room_id", ""))
+            if resident["id"] not in household.get("room_assignments", {}).get(assigned_room_id, []):
+                resident["assigned_room_id"] = ""
+                resident["assigned_room_floor"] = 0
+                resident["assigned_room_role"] = ""
+                resident["assigned_room_label"] = ""
         clean[key] = {
             "version": PROCEDURAL_POPULATION_VERSION,
             "id": str(raw_population.get("id", f"population:{key}")),
@@ -1405,6 +1805,10 @@ class ProceduralNpcBuilder:
             "household_id": household_id,
             "household_role": "Resident",
             "home_building_id": str(home["id"]),
+            "assigned_room_id": "",
+            "assigned_room_floor": 0,
+            "assigned_room_role": "",
+            "assigned_room_label": "",
             "workplace_building_id": str(workplace["id"]) if workplace else "",
             "family_member_ids": [],
             "guardian_ids": [],
@@ -1467,6 +1871,7 @@ class ProceduralNpcBuilder:
             "runtime_day_key": "",
             "runtime_weather": "",
             "runtime_activity": "",
+            "runtime_fixture_symbol": "",
             "runtime_facing": "DOWN",
             "runtime_steps_today": 0,
             "romanceable": age_group in {"Adult", "Elder"},
@@ -1542,6 +1947,168 @@ class ProceduralNpcBuilder:
         if member_count > 1:
             return "Shared Home"
         return "Independent"
+
+    def assign_household_rooms(
+        self,
+        plan: Dict[str, object],
+        population: Dict[str, object],
+    ) -> None:
+        """Assign residents to physical bedrooms with stable household ownership."""
+        buildings = self.completed_building_map(plan)
+        residents = population.get("residents", {})
+        households = population.get("households", {})
+        if not isinstance(residents, dict) or not isinstance(households, dict):
+            return
+        for resident in residents.values():
+            if not isinstance(resident, dict):
+                continue
+            resident["assigned_room_id"] = ""
+            resident["assigned_room_floor"] = 0
+            resident["assigned_room_role"] = ""
+            resident["assigned_room_label"] = ""
+
+        for household in households.values():
+            if not isinstance(household, dict):
+                continue
+            home_id = str(household.get("home_building_id", ""))
+            home = buildings.get(home_id)
+            members = [
+                residents[resident_id]
+                for resident_id in household.get("member_ids", []) or []
+                if resident_id in residents and isinstance(residents[resident_id], dict)
+            ]
+            married_ids = [
+                str(value)
+                for value in household.get("married_couple_ids", []) or []
+                if str(value) in residents
+            ][:2]
+            if home and str(home.get("type_id", "")) == "home":
+                conversions = procedural_household_room_conversions(
+                    plan,
+                    home,
+                    members,
+                    married_ids,
+                )
+                if conversions:
+                    home["room_conversions"] = conversions
+                else:
+                    home.pop("room_conversions", None)
+                household["room_conversions"] = dict(conversions)
+            else:
+                conversions = {}
+                household["room_conversions"] = {}
+            sleeping_rooms = procedural_building_sleeping_rooms(plan, home) if home else []
+            assignments: Dict[str, List[str]] = {
+                str(room["id"]): [] for room in sleeping_rooms
+            }
+            room_by_id = {str(room["id"]): room for room in sleeping_rooms}
+
+            def assign(room: Dict[str, object], people: Sequence[Dict[str, object]]) -> bool:
+                room_id = str(room["id"])
+                occupants = assignments[room_id]
+                capacity = max(1, int(room.get("capacity", 1) or 1))
+                if len(occupants) + len(people) > capacity:
+                    return False
+                for person in people:
+                    resident_id = str(person.get("id", ""))
+                    if not resident_id or resident_id in occupants:
+                        continue
+                    occupants.append(resident_id)
+                    person["assigned_room_id"] = room_id
+                    person["assigned_room_floor"] = int(room.get("floor", 0) or 0)
+                    person["assigned_room_role"] = str(room.get("role", "bedroom"))
+                    person["assigned_room_label"] = str(room.get("label", "Bedroom"))
+                    schedule = person.get("schedule", {})
+                    if isinstance(schedule, dict):
+                        if isinstance(schedule.get("wake"), dict):
+                            schedule["wake"]["activity"] = f"waking in {person['assigned_room_label'].lower()}"
+                        if isinstance(schedule.get("late"), dict):
+                            schedule["late"]["activity"] = f"sleeping in {person['assigned_room_label'].lower()}"
+                return True
+
+            is_inn = bool(home and str(home.get("type_id", "")) == "inn")
+            assigned_ids: Set[str] = set()
+            if is_inn:
+                ordered_rooms = sorted(
+                    sleeping_rooms,
+                    key=lambda room: (int(room.get("floor", 0)), str(room.get("id", ""))),
+                )
+                for person, room in zip(members, ordered_rooms):
+                    if assign(room, (person,)):
+                        assigned_ids.add(str(person["id"]))
+            else:
+                married_people = [residents[value] for value in married_ids]
+                primary_rooms = [
+                    room for room in sleeping_rooms
+                    if str(room.get("role", "")) == "primary_bedroom"
+                    and int(room.get("capacity", 1) or 1) >= 2
+                ]
+                if len(married_people) == 2 and primary_rooms and assign(primary_rooms[0], married_people):
+                    assigned_ids.update(married_ids)
+
+                remaining = [
+                    person for person in members
+                    if str(person.get("id", "")) not in assigned_ids
+                ]
+                age_priority = {"Child": 0, "Teen": 1, "Elder": 2, "Adult": 3}
+                remaining.sort(key=lambda person: (
+                    age_priority.get(str(person.get("age_group", "Adult")), 4),
+                    str(person.get("id", "")),
+                ))
+                for person in remaining:
+                    age_group = str(person.get("age_group", "Adult"))
+                    preferred_roles = (
+                        ("nursery", "bedroom", "primary_bedroom")
+                        if age_group in {"Child", "Teen"}
+                        else ("bedroom", "primary_bedroom", "nursery")
+                    )
+                    destination = next(
+                        (
+                            room
+                            for role in preferred_roles
+                            for room in sleeping_rooms
+                            if str(room.get("role", "")) == role
+                            and not assignments[str(room["id"])]
+                        ),
+                        None,
+                    )
+                    if destination is not None and assign(destination, (person,)):
+                        assigned_ids.add(str(person["id"]))
+
+            physical_capacity = sum(
+                max(1, int(room.get("capacity", 1) or 1))
+                for room in sleeping_rooms
+            )
+            practical_capacity = len(sleeping_rooms)
+            if (
+                len(married_ids) == 2
+                and any(
+                    str(room.get("role", "")) == "primary_bedroom"
+                    and int(room.get("capacity", 1) or 1) >= 2
+                    for room in sleeping_rooms
+                )
+            ):
+                practical_capacity += 1
+            household["architectural_capacity"] = physical_capacity
+            household["practical_room_capacity"] = practical_capacity
+            if home and str(home.get("type_id", "")) == "home" and procedural_custom_building_template(plan, home) is None:
+                household["capacity"] = max(1, physical_capacity)
+            household["room_assignment_version"] = 2
+            household["room_assignments"] = {
+                room_id: list(occupants)
+                for room_id, occupants in assignments.items()
+                if occupants
+            }
+            household["room_labels"] = {
+                room_id: str(room_by_id[room_id].get("label", "Bedroom"))
+                for room_id in household["room_assignments"]
+                if room_id in room_by_id
+            }
+            household["unassigned_room_member_ids"] = [
+                str(person.get("id", ""))
+                for person in members
+                if str(person.get("id", "")) not in assigned_ids
+            ]
 
     def create_population(
         self,
@@ -1773,6 +2340,7 @@ class ProceduralNpcBuilder:
                     "runtime_day_key",
                     "runtime_weather",
                     "runtime_activity",
+                    "runtime_fixture_symbol",
                     "runtime_facing",
                     "runtime_steps_today",
                     "romanceable",
@@ -1880,6 +2448,7 @@ class ProceduralNpcBuilder:
                     member["marital_status"] = str(member.get("marital_status", "Single"))
                 if age_group in {"Child", "Teen"}:
                     member["parent_ids"] = list(guardian_ids)
+        self.assign_household_rooms(plan, population)
         population["status"] = "populated" if population["residents"] else "awaiting_residents"
         return population
 
@@ -1913,6 +2482,47 @@ class ProceduralNpcBuilder:
                 seen_members.add(resident_id)
                 if resident_id not in residents:
                     errors.append(f"Household {household.get('name')} references a missing resident.")
+            sleeping_rooms = {
+                str(room["id"]): room
+                for room in procedural_building_sleeping_rooms(plan, buildings[home_id])
+            }
+            assigned_members: Set[str] = set()
+            room_assignments = household.get("room_assignments", {})
+            if not isinstance(room_assignments, dict):
+                errors.append(f"Household {household.get('name')} has malformed room assignments.")
+                room_assignments = {}
+            for room_id, occupant_ids in room_assignments.items():
+                room = sleeping_rooms.get(str(room_id))
+                if room is None:
+                    errors.append(f"Household {household.get('name')} references a missing bedroom {room_id}.")
+                    continue
+                clean_occupants = [str(value) for value in occupant_ids] if isinstance(occupant_ids, list) else []
+                if len(clean_occupants) > int(room.get("capacity", 1) or 1):
+                    errors.append(f"Household {household.get('name')} overfills {room.get('label', room_id)}.")
+                if str(buildings[home_id].get("type_id", "")) == "inn" and len(clean_occupants) > 1:
+                    errors.append(f"Inn room {room.get('label', room_id)} has more than one occupant.")
+                for resident_id in clean_occupants:
+                    if resident_id not in member_ids:
+                        errors.append(f"Room {room_id} contains a resident outside its household.")
+                    if resident_id in assigned_members:
+                        errors.append(f"Resident {resident_id} is assigned to multiple rooms.")
+                    assigned_members.add(resident_id)
+                    resident = residents.get(resident_id, {})
+                    if str(resident.get("assigned_room_id", "")) != str(room_id):
+                        errors.append(f"Resident {resident_id}'s room record disagrees with the household assignment.")
+            unassigned = set(str(value) for value in household.get("unassigned_room_member_ids", []) or [])
+            if unassigned - set(member_ids):
+                errors.append(f"Household {household.get('name')} has invalid unassigned room members.")
+            if assigned_members | unassigned != set(member_ids):
+                errors.append(f"Household {household.get('name')} does not account for every member's room.")
+            married_ids = [
+                str(value) for value in household.get("married_couple_ids", []) or []
+                if str(value) in residents
+            ]
+            if len(married_ids) == 2 and str(buildings[home_id].get("type_id", "")) != "inn":
+                married_rooms = {str(residents[value].get("assigned_room_id", "")) for value in married_ids}
+                if "" not in married_rooms and len(married_rooms) != 1:
+                    warnings.append(f"Married residents in {household.get('name')} do not share a bedroom.")
         for resident_id, resident in residents.items():
             if str(resident.get("household_id", "")) not in households:
                 errors.append(f"Resident {resident_id} has no valid household.")
@@ -1993,6 +2603,21 @@ class ProceduralNpcBuilder:
         total_morale = 0
         total_wages = 0
         job_profile_count = 0
+        occupied_rooms = sum(
+            len(household.get("room_assignments", {}) or {})
+            for household in population.get("households", {}).values()
+            if isinstance(household, dict)
+        )
+        residents_without_rooms = sum(
+            len(household.get("unassigned_room_member_ids", []) or [])
+            for household in population.get("households", {}).values()
+            if isinstance(household, dict)
+        )
+        adapted_household_rooms = sum(
+            len(household.get("room_conversions", {}) or {})
+            for household in population.get("households", {}).values()
+            if isinstance(household, dict)
+        )
         for resident in residents:
             role = str(resident.get("role", "Settler"))
             roles[role] = roles.get(role, 0) + 1
@@ -2023,6 +2648,9 @@ class ProceduralNpcBuilder:
             "average_job_skill": round(total_skill / job_profile_count, 1) if job_profile_count else 0,
             "average_job_morale": round(total_morale / job_profile_count, 1) if job_profile_count else 0,
             "weekly_wages": total_wages,
+            "occupied_rooms": occupied_rooms,
+            "residents_without_rooms": residents_without_rooms,
+            "adapted_household_rooms": adapted_household_rooms,
         }
 
     def routine_for(
@@ -2144,6 +2772,9 @@ class ProceduralNpcBuilderMixin:
             f"Status: {population.get('status')}",
             f"Population: {summary['population']}",
             f"Households: {summary['households']}",
+            f"Occupied bedrooms: {summary['occupied_rooms']}",
+            f"Household rooms adapted: {summary['adapted_household_rooms']}",
+            f"Residents without private rooms: {summary['residents_without_rooms']}",
             f"Employed: {summary['employed']}",
             f"Job vacancies: {summary['vacancies']}",
             f"Average job skill: {summary['average_job_skill']}/5",
@@ -2178,7 +2809,8 @@ class ProceduralNpcBuilderMixin:
             lines.append(
                 f"- {resident.get('name')} - {job_profile.get('quality')} {job_profile.get('title')} "
                 f"({resident.get('age_group')}; skill {job_profile.get('skill')}/5; "
-                f"morale {job_profile.get('morale')}/100; home {resident.get('home_building_id')}; work {workplace})"
+                f"morale {job_profile.get('morale')}/100; home {resident.get('home_building_id')}; "
+                f"room {resident.get('assigned_room_label') or 'unassigned'}; work {workplace})"
             )
         if not population.get("residents"):
             lines.append("- No completed housing is available.")
@@ -2219,6 +2851,10 @@ __all__ = [
     "ProceduralNpcBuilder",
     "ProceduralNpcBuilderMixin",
     "procedural_building_capacity",
+    "procedural_building_layout_variant",
+    "procedural_building_program_variant",
+    "procedural_building_sleeping_rooms",
+    "procedural_household_room_conversions",
     "procedural_completed_buildings",
     "procedural_custom_building_template",
     "procedural_job_template",
@@ -2226,4 +2862,5 @@ __all__ = [
     "sanitize_procedural_job_profile",
     "sanitize_procedural_request",
     "sanitize_procedural_settlement_populations",
+    "weighted_custom_building_template",
 ]

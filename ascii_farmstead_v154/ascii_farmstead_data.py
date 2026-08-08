@@ -10,6 +10,8 @@ until they can be moved in a dedicated migration pass.
 
 from ascii_farmstead_support import C
 from ascii_farmstead_game_tables import GAME_TABLE_DATA
+from ascii_farmstead_furniture_catalog import FURNITURE_CATALOG_DATA
+from ascii_farmstead_furniture_actions import furniture_action_id
 
 
 WIDTH = 54
@@ -6605,6 +6607,8 @@ INFRASTRUCTURE_DATA = {
         "radius": None,
         "category": "furniture",
         "place_locations": ["HouseInterior"],
+        "furniture_function": "rest",
+        "comfort": 2,
     },
     "Wooden Table": {
         "symbol": "T",
@@ -6614,6 +6618,7 @@ INFRASTRUCTURE_DATA = {
         "category": "furniture",
         "place_locations": ["HouseInterior"],
         "footprint": [2, 1],
+        "furniture_function": "dining",
     },
     "Bookshelf": {
         "symbol": "L",
@@ -6623,16 +6628,18 @@ INFRASTRUCTURE_DATA = {
         "category": "furniture",
         "place_locations": ["HouseInterior"],
         "footprint": [1, 2],
+        "furniture_function": "bookshelf",
     },
     "Decorative Rug": {
         "symbol": "-",
         "price": 150,
-        "description": "A woven hearth rug. Walkable, colorful, and good for softening a room.",
+        "description": "A woven hearth rug: a walkable place to rest, meditate, play, share stories, or gather as a family.",
         "radius": None,
         "category": "furniture",
         "place_locations": ["HouseInterior"],
         "footprint": [3, 2],
         "walkable": True,
+        "placement_layer": "floor",
     },
     "House Plant": {
         "symbol": "f",
@@ -6645,7 +6652,7 @@ INFRASTRUCTURE_DATA = {
     "Dresser": {
         "symbol": "U",
         "price": 220,
-        "description": "A carved dresser for clothes, linens, and the illusion of being organized.",
+        "description": "A carved dresser with clothing storage, an appearance mirror, and a top for displaying personal belongings.",
         "radius": None,
         "category": "furniture",
         "place_locations": ["HouseInterior"],
@@ -6659,11 +6666,12 @@ INFRASTRUCTURE_DATA = {
         "category": "furniture",
         "place_locations": ["HouseInterior"],
         "footprint": [3, 2],
+        "furniture_function": "sleep",
     },
     "Television": {
         "symbol": "v",
         "price": 0,
-        "description": "A weather-beaten television tuned to the farm forecast.",
+        "description": "A weather-beaten television carrying weather, town news, cooking, adventure, family, and entertainment channels.",
         "radius": None,
         "category": "furniture",
         "place_locations": ["HouseInterior"],
@@ -6675,6 +6683,7 @@ INFRASTRUCTURE_DATA = {
         "radius": None,
         "category": "furniture",
         "place_locations": ["HouseInterior"],
+        "placement_surface": "wall",
     },
     "Shelf": {
         "symbol": "S",
@@ -6693,6 +6702,7 @@ INFRASTRUCTURE_DATA = {
         "category": "furniture",
         "place_locations": ["HouseInterior"],
         "footprint": [4, 1],
+        "furniture_function": "cook",
     },
     "Couch": {
         "symbol": "C",
@@ -6702,21 +6712,23 @@ INFRASTRUCTURE_DATA = {
         "category": "furniture",
         "place_locations": ["HouseInterior"],
         "footprint": [3, 1],
+        "furniture_function": "rest",
     },
     "Large Rug": {
         "symbol": "=",
         "price": 350,
-        "description": "A large patterned rug. Walkable, room-defining, and much nicer than bare floor.",
+        "description": "A large walkable rug for quiet recovery, children's games, household stories, and defining a shared room.",
         "radius": None,
         "category": "furniture",
         "place_locations": ["HouseInterior"],
         "footprint": [5, 3],
         "walkable": True,
+        "placement_layer": "floor",
     },
     "Nightstand": {
         "symbol": "n",
         "price": 90,
-        "description": "A bedside table with a lamp, a notebook, and a place for tomorrow's plans.",
+        "description": "A bedside table with storage, a display surface, written notes, quiet reading, and an alarm setting.",
         "radius": None,
         "category": "furniture",
         "place_locations": ["HouseInterior"],
@@ -6742,7 +6754,7 @@ INFRASTRUCTURE_DATA = {
     "Fireplace": {
         "symbol": "F",
         "price": 420,
-        "description": "A brick fireplace. In cold weather it becomes the emotional center of the room.",
+        "description": "A brick fireplace for warming up, hearth cooking, and daily fireside time with the household.",
         "radius": None,
         "category": "furniture",
         "place_locations": ["HouseInterior"],
@@ -6796,11 +6808,13 @@ INFRASTRUCTURE_DATA = {
         "radius": None,
         "category": "furniture",
         "place_locations": ["HouseInterior"],
+        "placement_surface": "wall",
+        "furniture_function": "mirror",
     },
     "Wardrobe": {
         "symbol": "W",
         "price": 380,
-        "description": "A tall wardrobe for coats, boots, spare linens, and seasonal outfits.",
+        "description": "A tall wardrobe for changing appearance and storing coats, boots, linens, and seasonal outfits.",
         "radius": None,
         "category": "furniture",
         "place_locations": ["HouseInterior"],
@@ -6822,11 +6836,12 @@ INFRASTRUCTURE_DATA = {
         "radius": None,
         "category": "furniture",
         "place_locations": ["HouseInterior"],
+        "placement_surface": "wall",
     },
     "Crib": {
         "symbol": "q",
         "price": 280,
-        "description": "A small crib for newborns and infants. It makes the nursery corner feel prepared.",
+        "description": "An assignable crib for newborns and infants, with room for bedtime stories and household routines.",
         "radius": None,
         "category": "furniture",
         "place_locations": ["HouseInterior"],
@@ -6835,7 +6850,7 @@ INFRASTRUCTURE_DATA = {
     "Child Bed": {
         "symbol": "e",
         "price": 360,
-        "description": "A low child bed for toddlers and older children.",
+        "description": "An assignable low bed for toddlers and older children, used for bedtime routines and stories.",
         "radius": None,
         "category": "furniture",
         "place_locations": ["HouseInterior"],
@@ -6844,7 +6859,7 @@ INFRASTRUCTURE_DATA = {
     "Toy Shelf": {
         "symbol": "j",
         "price": 220,
-        "description": "A shelf of blocks, cloth scraps, picture cards, and safe household treasures.",
+        "description": "A working toy shelf with storage for playthings and daily games or lessons with the children.",
         "radius": None,
         "category": "furniture",
         "place_locations": ["HouseInterior"],
@@ -6866,17 +6881,146 @@ INFRASTRUCTURE_DATA = {
         "category": "furniture",
         "place_locations": ["HouseInterior"],
         "footprint": [3, 1],
+        "furniture_function": "family_meal",
     },
     "Keepsake Chest": {
         "symbol": "Q",
         "price": 260,
-        "description": "A small chest for letters, child drawings, wedding notes, and family keepsakes.",
+        "description": "A family chest that stores and displays keepsakes, preserves memories, and supports shared reflection.",
         "radius": None,
         "category": "furniture",
         "place_locations": ["HouseInterior"],
         "footprint": [2, 1],
     },
+    "Four-Poster Bed": {
+        "symbol": "B",
+        "price": 950,
+        "description": "A full-sized carved bed rendered as one seven-tile-wide furnishing. Every visible part belongs to the same functional bed.",
+        "radius": None,
+        "category": "furniture",
+        "place_locations": ["HouseInterior"],
+        "footprint": [7, 3],
+        "furniture_function": "sleep",
+        "comfort": 8,
+        "use_edges": ["left", "right", "bottom"],
+    },
+    "Dining Set": {
+        "symbol": "T",
+        "price": 780,
+        "description": "A broad dining table with six visually integrated chairs, suitable for meals and household gatherings.",
+        "radius": None,
+        "category": "furniture",
+        "place_locations": ["HouseInterior"],
+        "footprint": [9, 3],
+        "furniture_function": "family_meal",
+        "comfort": 6,
+        "use_edges": ["top", "bottom", "left", "right"],
+    },
+    "Library Bookcase": {
+        "symbol": "L",
+        "price": 720,
+        "description": "A wall-length bookcase with individually rendered shelves. It stores books and opens the household reading collection.",
+        "radius": None,
+        "category": "furniture",
+        "place_locations": ["HouseInterior"],
+        "footprint": [9, 2],
+        "furniture_function": "bookshelf",
+        "comfort": 5,
+        "use_edges": ["bottom"],
+    },
+    "Sectional Couch": {
+        "symbol": "C",
+        "price": 680,
+        "description": "A long upholstered couch that reads as a complete piece of furniture and provides a comfortable place to rest.",
+        "radius": None,
+        "category": "furniture",
+        "place_locations": ["HouseInterior"],
+        "footprint": [8, 2],
+        "furniture_function": "rest",
+        "comfort": 7,
+        "use_edges": ["bottom"],
+    },
+    "Kitchen Suite": {
+        "symbol": "K",
+        "price": 1100,
+        "description": "A unified counter, stove, basin, and preparation surface. Use any part of it to open cooking.",
+        "radius": None,
+        "category": "furniture",
+        "place_locations": ["HouseInterior"],
+        "footprint": [9, 2],
+        "furniture_function": "cook",
+        "comfort": 6,
+        "use_edges": ["bottom"],
+    },
+    "Display Counter": {
+        "symbol": "$",
+        "price": 640,
+        "description": "A long display counter with enclosed storage for valuables, collections, or future player-run shop stock.",
+        "radius": None,
+        "category": "furniture",
+        "place_locations": ["HouseInterior"],
+        "footprint": [9, 2],
+        "furniture_function": "display_storage",
+        "comfort": 4,
+        "use_edges": ["bottom"],
+    },
+    "Workshop Bench": {
+        "symbol": "W", "price": 980,
+        "description": "A broad tool bench whose laid-out implements provide full household crafting access.",
+        "radius": None, "category": "furniture", "place_locations": ["HouseInterior"],
+        "footprint": [8, 2], "furniture_function": "craft", "comfort": 5,
+        "use_edges": ["bottom"],
+    },
+    "Bathing Tub": {
+        "symbol": "B", "price": 1250,
+        "description": "A full-sized bathing tub that restores stamina and makes a washroom mechanically useful.",
+        "radius": None, "category": "furniture", "place_locations": ["HouseInterior"],
+        "footprint": [7, 3], "furniture_function": "bathe", "comfort": 8,
+        "use_edges": ["bottom", "left", "right"],
+    },
+    "Dressing Vanity": {
+        "symbol": "V", "price": 740,
+        "description": "A mirror, dressing surface, and drawers arranged as one substantial furnishing.",
+        "radius": None, "category": "furniture", "place_locations": ["HouseInterior"],
+        "footprint": [8, 3], "furniture_function": "mirror", "comfort": 5,
+        "use_edges": ["top", "bottom"],
+    },
+    "Storage Hutch": {
+        "symbol": "H", "price": 860,
+        "description": "A tall household hutch combining visible shelving with generous enclosed storage.",
+        "radius": None, "category": "furniture", "place_locations": ["HouseInterior"],
+        "footprint": [7, 3], "furniture_function": "storage", "comfort": 5,
+        "use_edges": ["top", "bottom", "left", "right"],
+    },
+    "Stone Hearth": {
+        "symbol": "F", "price": 1350,
+        "description": "A broad masonry hearth that provides a warm resting place, especially in winter weather.",
+        "radius": None, "category": "furniture", "place_locations": ["HouseInterior"],
+        "footprint": [7, 3], "furniture_function": "hearth", "comfort": 9,
+        "use_edges": ["bottom"],
+    },
+    "Reading Nook": {
+        "symbol": "R", "price": 1150,
+        "description": "A coordinated bookcase and upholstered reading seat with its own library storage.",
+        "radius": None, "category": "furniture", "place_locations": ["HouseInterior"],
+        "footprint": [9, 3], "furniture_function": "bookshelf", "comfort": 8,
+        "use_edges": ["bottom", "right"],
+    },
+    "Parlor Set": {
+        "symbol": "P", "price": 1050,
+        "description": "Two upholstered seats and a shared tea surface presented as one coherent conversation area.",
+        "radius": None, "category": "furniture", "place_locations": ["HouseInterior"],
+        "footprint": [9, 3], "furniture_function": "rest", "comfort": 8,
+        "use_edges": ["top", "bottom"],
+    },
 }
+
+INFRASTRUCTURE_DATA.update(FURNITURE_CATALOG_DATA)
+for _furniture_name, _furniture_record in INFRASTRUCTURE_DATA.items():
+    if _furniture_record.get("category") == "furniture":
+        _furniture_record["furniture_action"] = furniture_action_id(
+            _furniture_name, _furniture_record,
+        )
 
 for _game_id, _table in GAME_TABLE_DATA.items():
     INFRASTRUCTURE_DATA[str(_table["name"])] = {
@@ -6888,6 +7032,7 @@ for _game_id, _table in GAME_TABLE_DATA.items():
         "place_locations": ["HouseInterior"],
         "footprint": [3, 1],
         "game_id": str(_game_id),
+        "furniture_action": "game",
     }
 
 AUTOMATION_OBJECT_DATA = {

@@ -383,7 +383,7 @@ class TavernGamesMixin:
             "- The wager menu and table show how many cards remain, allowing the exposed cards to be counted between rounds.",
             "- At 15 or fewer remaining cards, the dealer reshuffles before the next wager. Leaving the table also ends that shoe.",
             "- Choose actions with W/S or arrows, number keys, or H for Hit, D for Double, and P for Split.",
-            "- X or Escape during player action safely stands; it never abandons a wager.",
+            "- B/X/Escape/Q/Tab during player action safely stands; it never abandons a wager.",
             "- Wagers use only in-game gold and are capped at 1,000g per initial hand.",
         ]
 
@@ -459,7 +459,7 @@ class TavernGamesMixin:
             "H: hit",
             "D: double",
             "P: split",
-            "X/Esc: stand",
+            "B/X/Esc/Q/Tab: stand",
         )
 
     def _blackjack_player_action(
@@ -480,7 +480,7 @@ class TavernGamesMixin:
                 round_state, venue, hand_index, actions, selected, note=note,
             )
             key = normalize_key(read_key())
-            if key in {"x", "\x1b"}:
+            if key in {"b", "x", "\x1b", "q", "\t"}:
                 round_state.stand(hand_index)
                 return
             shortcut = {"h": "hit", "d": "double", "p": "split"}.get(key)

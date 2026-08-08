@@ -12,6 +12,7 @@ from ascii_farmstead_data import (
     LEFT_PANEL_WIDTH,
     MENU_BACK,
 )
+from ascii_farmstead_custom_extended import BUILDING_TEMPLATE_FURNISHING_DATA
 from ascii_farmstead_excavation import EXCAVATION_FIND_DATA
 from ascii_farmstead_inventory import CapacityInventory, capacity_inventory
 from ascii_farmstead_random_loot import (
@@ -113,6 +114,26 @@ CONTAINER_PROFILES: Dict[str, Dict[str, object]] = {
     "cabinet": {
         "name": "Cabinet", "capacity": 180,
         "loot": ["Bundle of Old Letters", "Decorative Bottle", "Tarnished Locket", "Foreign Coin", "Silver Button"],
+    },
+    "wall_cabinet": {
+        "name": "Wall Cabinet", "capacity": 140,
+        "loot": ["Decorative Bottle", "Sealed Spice Jar", "Silver Button", "Bundle of Old Letters"],
+    },
+    "storage_chest": {
+        "name": "Storage Chest", "capacity": 500,
+        "loot": ["Bundle of Old Letters", "Decorative Bottle", "Hand-Painted Plate", "Miner's Token", "Foreign Coin"],
+    },
+    "nightstand": {
+        "name": "Nightstand", "capacity": 80,
+        "loot": ["Bundle of Old Letters", "Pressed Wildflowers", "Silver Button", "Tarnished Locket"],
+    },
+    "display_case": {
+        "name": "Display Case", "capacity": 160,
+        "loot": ["Hand-Painted Plate", "Porcelain Songbird", "Foreign Coin", "Carved Bone Token", "Tarnished Locket"],
+    },
+    "barrel": {
+        "name": "Barrel", "capacity": 300,
+        "loot": ["Sealed Spice Jar", "Decorative Bottle", "Field Snack", "Fiber", "Restorative Salts"],
     },
     "ruin_chest": {
         "name": "Ancient Chest", "capacity": 240,
@@ -228,6 +249,54 @@ CONTAINER_PROFILES: Dict[str, Dict[str, object]] = {
     },
 }
 
+CONTAINER_PROFILES.update({
+    "household_dresser": {
+        "name": "Household Dresser", "capacity": 180,
+        "loot": ["Bundle of Old Letters", "Silver Button", "Pressed Wildflowers", "Tarnished Locket"],
+        "count_min": 1, "count_max": 3,
+    },
+    "nursery_cabinet": {
+        "name": "Nursery Cabinet", "capacity": 120,
+        "loot": ["Pressed Wildflowers", "Silver Button", "Hand-Painted Plate", "Bundle of Old Letters"],
+        "count_min": 1, "count_max": 2,
+    },
+    "guest_nightstand": {
+        "name": "Guest Nightstand", "capacity": 80,
+        "loot": ["Bundle of Old Letters", "Foreign Coin", "Ranger's Route Card", "Restorative Salts"],
+        "count_min": 1, "count_max": 2,
+    },
+    "kitchen_cupboard": {
+        "name": "Kitchen Cupboard", "capacity": 180,
+        "loot": ["Sealed Spice Jar", "Hand-Painted Plate", "Field Snack", "Decorative Bottle"],
+        "count_min": 1, "count_max": 3,
+    },
+    "office_desk": {
+        "name": "Desk Drawers", "capacity": 100,
+        "loot": ["Old Town Ledger", "Surveyor's Notes", "Bundle of Old Letters", "Ceremonial Key"],
+        "count_min": 1, "count_max": 2,
+    },
+    "evidence_locker": {
+        "name": "Evidence Locker", "capacity": 180,
+        "loot": ["Foreign Coin", "Carved Bone Token", "Tarnished Locket", "Locksmith's Roll", "Ceremonial Key"],
+        "count_min": 1, "count_max": 3,
+    },
+    "library_shelf": {
+        "name": "Library Shelf", "capacity": 180,
+        "loot": ["Dog-Eared Field Guide", "Old Town Ledger", "Old Medical Text", "Water-Stained Journal"],
+        "count_min": 2, "count_max": 3,
+    },
+    "workshop_parts": {
+        "name": "Workshop Parts Bin", "capacity": 240,
+        "loot": ["Ruin Scrap", "Miner's Token", "Locksmith's Roll", "Coal", "Fiber"],
+        "count_min": 1, "count_max": 3,
+    },
+    "linen_cupboard": {
+        "name": "Linen Cupboard", "capacity": 220,
+        "loot": ["Fiber", "Restorative Salts", "Pressed Wildflowers", "Bundle of Old Letters"],
+        "count_min": 1, "count_max": 3,
+    },
+})
+
 
 AUTHORED_CONTAINER_FIXTURES: Dict[str, Dict[str, Tuple[str, str, bool, str]]] = {
     "GeneralStoreInterior": {
@@ -286,12 +355,28 @@ PLAYER_CONTAINER_DATA: Dict[str, Tuple[str, int, str]] = {
     "Chest": ("Storage Chest", 500, "chest"),
     "Storage Shed": ("Storage Shed", 4000, "shed"),
     "Bookshelf": ("Bookshelf", 120, "bookshelf"),
+    "Library Bookcase": ("Library Bookcase", 360, "bookshelf"),
     "Shelf": ("Shelf", 160, "shelf"),
+    "Nightstand": ("Nightstand", 80, "nightstand"),
+    "Toy Shelf": ("Toy Shelf", 120, "shelf"),
     "Dresser": ("Dresser", 220, "dresser"),
     "Wardrobe": ("Wardrobe", 320, "wardrobe"),
     "Pantry": ("Pantry", 260, "pantry"),
     "Keepsake Chest": ("Keepsake Chest", 120, "keepsake"),
+    "Display Counter": ("Display Counter", 500, "display_case"),
+    "Storage Hutch": ("Storage Hutch", 600, "dresser"),
+    "Reading Nook": ("Reading Nook", 320, "bookshelf"),
+    "Dressing Vanity": ("Dressing Vanity", 240, "dresser"),
 }
+PLAYER_CONTAINER_DATA.update({
+    item_name: (
+        item_name,
+        max(1, int(item_data.get("container_capacity", 200) or 200)),
+        str(item_data.get("container_profile", "cabinet")),
+    )
+    for item_name, item_data in INFRASTRUCTURE_DATA.items()
+    if item_data.get("container_profile")
+})
 
 
 class ContainerSystemMixin:
@@ -579,11 +664,88 @@ class ContainerSystemMixin:
             _scope, x, y = parsed
             record["x"], record["y"] = int(x), int(y)
 
+    @staticmethod
+    def procedural_room_container_profile(
+        building_type: str,
+        room_role: str,
+        room_id: str,
+        tile: str,
+    ) -> str:
+        """Map a generated fixture through its room purpose before its glyph."""
+        building_type = str(building_type or "").lower()
+        room_role = str(room_role or "").lower()
+        room_id = str(room_id or "").lower()
+        tile = str(tile or "")
+        if room_role in {"primary_bedroom", "bedroom"} and tile == "d":
+            return "household_dresser"
+        if room_role == "nursery" and tile == "P":
+            return "nursery_cabinet"
+        if room_role == "guest_room" and tile == "d":
+            return "guest_nightstand"
+        if room_role == "kitchen" and tile == "P":
+            return "inn_pantry" if building_type == "inn" else "kitchen_cupboard"
+        if room_role == "pantry" and tile in {"s", "P"}:
+            return "inn_pantry" if building_type == "inn" else "pantry"
+        if room_role in {"study", "office"} and tile == "d":
+            return "office_desk"
+        if room_role in {"stacks", "reading", "circulation"} and tile in {"l", "L"}:
+            return "library_shelf"
+        if room_role in {"archive", "records"} and tile in {"l", "L", "d", "P", "s"}:
+            return "civic_archive"
+        if building_type == "sheriff_office" and (
+            "evidence" in room_id or room_role in {"armory", "storage"}
+        ) and tile in {"s", "P", "x"}:
+            return "evidence_locker"
+        if room_role in {"examination", "clinic_ward", "pharmacy"} and tile in {"+", "s", "P"}:
+            return "clinic_cabinet"
+        if building_type == "clinic" and room_role == "storage" and tile in {"s", "P"}:
+            return "clinic_supply"
+        if building_type == "inn" and room_role == "storage" and tile in {"s", "P"}:
+            return "linen_cupboard"
+        if building_type in {"carpenter"} and room_role in {
+            "woodshop", "lumber", "workshop", "finishing", "storage", "delivery"
+        } and tile in {"s", "x", "a"}:
+            return "lumber_crate"
+        if building_type in {"workshop", "blacksmith"} and room_role in {
+            "forge", "workshop", "materials", "finishing", "storage", "delivery"
+        } and tile in {"s", "x", "a"}:
+            return "workshop_parts"
+        if room_role in {"sales", "display", "stockroom", "delivery"} and tile in {"$", "s", "P"}:
+            return {
+                "general_store": "store_general_goods",
+                "market_stall": "market_produce",
+            }.get(building_type, "shelf")
+        if room_role == "produce" and tile in {"$", "s", "P"}:
+            return "market_produce"
+        if room_role == "storage" and tile in {"s", "P"}:
+            return "cabinet"
+        return ""
+
     def static_container_profile_at(self, x: int, y: int) -> Optional[Tuple[str, str, bool, str]]:
         if not getattr(self, "in_active_bounds", lambda _x, _y: False)(x, y):
             return None
         tile = self.active_map()[y][x]
         location = str(getattr(self.state, "location", ""))
+        catalog_furniture = getattr(self, "catalog_furniture_at", lambda _x, _y: None)(x, y)
+        if isinstance(catalog_furniture, dict):
+            furniture_name = str(catalog_furniture.get("name", ""))
+            furniture_data = INFRASTRUCTURE_DATA.get(furniture_name, {})
+            profile = str(furniture_data.get("container_profile", ""))
+            if profile:
+                player_owned = bool(
+                    getattr(self, "on_house", lambda: False)()
+                    or getattr(self, "on_player_owned_procedural_residence", lambda: False)()
+                )
+                room_role = str(catalog_furniture.get("room_role", "")).lower()
+                public_roles = {
+                    "sales", "display", "produce", "showroom", "circulation",
+                    "stacks", "reading", "public_hall", "dining", "lobby",
+                }
+                if player_owned:
+                    return profile, "player", True, "Player"
+                if getattr(self, "on_town_interior", lambda: False)() or room_role in public_roles:
+                    return profile, "display", False, getattr(self, "location_label", lambda: "Public building")()
+                return profile, "theft", False, getattr(self, "location_label", lambda: "Local resident")()
         if getattr(self, "on_wilderness_dungeon", lambda: False)():
             dungeon_profiles = {
                 "$": "ruin_chest",
@@ -601,32 +763,161 @@ class ContainerSystemMixin:
         authored = AUTHORED_CONTAINER_FIXTURES.get(location, {}).get(tile)
         if authored:
             return authored
-        if getattr(self, "on_procedural_town_interior", lambda: False)() and tile in {"l", "L", "s", "u", "p"}:
-            building_record = getattr(self, "current_procedural_town_building", lambda: None)() or {}
-            building_type = str(building_record.get("type_id", getattr(self.state, "current_procedural_building_id", ""))).lower()
+        custom_container_profile = str(
+            BUILDING_TEMPLATE_FURNISHING_DATA.get(str(tile), {}).get("container_profile", "")
+        )
+        procedural_interior = getattr(self, "on_procedural_town_interior", lambda: False)()
+        authored_interior = getattr(self, "on_town_interior", lambda: False)()
+        procedural_building_record = (
+            getattr(self, "current_procedural_town_building", lambda: None)() or {}
+            if procedural_interior
+            else {}
+        )
+        procedural_room = (
+            getattr(self, "procedural_town_room_at_position", lambda *_args, **_kwargs: None)(
+                x,
+                y,
+                procedural_building_record,
+            )
+            if procedural_interior
+            else None
+        )
+        procedural_building_type = str(
+            procedural_building_record.get(
+                "type_id",
+                getattr(self.state, "current_procedural_building_id", ""),
+            )
+        ).lower()
+        procedural_room_role = str(
+            procedural_room.get("role", "") if isinstance(procedural_room, dict) else ""
+        ).lower()
+        procedural_room_id = str(
+            procedural_room.get("source_id", procedural_room.get("id", ""))
+            if isinstance(procedural_room, dict)
+            else ""
+        )
+        procedural_room_profile = self.procedural_room_container_profile(
+            procedural_building_type,
+            procedural_room_role,
+            procedural_room_id,
+            str(tile),
+        ) if procedural_interior else ""
+        if (
+            (procedural_interior or authored_interior)
+            and (
+                (procedural_interior and tile in {"l", "L", "s", "u", "p"})
+                or custom_container_profile
+                or procedural_room_profile
+            )
+        ):
+            building_record = procedural_building_record
+            authored_types = {
+                "GeneralStoreInterior": "general_store",
+                "BlacksmithInterior": "blacksmith",
+                "LibraryInterior": "library",
+                "MayorHouseInterior": "home",
+                "InnInterior": "inn",
+                "FurnitureStoreInterior": "furniture_store",
+                "CarpenterStoreInterior": "carpenter",
+                "AnimalStoreInterior": "animal_store",
+                "ClinicInterior": "clinic",
+                "TownHallInterior": "town_hall",
+                "MarketRowInterior": "market_stall",
+                "MuseumInterior": "library",
+                "TownResidenceInterior": "home",
+            }
+            building_type = (
+                procedural_building_type
+                if procedural_interior
+                else authored_types.get(location, "home")
+            )
             is_business = building_type in {
                 "general_store", "blacksmith", "clinic", "inn", "town_hall",
                 "sheriff_office", "library", "furniture_store", "carpenter",
-                "animal_store", "market",
+                "animal_store", "market", "market_stall", "workshop",
             }
-            player_owned = bool(getattr(self, "on_player_owned_procedural_residence", lambda: False)())
-            policy = "player" if player_owned else ("display" if is_business else "theft")
-            owner = "Player" if player_owned else ("Business stock" if is_business else "Local resident")
+            player_owned = bool(
+                procedural_interior
+                and getattr(self, "on_player_owned_procedural_residence", lambda: False)()
+            )
+            public_room_roles = {
+                "sales", "display", "produce", "showroom", "circulation", "stacks",
+            }
+            if player_owned:
+                policy = "player"
+                owner = "Player"
+            elif procedural_room_profile:
+                policy = "display" if procedural_room_role in public_room_roles else "theft"
+                room_label = procedural_room_role.replace("_", " ").title() or "Private room"
+                owner = f"{building_record.get('name', 'Local property')} - {room_label}"
+            else:
+                policy = "display" if is_business else "theft"
+                owner = "Business stock" if is_business else "Local resident"
             business_profiles = {
-                "general_store": {"s": "store_general_goods", "l": "store_general_goods", "L": "store_general_goods"},
-                "blacksmith": {"s": "smith_crate", "l": "smith_tools", "L": "smith_tools"},
-                "clinic": {"s": "clinic_supply", "u": "clinic_cabinet"},
-                "inn": {"p": "inn_pantry", "s": "inn_pantry"},
-                "library": {"l": "civic_archive", "L": "civic_archive", "s": "civic_archive"},
-                "town_hall": {"l": "civic_archive", "L": "civic_archive", "s": "civic_archive"},
-                "sheriff_office": {"l": "civic_archive", "L": "civic_archive", "s": "smith_tools"},
-                "carpenter": {"s": "lumber_crate", "l": "lumber_crate", "L": "lumber_crate"},
-                "animal_store": {"s": "animal_feed", "p": "animal_feed", "u": "animal_medicine"},
-                "market": {"s": "market_produce", "l": "market_rare", "L": "market_rare"},
+                "general_store": {
+                    "s": "store_general_goods", "l": "store_general_goods", "L": "store_general_goods",
+                    "H": "store_general_goods", "i": "store_general_goods", "j": "store_general_goods",
+                    "g": "store_general_goods", "W": "store_general_goods", "y": "store_general_goods",
+                    "z": "store_general_goods", "V": "store_general_goods", "X": "store_general_goods",
+                },
+                "blacksmith": {
+                    "s": "smith_crate", "l": "smith_tools", "L": "smith_tools",
+                    "j": "smith_tools", "g": "smith_tools", "W": "smith_tools",
+                    "y": "smith_crate", "z": "smith_crate", "X": "smith_coal",
+                },
+                "workshop": {
+                    "s": "smith_crate", "j": "smith_tools", "g": "smith_tools",
+                    "W": "smith_tools", "y": "smith_crate", "z": "smith_crate", "X": "smith_coal",
+                },
+                "clinic": {
+                    "s": "clinic_supply", "u": "clinic_cabinet", "j": "clinic_supply",
+                    "z": "clinic_supply", "y": "clinic_supply", "g": "clinic_cabinet",
+                    "W": "clinic_cabinet", "N": "clinic_cabinet",
+                },
+                "inn": {
+                    "p": "inn_pantry", "s": "inn_pantry", "j": "inn_pantry",
+                    "g": "inn_pantry", "W": "inn_pantry", "z": "inn_pantry",
+                    "X": "inn_pantry", "Z": "inn_pantry",
+                },
+                "library": {
+                    "l": "civic_archive", "L": "civic_archive", "s": "civic_archive",
+                    "H": "civic_archive", "i": "civic_archive", "j": "civic_archive",
+                    "g": "civic_archive", "W": "civic_archive", "V": "civic_archive",
+                },
+                "town_hall": {
+                    "l": "civic_archive", "L": "civic_archive", "s": "civic_archive",
+                    "H": "civic_archive", "i": "civic_archive", "j": "civic_archive",
+                    "g": "civic_archive", "W": "civic_archive", "y": "civic_archive",
+                },
+                "sheriff_office": {
+                    "l": "civic_archive", "L": "civic_archive", "s": "smith_tools",
+                    "H": "civic_archive", "i": "civic_archive", "j": "civic_archive",
+                    "g": "civic_archive", "W": "civic_archive", "y": "smith_tools",
+                },
+                "carpenter": {
+                    "s": "lumber_crate", "l": "lumber_crate", "L": "lumber_crate",
+                    "j": "lumber_crate", "g": "lumber_crate", "W": "lumber_crate",
+                    "y": "lumber_crate", "z": "lumber_crate", "X": "lumber_crate",
+                },
+                "animal_store": {
+                    "s": "animal_feed", "p": "animal_feed", "u": "animal_medicine",
+                    "j": "animal_feed", "z": "animal_feed", "X": "animal_feed",
+                    "g": "animal_medicine", "W": "animal_medicine",
+                },
+                "market": {
+                    "s": "market_produce", "l": "market_rare", "L": "market_rare",
+                    "j": "market_produce", "z": "market_produce", "X": "market_produce",
+                    "H": "market_rare", "i": "market_rare", "V": "market_rare",
+                },
+                "market_stall": {
+                    "s": "market_produce", "j": "market_produce", "z": "market_produce",
+                    "X": "market_produce", "H": "market_rare", "i": "market_rare",
+                    "V": "market_rare",
+                },
             }
-            profile = business_profiles.get(building_type, {}).get(tile)
+            profile = procedural_room_profile or business_profiles.get(building_type, {}).get(tile)
             if not profile:
-                profile = (
+                profile = custom_container_profile or (
                     "bookshelf" if tile in {"l", "L"}
                     else "dresser" if tile == "u"
                     else "pantry" if tile == "p"
@@ -838,6 +1129,45 @@ class ContainerSystemMixin:
             placed_key, placed, ax, ay = self.placed_object_at(x, y)
             if placed in PLAYER_CONTAINER_DATA and ax is not None and ay is not None:
                 return self.player_container_record(int(ax), int(ay), str(placed), object_key=placed_key)
+
+        catalog_furniture = getattr(self, "catalog_furniture_at", lambda _x, _y: None)(x, y)
+        if isinstance(catalog_furniture, dict):
+            furniture_name = str(catalog_furniture.get("name", ""))
+            profile = str(INFRASTRUCTURE_DATA.get(furniture_name, {}).get("container_profile", ""))
+            static = self.static_container_profile_at(x, y) if profile else None
+            if static:
+                profile, policy, allow_deposit, owner = static
+                furniture_key = getattr(self, "furniture_state_key", lambda *_args, **_kwargs: f"{x},{y}")(
+                    furniture_name, x, y, catalog_furniture,
+                )
+                key = f"{self.container_scope_key()}:catalog-furniture:{furniture_key}:{profile}"
+                record = self.state.world_containers.get(key)
+                if isinstance(record, dict):
+                    if not record.get("extra_action"):
+                        record["extra_action"] = (
+                            "outfit" if any(word in furniture_name.lower() for word in ("dresser", "wardrobe", "vanity"))
+                            else "guides" if profile in {"bookshelf", "civic_archive"}
+                            else "keepsakes" if "keepsake" in furniture_name.lower()
+                            else "pantry" if profile in {"pantry", "inn_pantry"}
+                            else ""
+                        )
+                    return record
+                if not create:
+                    return None
+                stock = self.container_display_stock(profile) if policy == "display" else None
+                extra_action = (
+                    "outfit" if any(word in furniture_name.lower() for word in ("dresser", "wardrobe", "vanity"))
+                    else "guides" if profile in {"bookshelf", "civic_archive"}
+                    else "keepsakes" if "keepsake" in furniture_name.lower()
+                    else "pantry" if profile in {"pantry", "inn_pantry"}
+                    else ""
+                )
+                return self.create_container_record(
+                    key, x, y, profile, name=furniture_name,
+                    take_policy=policy, allow_deposit=allow_deposit, owner=owner,
+                    contents={} if policy == "player" else (stock if stock else None),
+                    extra_action=extra_action,
+                )
 
         static = self.static_container_profile_at(x, y)
         if not static:
@@ -1126,6 +1456,14 @@ class ContainerSystemMixin:
         accepted = max(0, int(self.state.inventory.get(item_name, 0) or 0) - before)
         contents[item_name] = available - accepted
         self.container_apply_theft(record, accepted)
+        if accepted and hasattr(self, "record_quest_event"):
+            profile = str(record.get("profile", record.get("container_profile", "container")) or "container")
+            self.record_quest_event(
+                "loot", target_name=item_name, target_id=item_name,
+                target_tags=["item", profile], amount=accepted,
+                location=str(getattr(self.state, "location", "")),
+                note=f"Recovered {accepted} {item_name} from {record.get('name', 'a container')}.",
+            )
         if autosave:
             verb = "Stole" if policy == "theft" else "Took"
             remaining = max(0, available - accepted)
@@ -1147,6 +1485,12 @@ class ContainerSystemMixin:
         self.state.money += money
         source["money"] = 0
         self.container_apply_theft(record, money)
+        if hasattr(self, "record_quest_event"):
+            self.record_quest_event(
+                "loot", target_name="Money", target_id="money", target_tags=["money", "currency"],
+                amount=money, location=str(getattr(self.state, "location", "")),
+                note=f"Recovered {money}g from {record.get('name', 'a container')}.",
+            )
         if autosave:
             verb = "Stole" if str(record.get("take_policy", "")) == "theft" else "Took"
             self.autosave_with_message(f"{verb} {money}g.")
@@ -1472,7 +1816,10 @@ class ContainerSystemMixin:
             elif choice.value == "__keepsakes__":
                 self.vertical_panel_view("Keepsake Chest", self.family_event_log_lines(), LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
             elif choice.value == "__outfit__":
-                self.set_message("You sort coats, boots, and work clothes into something presentable.")
+                if hasattr(self, "show_player_color_mirror_menu"):
+                    self.show_player_color_mirror_menu()
+                else:
+                    self.set_message("You sort coats, boots, and work clothes into something presentable.")
             elif choice.value == "__pantry__":
                 self.set_message("The pantry labels make it easier to plan meals and supplies for a long trip.")
 

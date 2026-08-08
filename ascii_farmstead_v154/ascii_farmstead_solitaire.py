@@ -310,7 +310,7 @@ class SolitaireMixin:
             "- Select stock, waste, foundation, or tableau with A/D. Use W/S to choose a deeper face-up sequence.",
             "- Number keys 1-7 jump to tableau columns; R draws the stock immediately.",
             "- Z/Enter selects a source or confirms a destination. F sends an eligible top card to its foundation.",
-            "- H provides a legal-move hint. X/Escape clears a selection, then pauses the saved deal.",
+            "- H gives a legal-move hint. B/X/Escape/Q/Tab clears selection, then pauses the saved deal.",
         ]
 
     def solitaire_stats_lines(self) -> List[str]:
@@ -487,7 +487,7 @@ class SolitaireMixin:
             "R: draw stock",
             "F: foundation",
             "H: hint",
-            "X: clear/pause",
+            "B/X/Esc/Q/Tab: clear/pause",
         )
 
     @staticmethod
@@ -550,7 +550,7 @@ class SolitaireMixin:
                 return
             self._draw_solitaire_table(match, cursor, depth, selected)
             key = normalize_key(read_key())
-            if key in {"x", "\x1b", "q"}:
+            if key in {"b", "x", "\x1b", "q", "\t"}:
                 if selected:
                     selected = None
                     match["note"] = "Selection cleared."

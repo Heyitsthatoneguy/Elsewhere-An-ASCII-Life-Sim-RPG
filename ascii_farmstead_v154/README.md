@@ -4,7 +4,7 @@ Elsewhere is a free terminal life-sim RPG about farming, relationships,
 families, exploration, tactical combat, wilderness settlements, business,
 politics, and lives that can continue across generations.
 
-Current release: `0.9.0-beta.5`
+Current release: `0.9.0-beta.6`
 
 ## Windows download
 

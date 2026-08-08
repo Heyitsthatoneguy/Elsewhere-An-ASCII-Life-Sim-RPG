@@ -17,6 +17,10 @@ Point = Tuple[int, int]
 Move = Dict[str, object]
 CHESS_EMPTY = "."
 CHESS_PIECES = set("PNBRQKpnbrqk")
+CHESS_UNICODE_PIECES = {
+    "K": "♔", "Q": "♕", "R": "♖", "B": "♗", "N": "♘", "P": "♙",
+    "k": "♚", "q": "♛", "r": "♜", "b": "♝", "n": "♞", "p": "♟",
+}
 CHESS_VALUES = {"P": 100, "N": 320, "B": 330, "R": 500, "Q": 900, "K": 20000}
 CHESS_STATS_DEFAULTS = {
     "games_played": 0,
@@ -46,6 +50,21 @@ def new_chess_board() -> Board:
 
 def copy_chess_board(board: Board) -> Board:
     return [list(row) for row in board]
+
+
+def chess_piece_glyph(piece: str) -> str:
+    """Return a proper chess symbol while retaining legacy save notation."""
+    return CHESS_UNICODE_PIECES.get(str(piece), ".")
+
+
+def chess_piece_name(piece: str) -> str:
+    name = {
+        "P": "White pawn", "N": "White knight", "B": "White bishop",
+        "R": "White rook", "Q": "White queen", "K": "White king",
+        "p": "Black pawn", "n": "Black knight", "b": "Black bishop",
+        "r": "Black rook", "q": "Black queen", "k": "Black king",
+    }
+    return name.get(str(piece), "empty")
 
 
 def chess_owner(piece: str) -> str:
@@ -472,7 +491,7 @@ class ChessMixin:
     def chess_rules_lines() -> List[str]:
         return [
             "TAVERN CHESS", "",
-            "- You play White and move first. Uppercase pieces are yours; lowercase pieces belong to the opponent.",
+            "- You play White (♔♕♖♗♘♙) and move first; Black (♚♛♜♝♞♟) is the opponent.",
             "- Pawns move forward, capture diagonally, may advance two squares initially, and promote on the far rank.",
             "- Knights jump in an L shape. Bishops move diagonally; Rooks move straight; Queens use both.",
             "- Kings move one square and may castle if the path, check status, and castling rights permit it.",
@@ -481,7 +500,7 @@ class ChessMixin:
             "- Checkmate wins. Stalemate, threefold repetition, insufficient material, and fifty moves per side without pawn movement or capture draw.",
             "- White and dark-grey tiles form the board; brackets mark the cursor, angles mark selection, and parentheses mark destinations.",
             "- Move with WASD, arrows, or numpad. N jumps to the next movable piece; Z/Enter selects and moves.",
-            "- X/Escape clears selection, then pauses.",
+            "- B/X/Escape/Q/Tab clears selection, then pauses.",
             "- Friendly, Practiced, and Expert opponents use bounded increasingly careful evaluation.",
         ]
 
@@ -492,23 +511,24 @@ class ChessMixin:
             f"{str(match.get('venue', 'Tavern'))} - Chess",
             f"Opponent: {match.get('difficulty')} | Move: {match.get('fullmove_number')} | {status}",
         )
-        minigame_section("Board", "Uppercase: you | lowercase: opponent")
+        minigame_section("Board", "White Unicode pieces: you | Black Unicode pieces: opponent")
         print("    a  b  c  d  e  f  g  h")
         destination_set = set(destinations)
         for y, row in enumerate(match["board"]):
             cells = []
             for x, piece in enumerate(row):
+                glyph = chess_piece_glyph(piece)
                 if (x, y) == selected:
-                    cell = f"<{piece}>"
+                    cell = f"<{glyph}>"
                     role = "selected"
                 elif (x, y) == cursor:
-                    cell = f"[{piece if piece != CHESS_EMPTY else ' '}]"
+                    cell = f"[{glyph if piece != CHESS_EMPTY else ' '}]"
                     role = "cursor"
                 elif (x, y) in destination_set:
-                    cell = f"({piece if piece != CHESS_EMPTY else '.'})"
+                    cell = f"({glyph if piece != CHESS_EMPTY else '.'})"
                     role = "destination"
                 else:
-                    cell = f" {piece if piece != CHESS_EMPTY else ('.' if (x + y) % 2 else ' ')} "
+                    cell = f" {glyph if piece != CHESS_EMPTY else ('.' if (x + y) % 2 else ' ')} "
                     role = (
                         "pale_piece" if chess_owner(piece) == "player"
                         else "red_piece" if chess_owner(piece) == "ai"
@@ -516,12 +536,13 @@ class ChessMixin:
                     )
                 cells.append(board_tile(cell, x, y, role))
             print(f" {8-y} " + "".join(cells))
-        captured = "".join(str(piece) for piece in match.get("captured", [])[-16:]) or "none"
+        captured = "".join(chess_piece_glyph(str(piece)) for piece in match.get("captured", [])[-16:]) or "none"
         history = " ".join(str(move) for move in match.get("move_history", [])[-6:]) or "none"
         piece = match["board"][cursor[1]][cursor[0]]
         square_name = f"{chr(ord('a') + cursor[0])}{8 - cursor[1]}"
         minigame_notice(
-            f"{square_name} | {piece if piece != CHESS_EMPTY else 'empty'} | "
+            f"{square_name} | "
+            f"{chess_piece_glyph(piece) + ' ' + chess_piece_name(piece) if piece != CHESS_EMPTY else 'empty'} | "
             f"{len(destinations)} destination(s)",
             prefix="CURSOR",
         )
@@ -532,7 +553,7 @@ class ChessMixin:
             "N: next movable piece",
             "Z/Enter/Space: select/move",
             "H: rules",
-            "X/Esc/Q: clear/pause",
+            "B/X/Esc/Q/Tab: clear/pause",
         )
 
     def _choose_chess_promotion(self, moves: Sequence[Move]) -> Move:
@@ -653,7 +674,7 @@ class ChessMixin:
                     selected = None
                     match["note"] = "Moved to the next piece with a legal move."
                 continue
-            if key in {"x", "\x1b", "q"}:
+            if key in {"b", "x", "\x1b", "q", "\t"}:
                 if selected is not None:
                     selected = None
                     match["note"] = "Selection cleared."
@@ -668,7 +689,7 @@ class ChessMixin:
                     selected = cursor
                     match["note"] = "Choose a highlighted destination."
                 else:
-                    match["note"] = "Choose one of your White pieces with a legal move."
+                    match["note"] = "Choose one of your White Unicode pieces with a legal move."
                 continue
             candidates = [move for move in source_moves if tuple(move["to"]) == cursor]
             if candidates:

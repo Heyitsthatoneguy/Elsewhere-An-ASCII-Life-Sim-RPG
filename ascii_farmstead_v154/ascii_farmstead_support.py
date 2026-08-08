@@ -14,7 +14,7 @@ ENABLE_COLOR = True
 
 GAME_TITLE = "Elsewhere: an ASCII Life-Sim RPG"
 GAME_SHORT_TITLE = "Elsewhere"
-GAME_VERSION = "0.9.0-beta.5"
+GAME_VERSION = "0.9.0-beta.6"
 GAME_DISPLAY_TITLE = f"{GAME_TITLE} {GAME_VERSION}"
 SAVE_SCHEMA_VERSION = 1
 SAVE_BACKUP_COUNT = 3
@@ -181,6 +181,8 @@ LOADED_STATE_DEFAULTS = {
     "bin_menu_suppressed_until_exit": False,
     "show_target_info": True,
     "show_control_hints": True,
+    "show_hud_sidebar": True,
+    "hud_activity_log": [],
     "player_name": "Farmer",
     "player_sex": "Female",
     "player_color": "White",
@@ -281,6 +283,7 @@ LOADED_STATE_DEFAULTS = {
     "scene_flags": [],
     "active_scene_id": "",
     "active_scene_step_index": 0,
+    "special_event_scenes": {},
     "active_food_buffs": {},
     "fish_ponds": {},
     "artisan_processors": {},
@@ -857,6 +860,185 @@ def read_key() -> str:
         return ch
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+
+def _windows_console_viewport_origin(kernel32, handle) -> Tuple[int, int]:
+    """Return the visible window's screen-buffer offset for mouse coordinates."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class COORD(ctypes.Structure):
+            _fields_ = [("X", wintypes.SHORT), ("Y", wintypes.SHORT)]
+
+        class SMALL_RECT(ctypes.Structure):
+            _fields_ = [
+                ("Left", wintypes.SHORT),
+                ("Top", wintypes.SHORT),
+                ("Right", wintypes.SHORT),
+                ("Bottom", wintypes.SHORT),
+            ]
+
+        class CONSOLE_SCREEN_BUFFER_INFO(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", COORD),
+                ("dwCursorPosition", COORD),
+                ("wAttributes", wintypes.WORD),
+                ("srWindow", SMALL_RECT),
+                ("dwMaximumWindowSize", COORD),
+            ]
+
+        info = CONSOLE_SCREEN_BUFFER_INFO()
+        output_handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+        if output_handle and kernel32.GetConsoleScreenBufferInfo(
+            output_handle, ctypes.byref(info)
+        ):
+            return int(info.srWindow.Left), int(info.srWindow.Top)
+    except Exception:
+        pass
+    return 0, 0
+
+
+def _read_windows_key_or_mouse() -> Optional[Dict[str, object]]:
+    """Read one Windows console key or mouse event, restoring console mode afterward."""
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class COORD(ctypes.Structure):
+            _fields_ = [("X", wintypes.SHORT), ("Y", wintypes.SHORT)]
+
+        class KEY_EVENT_RECORD(ctypes.Structure):
+            _fields_ = [
+                ("bKeyDown", wintypes.BOOL),
+                ("wRepeatCount", wintypes.WORD),
+                ("wVirtualKeyCode", wintypes.WORD),
+                ("wVirtualScanCode", wintypes.WORD),
+                ("UnicodeChar", wintypes.WCHAR),
+                ("dwControlKeyState", wintypes.DWORD),
+            ]
+
+        class MOUSE_EVENT_RECORD(ctypes.Structure):
+            _fields_ = [
+                ("dwMousePosition", COORD),
+                ("dwButtonState", wintypes.DWORD),
+                ("dwControlKeyState", wintypes.DWORD),
+                ("dwEventFlags", wintypes.DWORD),
+            ]
+
+        class WINDOW_BUFFER_SIZE_RECORD(ctypes.Structure):
+            _fields_ = [("dwSize", COORD)]
+
+        class EVENT_UNION(ctypes.Union):
+            _fields_ = [
+                ("KeyEvent", KEY_EVENT_RECORD),
+                ("MouseEvent", MOUSE_EVENT_RECORD),
+                ("WindowBufferSizeEvent", WINDOW_BUFFER_SIZE_RECORD),
+            ]
+
+        class INPUT_RECORD(ctypes.Structure):
+            _anonymous_ = ("Event",)
+            _fields_ = [("EventType", wintypes.WORD), ("Event", EVENT_UNION)]
+
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(-10)  # STD_INPUT_HANDLE
+        original_mode = wintypes.DWORD()
+        if not handle or not kernel32.GetConsoleMode(handle, ctypes.byref(original_mode)):
+            return None
+
+        # Mouse reporting requires Quick Edit to be disabled while waiting,
+        # otherwise a click selects console text and freezes the application.
+        mouse_mode = (
+            int(original_mode.value)
+            | 0x0010  # ENABLE_MOUSE_INPUT
+            | 0x0008  # ENABLE_WINDOW_INPUT
+            | 0x0080  # ENABLE_EXTENDED_FLAGS
+        ) & ~0x0040  # ENABLE_QUICK_EDIT_MODE
+        if not kernel32.SetConsoleMode(handle, mouse_mode):
+            return None
+
+        try:
+            record = INPUT_RECORD()
+            count = wintypes.DWORD()
+            while True:
+                if not kernel32.ReadConsoleInputW(
+                    handle, ctypes.byref(record), 1, ctypes.byref(count)
+                ):
+                    return None
+                if not count.value:
+                    continue
+                if int(record.EventType) == 0x0001:  # KEY_EVENT
+                    key_event = record.KeyEvent
+                    if not bool(key_event.bKeyDown):
+                        continue
+                    virtual_key = int(key_event.wVirtualKeyCode)
+                    special = {
+                        0x08: "\b",
+                        0x09: "\t",
+                        0x0D: "\r",
+                        0x1B: "\x1b",
+                        0x20: " ",
+                        0x21: "PGUP",
+                        0x22: "PGDN",
+                        0x23: "END",
+                        0x24: "HOME",
+                        0x25: "LEFT",
+                        0x26: "UP",
+                        0x27: "RIGHT",
+                        0x28: "DOWN",
+                        0x61: "NUM1",
+                        0x62: "NUM2",
+                        0x63: "NUM3",
+                        0x64: "NUM4",
+                        0x65: "NUM5",
+                        0x66: "NUM6",
+                        0x67: "NUM7",
+                        0x68: "NUM8",
+                        0x69: "NUM9",
+                    }.get(virtual_key)
+                    key = special or str(key_event.UnicodeChar or "")
+                    if key:
+                        return {"kind": "key", "key": key}
+                    continue
+                if int(record.EventType) != 0x0002:  # MOUSE_EVENT
+                    continue
+                mouse_event = record.MouseEvent
+                raw_buttons = int(mouse_event.dwButtonState)
+                event_flags = int(mouse_event.dwEventFlags)
+                origin_x, origin_y = _windows_console_viewport_origin(
+                    kernel32, handle
+                )
+                wheel = 0
+                if event_flags & 0x0004:  # MOUSE_WHEELED
+                    wheel_delta = ctypes.c_short(
+                        (raw_buttons >> 16) & 0xFFFF
+                    ).value
+                    wheel = 1 if wheel_delta > 0 else -1 if wheel_delta < 0 else 0
+                return {
+                    "kind": "mouse",
+                    "x": int(mouse_event.dwMousePosition.X) - origin_x,
+                    "y": int(mouse_event.dwMousePosition.Y) - origin_y,
+                    "buttons": raw_buttons & 0xFFFF,
+                    "left": bool(raw_buttons & 0x0001),
+                    "right": bool(raw_buttons & 0x0002),
+                    "wheel": wheel,
+                    "moved": bool(event_flags & 0x0001),
+                    "double": bool(event_flags & 0x0002),
+                }
+        finally:
+            kernel32.SetConsoleMode(handle, int(original_mode.value))
+    except Exception:
+        return None
+
+
+def read_key_or_mouse() -> Dict[str, object]:
+    """Read editor input with mouse support when a Windows console provides it."""
+    event = _read_windows_key_or_mouse()
+    if event is not None:
+        return event
+    return {"kind": "key", "key": read_key()}
 
 
 def configure_console_encoding():

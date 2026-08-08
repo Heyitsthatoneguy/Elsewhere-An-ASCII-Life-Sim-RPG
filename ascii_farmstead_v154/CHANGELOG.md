@@ -1,5 +1,70 @@
 # Changelog
 
+## 0.9.0-beta.6
+
+- Rebuilt NPC conversations around coherent, advancing exchanges instead of
+  disconnected dialogue bundles. Conversations now move naturally through
+  introductions, small talk, relevant topics, questions, responses, and
+  farewells, with relationship-aware greetings, moods, personality, routines,
+  occupations, location, weather, seasons, family, and remembered events.
+- Added thousands of contextual dialogue variations plus player-led topics for
+  directions, work, family, hobbies, companions, ancestry, travels, discoveries,
+  and recent accomplishments. Compliments, insults, personal disclosures, and
+  appropriately placed consequential choices can affect relationships and
+  reputation without forcing a quiz into every conversation.
+- Integrated dialogue into the moving world. NPC knowledge now has sources and
+  can spread between residents; nearby people can join group conversations;
+  callouts, invitations, meetings, dates, outings, guided journeys, household
+  plans, courtship, proposals, weddings, and family decisions use the shared
+  conversation and persistent-scene systems.
+- Added a unified Quest Log and Planned Activities system with objective
+  tracking, destination markers, distances, participant status, calendar
+  integration, rescheduling, cancellation, and world-visible progress. NPCs can
+  offer renewable, role-specific multi-stage stories with physical objectives,
+  paced return conversations, persistent aftermath, and later follow-ups.
+- Added a right-side activity feed while preserving the complete legacy status
+  header. Surrounding activity, dialogue, interaction results, objectives, and
+  combat information are categorized and repetition-compressed, with a
+  toggleable full-screen searchable history and a compact fallback for narrow
+  terminals.
+- Replaced repeated public-building layouts with modular, purpose-built
+  architecture. Starting-town and generated interiors now compose varied room
+  sizes, hallways, suites, private spaces, service areas, and sensible room
+  connections while preserving clear routes, reachable counters, spatially
+  correct entrances, occupancy, and NPC schedules.
+- Overhauled furniture into a large semantic catalog of multi-cell Unicode
+  designs, coordinated furnishing ensembles, floor coverings, wall-mounted
+  pieces, containers, household necessities, shop fixtures, and game tables.
+  Furniture cells share one identity and every placed furnishing exposes a real
+  use appropriate to the object, including sitting, sleeping, cooking, bathing,
+  storage, reading, writing, lighting, gardening, entertainment, shopping, and
+  board games.
+- Expanded furniture interactions with familiarity, room context, household
+  ownership, moods, small restorative benefits, item use, television channels,
+  aquarium care, plant care, table activities, and persistent state. Purchased
+  residences and procedural homes use the same functional furnishing language.
+- Reworked the building-template editor for direct editing of built-in presets,
+  clearer map selection, mouse painting without hover-drawing, true blank-space
+  erasing, zone creation/redrawing/removal, color painting, doors, partitions,
+  NPC spawn points, occupancy controls, floor management, undo/redo, previews,
+  and a much broader placement catalog with cross-building semantic definitions.
+- Greatly expanded generated resident given-name and surname variety and
+  improved room-aware furnishing use, indoor movement, door handling, and
+  schedule destinations.
+- Changed diagonal number-pad movement to validate the destination tile itself,
+  removing artificial corner trapping when the diagonal destination is open.
+- Replaced chess and checkers letters with legible Unicode pieces and moved
+  remaining major family, civic, regional, and wilderness outcomes into
+  skippable world-anchored scenes whose gameplay consequences are applied safely.
+- Completed an interface consistency and exit-path audit. Shared menus now use
+  reliable B/X/Escape/Q/Tab cancellation, long lists support Page Up/Page Down
+  and Home/End, custom full-screen interfaces advertise their real controls,
+  and the Quest Log/Planned Activities Back sentinel bug no longer traps the
+  player in a redraw loop.
+- Added caching, bounded lookups, and rendering safeguards across furniture,
+  interiors, dialogue, activities, and HUD composition to keep the expanded
+  systems responsive and save-compatible.
+
 ## 0.9.0-beta.5
 
 - Added persistent randomized equipment with Common through Legendary rarity,

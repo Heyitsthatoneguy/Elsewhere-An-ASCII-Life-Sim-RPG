@@ -351,7 +351,7 @@ class MancalaMixin:
             "- Move with A/D, arrows, or numpad; number keys 1-6 jump directly to a nonempty pit.",
             "- Z/Enter/Space sows the highlighted pit.",
             "- Highlighted cups preview the sowing path; the final landing cup is shown separately.",
-            "- X/Escape/Q pauses the match. A wager remains committed while that match is paused.",
+            "- B/X/Escape/Q/Tab pauses the match. A wager remains committed while that match is paused.",
             "- Draws refund the wager. Wins earn profit equal to 1x the wager on Friendly, 1.5x on Practiced, or 2x on Expert.",
             "- Free practice matches are always available and count toward playing records.",
         ]
@@ -445,7 +445,7 @@ class MancalaMixin:
             "1-6: jump to pit",
             "Z/Enter/Space: sow",
             "H: rules",
-            "X/Esc/Q: pause",
+            "B/X/Esc/Q/Tab: pause",
         )
 
     def _mancala_complete_move(
@@ -586,7 +586,7 @@ class MancalaMixin:
                     "Mancala Rules", self.mancala_rules_lines(), LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT,
                 )
                 continue
-            if key in {"x", "\x1b", "q"}:
+            if key in {"b", "x", "\x1b", "q", "\t"}:
                 self.pause_mancala_match()
                 return
             delta = movement_delta_for_key(key)

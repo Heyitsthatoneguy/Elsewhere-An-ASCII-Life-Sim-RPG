@@ -13,6 +13,10 @@ from ascii_farmstead_civic_state import (
 from ascii_farmstead_data import LEFT_PANEL_HEIGHT, LEFT_PANEL_WIDTH, MENU_BACK
 from ascii_farmstead_helpers import days_in_month
 from ascii_farmstead_npc_builder import stable_text_seed
+from ascii_farmstead_procedural_interiors import (
+    build_procedural_ground_floor,
+    procedural_residence_furnishing_candidates,
+)
 from ascii_farmstead_town_builder import settlement_chunk_key
 from ascii_farmstead_ui import MenuItem
 
@@ -370,43 +374,40 @@ class CivicEconomyMixin:
             current_stage = int(property_record.get("furnishings_level", -1))
         except (TypeError, ValueError):
             current_stage = -1
-        if current_stage >= target_stage:
-            return 0
-
-        stage_layouts: Dict[int, List[Tuple[str, int, int]]] = {
+        stage_layouts: Dict[int, List[Tuple[str, str]]] = {
             0: [
-                ("Bed", 8, 8),
-                ("Nightstand", 12, 8),
-                ("Dresser", 14, 8),
-                ("Wall Calendar", 17, 8),
-                ("Chest", 10, 12),
-                ("Television", 49, 8),
-                ("Bookshelf", 10, 21),
-                ("Writing Desk", 13, 21),
-                ("Wooden Table", 27, 23),
-                ("Wooden Chair", 29, 24),
-                ("Decorative Rug", 34, 22),
+                ("Bed", "bedroom"),
+                ("Nightstand", "bedroom"),
+                ("Dresser", "bedroom"),
+                ("Wall Calendar", "common"),
+                ("Chest", "storage"),
+                ("Television", "common"),
+                ("Bookshelf", "study"),
+                ("Writing Desk", "study"),
+                ("Wooden Table", "common"),
+                ("Wooden Chair", "common"),
+                ("Decorative Rug", "common"),
             ],
             1: [
-                ("Kitchen Counter", 9, 16),
-                ("Pantry", 14, 16),
-                ("Wash Basin", 17, 16),
-                ("Tea Table", 50, 21),
+                ("Kitchen Counter", "kitchen"),
+                ("Pantry", "kitchen"),
+                ("Wash Basin", "kitchen"),
+                ("Tea Table", "common"),
             ],
             2: [
-                ("Family Table", 46, 15),
-                ("Couch", 46, 21),
-                ("Child Bed", 49, 12),
-                ("Toy Shelf", 54, 12),
-                ("Study Desk", 49, 15),
+                ("Family Table", "common"),
+                ("Couch", "common"),
+                ("Child Bed", "bedroom"),
+                ("Toy Shelf", "bedroom"),
+                ("Study Desk", "study"),
             ],
             3: [
-                ("Fireplace", 26, 3),
-                ("Armchair", 31, 3),
-                ("Keepsake Chest", 36, 3),
-                ("Wall Art", 48, 3),
-                ("House Plant", 56, 3),
-                ("Large Rug", 25, 20),
+                ("Fireplace", "common"),
+                ("Armchair", "common"),
+                ("Keepsake Chest", "storage"),
+                ("Wall Art", "study"),
+                ("House Plant", "common"),
+                ("Large Rug", "common"),
             ],
         }
 
@@ -425,31 +426,112 @@ class CivicEconomyMixin:
             except Exception:
                 return None
 
-        def location_tiles() -> set:
-            occupied = set()
-            for key, existing_name in list(self.state.placed_objects.items()):
-                parsed = parsed_object_key(str(key))
-                if not parsed:
-                    continue
-                location, ax, ay = parsed
-                if location != location_key:
-                    continue
-                occupied.update(footprint_tiles(str(existing_name), ax, ay))
-            return occupied
+        plan = self.current_procedural_town_plan() if hasattr(self, "current_procedural_town_plan") else None
+        if building is None and hasattr(self, "current_procedural_town_building"):
+            building = self.current_procedural_town_building()
+        if isinstance(plan, dict) and isinstance(building, dict) and hasattr(
+            self, "procedural_town_building_layout_variant"
+        ):
+            layout_variant = self.procedural_town_building_layout_variant(plan, building)
+        else:
+            layout_variant = stable_text_seed(f"{property_id}:residence-layout") % 4
+        floor_count = 1
+        if isinstance(plan, dict) and isinstance(building, dict) and hasattr(
+            self, "procedural_town_building_floor_count"
+        ):
+            floor_count = self.procedural_town_building_floor_count(
+                plan,
+                building,
+                property_record=property_record,
+            )
+        source_grid = build_procedural_ground_floor(
+            "home",
+            layout_variant,
+            layout_variant,
+            floor_count,
+            player_owned=True,
+        )
+        candidate_groups = procedural_residence_furnishing_candidates(layout_variant)
+        preferred_roles = {
+            obj_name: role
+            for stage_records in stage_layouts.values()
+            for obj_name, role in stage_records
+        }
 
-        added = 0
-        occupied_tiles = location_tiles()
+        existing_records: List[Tuple[str, str, int, int]] = []
+        occupied_tiles = set()
+        for key, existing_name in list(self.state.placed_objects.items()):
+            parsed = parsed_object_key(str(key))
+            if not parsed:
+                continue
+            location, ax, ay = parsed
+            if location != location_key:
+                continue
+            existing_records.append((str(key), str(existing_name), ax, ay))
+            occupied_tiles.update(footprint_tiles(str(existing_name), ax, ay))
+
+        def valid_footprint(obj_name: str, x: int, y: int, occupied: set) -> bool:
+            tiles = footprint_tiles(obj_name, x, y)
+            return bool(tiles) and all(
+                0 <= ty < len(source_grid)
+                and 0 <= tx < len(source_grid[ty])
+                and source_grid[ty][tx] in {".", ","}
+                and (tx, ty) not in occupied
+                for tx, ty in tiles
+            )
+
+        def next_anchor(obj_name: str, role: str, occupied: set) -> Optional[Tuple[int, int]]:
+            candidates = list(candidate_groups.get(role, ())) + list(candidate_groups.get("any", ()))
+            return next(
+                (
+                    (x, y)
+                    for x, y in dict.fromkeys(candidates)
+                    if valid_footprint(obj_name, x, y, occupied)
+                ),
+                None,
+            )
+
+        changed = 0
+        # Cache-version changes can put old default furniture into a wall or
+        # void. Preserve every object, but move only invalid anchors into the
+        # closest appropriate room in the new plan.
+        for old_key, obj_name, old_x, old_y in existing_records:
+            old_tiles = set(footprint_tiles(obj_name, old_x, old_y))
+            other_occupied = occupied_tiles - old_tiles
+            if valid_footprint(obj_name, old_x, old_y, other_occupied):
+                continue
+            destination = next_anchor(
+                obj_name,
+                preferred_roles.get(obj_name, "any"),
+                other_occupied,
+            )
+            if destination is None:
+                continue
+            self.state.placed_objects.pop(old_key, None)
+            new_x, new_y = destination
+            self.state.placed_objects[f"{location_key}:{new_x},{new_y}"] = obj_name
+            occupied_tiles = other_occupied | set(footprint_tiles(obj_name, new_x, new_y))
+            changed += 1
+
+        existing_names = {
+            str(value)
+            for key, value in self.state.placed_objects.items()
+            if str(key).startswith(f"{location_key}:")
+        }
         for stage in range(max(-1, current_stage) + 1, target_stage + 1):
-            for obj_name, x, y in stage_layouts.get(stage, []):
-                key = f"{location_key}:{x},{y}"
-                new_tiles = set(footprint_tiles(obj_name, x, y))
-                if key in self.state.placed_objects or occupied_tiles.intersection(new_tiles):
+            for obj_name, role in stage_layouts.get(stage, []):
+                if obj_name in existing_names:
                     continue
-                self.state.placed_objects[key] = obj_name
-                occupied_tiles.update(new_tiles)
-                added += 1
+                destination = next_anchor(obj_name, role, occupied_tiles)
+                if destination is None:
+                    continue
+                x, y = destination
+                self.state.placed_objects[f"{location_key}:{x},{y}"] = obj_name
+                occupied_tiles.update(footprint_tiles(obj_name, x, y))
+                existing_names.add(obj_name)
+                changed += 1
         property_record["furnishings_level"] = target_stage
-        return added
+        return changed
 
     def vacate_procedural_residence_for_player(
         self,
@@ -2432,6 +2514,17 @@ class CivicEconomyMixin:
         council["delegate_town_key"] = str(delegate_town_key)
         council["joined_day"] = str(getattr(self.state, "date_label", ""))
         council["influence"] = max(10, int(council.get("influence", 0)))
+        if hasattr(self, "play_world_event_scene"):
+            self.play_world_event_scene(
+                f"regional_council_join:{delegate_town_key}:{self.state.year}:{self.state.month}:{self.state.day}",
+                "A Regional Delegate",
+                [
+                    {"type": "narration", "text": f"Representatives gather in {plan.get('name')}. Maps, trade ledgers, and reports from discovered towns cover the working table."},
+                    {"type": "dialogue", "speaker": "Council Clerk", "text": f"You are entering as {plan.get('name')}'s delegate. Influence is not a title here; it is the memory of agreements you can persuade other towns to keep."},
+                    {"type": "narration", "text": "Your name enters the regional ledger with ten influence. Future agreements and projects will have visible consequences across connected settlements."},
+                ],
+                f"Joined the regional council for {plan.get('name')}.",
+            )
         self.autosave_with_message(
             f"Joined the regional council as {plan.get('name')}'s delegate."
         )
@@ -2469,6 +2562,30 @@ class CivicEconomyMixin:
                 f"{destination.get('name', 'Town')}"
             ]
         )[-30:]
+        if hasattr(self, "play_world_event_scene"):
+            source_name = str(source.get("name", "the source town"))
+            destination_name = str(destination.get("name", "the destination town"))
+            good = str(route.get("good", "trade goods"))
+            self.play_world_event_scene(
+                f"regional_agreement:{route_id}:{agreement_type}:{self.state.year}:{self.state.month}:{self.state.day}",
+                f"{agreement_type} Ratified",
+                [
+                    {
+                        "type": "narration",
+                        "text": f"Delegates from {source_name} and {destination_name} gather over the maps and manifests of the {good} route.",
+                    },
+                    {
+                        "type": "dialogue",
+                        "speaker": "Council Clerk",
+                        "text": f"Both settlements have entered the {agreement_type} into the regional ledger. A promise on paper now has a road, a caravan, and two communities responsible for keeping it.",
+                    },
+                    {
+                        "type": "narration",
+                        "text": f"{REGIONAL_AGREEMENTS[agreement_type]} The agreement costs 450g and adds 4 regional influence.",
+                    },
+                ],
+                f"Established a {agreement_type} between {source_name} and {destination_name}.",
+            )
         self.autosave_with_message(
             f"Established a {agreement_type} across the {route.get('good')} route."
         )
@@ -2552,6 +2669,17 @@ class CivicEconomyMixin:
                 community.get("development_points", 0)
             ) + 3
             self.refresh_procedural_town_growth(plan)
+        if hasattr(self, "play_world_event_scene"):
+            self.play_world_event_scene(
+                f"regional_project:{project_id}:{month_key}",
+                f"Council Session: {project['name']}",
+                [
+                    {"type": "narration", "text": f"Delegates gather around route maps and treasury figures while the proposal for {project['name']} remains on the table."},
+                    {"type": "dialogue", "speaker": "Council Clerk", "text": f"The final count is {support}% in support. The treasury will fund the work, and every represented town will be expected to account for its part."},
+                    {"type": "narration", "text": "The approval leaves the chamber as work orders, material requests, and development in every discovered procedural town."},
+                ],
+                f"The council approved {project['name']} with {support}% support.",
+            )
         self.autosave_with_message(
             f"The regional council approved {project['name']} with {support}% support."
         )
@@ -3732,12 +3860,18 @@ class CivicEconomyMixin:
         )
         if completed_contracts:
             lines.append(f"Escort contracts completed: {completed_contracts}")
-        self.vertical_panel_view(
-            "Caravan Journey",
-            lines,
-            LEFT_PANEL_WIDTH,
-            LEFT_PANEL_HEIGHT,
-        )
+        if hasattr(self, "play_world_event_scene"):
+            journey_number = int(route.get("caravan_journeys", 0) or 0)
+            self.play_world_event_scene(
+                f"caravan_journey:{route.get('id')}:{self.state.year}:{self.state.month}:{self.state.day}:{journey_number}",
+                f"Caravan Journey to {destination.get('name', 'the next town')}",
+                self.world_event_steps_from_lines([line for line in lines[2:] if str(line).strip()]),
+                f"Arrived in {destination.get('name')} with {route.get('caravan_name')}.",
+            )
+        else:
+            self.vertical_panel_view(
+                "Caravan Journey", lines, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT,
+            )
         self.autosave_with_message(
             f"Arrived in {destination.get('name')} with "
             f"{route.get('caravan_name')}."
@@ -4270,6 +4404,18 @@ class CivicEconomyMixin:
             )
         self.advance_time(60)
         winner = max(scores, key=lambda candidate_id: scores[candidate_id])
+        if hasattr(self, "play_world_event_scene"):
+            winner_name = self.procedural_candidate_name(winner, plan)
+            self.play_world_event_scene(
+                f"election_debate:{self.civic_town_key(plan)}:{self.state.year}",
+                f"Election Debate in {plan.get('name')}",
+                [
+                    {"type": "narration", "text": f"Residents gather in a public room while the debate focuses on {issue.get('name')}. Candidates and voters occupy the same civic space rather than becoming a detached score screen."},
+                    {"type": "dialogue", "speaker": str(getattr(self.state, "player_name", "The candidate")) if "player" in scores else "Debate Moderator", "text": "Measure every promise against what this town can actually build, repair, and sustain."},
+                    {"type": "dialogue", "speaker": "Debate Moderator", "text": f"The strongest case tonight came from {winner_name}. The vote remains open; a debate changes public support, not the final result by itself."},
+                ],
+                f"The election debate favored {winner_name} on {issue.get('name')}.",
+            )
         self.autosave_with_message(
             f"The election debate focused on {issue.get('name')}. "
             f"{self.procedural_candidate_name(winner, plan)} made the strongest case."
@@ -4403,12 +4549,50 @@ class CivicEconomyMixin:
             int(plan["chunk_x"]),
             int(plan["chunk_y"]),
         ) or {}
-        for resident in list(population.get("residents", {}).values())[:3]:
+        affected_residents = list(population.get("residents", {}).values())[:3]
+        for resident in affected_residents:
             memories = list(resident.get("memories", []) or [])
             memories.append(
                 f"The mayor answered '{petition.get('title')}' through {choice.lower()}."
             )
             resident["memories"] = memories[-16:]
+        if hasattr(self, "play_world_event_scene"):
+            title = str(petition.get("title", "Constituent Petition"))
+            steps: List[Dict[str, object]] = [
+                {
+                    "type": "narration",
+                    "text": f"Residents of {plan.get('name', 'the town')} gather around the civic table to hear how '{title}' will be answered.",
+                },
+                {
+                    "type": "dialogue",
+                    "speaker": "Town Clerk",
+                    "text": f"The recorded response is: {choice}. The town will judge it by what changes outside this room.",
+                },
+            ]
+            if affected_residents:
+                witness = affected_residents[0]
+                steps.append({
+                    "type": "dialogue",
+                    "speaker": str(witness.get("name", "Resident")),
+                    "npc_id": str(witness.get("id", "")),
+                    "text": (
+                        "Then let us organize the work and see it through together."
+                        if choice == "Organize volunteers" else
+                        "Then we will watch what the funding builds, not only what the ledger promises."
+                        if choice == "Fund directly" else
+                        "Then bring the findings back to us before another season passes."
+                    ),
+                })
+            steps.append({
+                "type": "narration",
+                "text": f"The response adds {development} development and {reputation} reputation. The residents who attended carry the decision into their own memories.",
+            })
+            self.play_world_event_scene(
+                f"constituent_petition:{self.civic_town_key(plan)}:{petition.get('month_key')}:{choice}",
+                title,
+                steps,
+                f"Resolved '{title}' through {choice.lower()}.",
+            )
         self.autosave_with_message(
             f"Resolved '{petition.get('title')}' through {choice.lower()}."
         )
@@ -4701,6 +4885,22 @@ class CivicEconomyMixin:
                 f"on {politics['current_policy']}."
             )
             resident["memories"] = memories[-16:]
+        if hasattr(self, "play_world_event_scene"):
+            player_result = (
+                "The office is yours. Campaign promises now become schedules, budgets, petitions, and decisions residents can remember."
+                if winner == "player" else
+                "The town chose another mayor. Your vote, campaign, endorsements, and debate remain part of the public record."
+            )
+            self.play_world_event_scene(
+                f"election_result:{self.civic_town_key(plan)}:{self.state.year}",
+                f"Election Result: {plan.get('name')}",
+                [
+                    {"type": "narration", "text": "Residents gather near the civic board while the final tally is read where the campaign actually took place."},
+                    {"type": "dialogue", "speaker": "Election Clerk", "text": f"The certified winner is {winner_name}, with {scores[winner]} support, standing on {politics['current_policy']}."},
+                    {"type": "narration", "text": player_result},
+                ],
+                result,
+            )
         self.autosave_with_message(result)
         return winner
 

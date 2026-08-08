@@ -754,7 +754,7 @@ class WorldMagicMixin:
             self.world_magic_set_preview(affected, affinity)
             self.set_message(
                 f"{skill.name} [{affinity.title()}]: {cost} MP, {self.dungeon_skill_shape_label(skill)}, "
-                f"range {skill.range_max}, {len(affected)} tile(s). Move cursor; Z/Enter cast; V/X/Esc/Q cancel."
+                f"range {skill.range_max}, {len(affected)} tile(s). Move cursor; Z/Enter cast; B/V/X/Esc/Q/Tab cancel."
             )
             self.draw_with_look_cursor(cursor_x, cursor_y)
             key = normalize_key(read_key())

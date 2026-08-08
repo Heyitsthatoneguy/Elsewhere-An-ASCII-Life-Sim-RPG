@@ -9,7 +9,13 @@ birth, aging, inheritance, dialogue, or relationship ownership.
 
 from typing import Dict, List, Optional, Tuple
 
-from ascii_farmstead_data import LEFT_PANEL_HEIGHT, LEFT_PANEL_WIDTH, MENU_BACK
+from ascii_farmstead_data import (
+    INFRASTRUCTURE_DATA,
+    LEFT_PANEL_HEIGHT,
+    LEFT_PANEL_WIDTH,
+    MENU_BACK,
+)
+from ascii_farmstead_furniture import furniture_component_at, furniture_walkable_kind
 from ascii_farmstead_helpers import format_date
 from ascii_farmstead_ui import MenuItem
 
@@ -333,6 +339,373 @@ class FamilyWorldMixin:
             "family_world_actor": True,
         }
 
+    def family_furniture_assigned_actor(self, object_key: str, obj_name: str) -> str:
+        furniture_states = getattr(self.state, "furniture_states", {})
+        if not isinstance(furniture_states, dict):
+            return ""
+        record = furniture_states.get(f"placed:{object_key}:{obj_name}", {})
+        return str(record.get("assigned_actor_id", "")) if isinstance(record, dict) else ""
+
+    def family_furniture_activity_cache(self) -> Dict[str, str]:
+        placed_signature = tuple(
+            sorted(
+                (
+                    str(key), str(name),
+                    int(self.object_rotation_for_key(str(key))),
+                    self.family_furniture_assigned_actor(str(key), str(name)),
+                )
+                for key, name in self.state.placed_objects.items()
+                if str(key).startswith("HouseInterior:")
+            )
+        )
+        context = (
+            int(self.state.year), int(self.state.month), int(self.state.day),
+            self.family_world_schedule_phase(), placed_signature,
+        )
+        if getattr(self, "_family_furniture_activity_context", None) != context:
+            self._family_furniture_activity_context = context
+            self._family_furniture_activity_labels = {}
+        cache = getattr(self, "_family_furniture_activity_labels", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._family_furniture_activity_labels = cache
+        return cache
+
+    def family_house_furniture_records(self) -> List[Dict[str, object]]:
+        records: List[Dict[str, object]] = []
+        for key, obj_name in self.state.placed_objects.items():
+            parsed = self.parse_object_key(str(key))
+            if not parsed or parsed[0] != "HouseInterior":
+                continue
+            _scope, x, y = parsed
+            rotation = self.object_rotation_for_key(str(key))
+            width, height = self.object_footprint_size(str(obj_name), rotation)
+            state_key = f"placed:{key}:{obj_name}"
+            furniture_state = dict(getattr(self.state, "furniture_states", {}) or {}).get(
+                state_key, {}
+            )
+            records.append({
+                "key": str(key), "name": str(obj_name),
+                "state_key": state_key,
+                "assigned_actor_id": str(
+                    furniture_state.get("assigned_actor_id", "")
+                    if isinstance(furniture_state, dict) else ""
+                ),
+                "function": str(INFRASTRUCTURE_DATA.get(str(obj_name), {}).get("furniture_function", "")),
+                "x": int(x), "y": int(y), "rotation": int(rotation),
+                "width": int(width), "height": int(height),
+            })
+        records.sort(key=lambda record: (str(record["name"]), str(record["key"])))
+        return records
+
+    def family_furniture_activity_preferences(
+        self, actor_kind: str, child: Optional[Dict[str, object]] = None,
+    ) -> Tuple[str, ...]:
+        phase = self.family_world_schedule_phase()
+        if phase == "late":
+            return ("Crib", "Child Bed", "sleep") if child else ("sleep",)
+        if phase == "wake":
+            return ("family_meal", "rest", "bookshelf") if child else ("cook", "prepare", "wash", "family_meal")
+        if phase == "lunch":
+            return ("family_meal", "Dining Set", "Family Table")
+        if phase in {"evening", "bad_weather"}:
+            if child and self.family_weekly_priority() == "Learning":
+                return ("bookshelf", "Study Desk", "rest", "social")
+            return ("social", "rest", "hearth", "bookshelf", "family_meal")
+        if child:
+            stage = self.household_child_stage(child)
+            if stage in {"Newborn", "Infant", "Toddler"}:
+                return ("Crib", "Toy Shelf", "rest", "family_meal")
+            if self.family_weekly_priority() == "Learning":
+                return ("bookshelf", "Study Desk", "craft", "rest")
+            return ("Study Desk", "bookshelf", "craft", "rest")
+        mode = self.spouse_support_mode()
+        if mode == "Meals":
+            return ("cook", "prepare", "family_meal", "storage")
+        if mode == "Rest":
+            return ("rest", "hearth", "bookshelf", "social")
+        return ("craft", "bookshelf", "rest", "family_meal")
+
+    def family_furniture_activity_label(self, token: str, obj_name: str) -> str:
+        return {
+            "sleep": f"settling in beside the {obj_name.lower()}",
+            "Crib": "resting beside the crib",
+            "Child Bed": "settling into their own bed",
+            "cook": "cooking at the household stove",
+            "prepare": "preparing food at the kitchen worktop",
+            "wash": "washing up at the kitchen sink",
+            "family_meal": "gathering around the household table",
+            "social": "sharing an unhurried conversation in the parlor",
+            "rest": f"relaxing beside the {obj_name.lower()}",
+            "hearth": "warming up beside the hearth",
+            "bookshelf": f"reading at the {obj_name.lower()}",
+            "craft": "working on a small project at the bench",
+            "gear": "organizing household equipment",
+            "storage": f"putting the {obj_name.lower()} in order",
+            "Study Desk": "working through a lesson at the study desk",
+            "Toy Shelf": "playing beside the toy shelf",
+        }.get(str(token), f"using the {obj_name.lower()}")
+
+    def family_record_furniture_use(
+        self, actor_id: str, state_key: str, obj_name: str, token: str,
+    ) -> None:
+        furniture_states = getattr(self.state, "furniture_states", {})
+        if not isinstance(furniture_states, dict) or not state_key:
+            return
+        record = furniture_states.setdefault(str(state_key), {})
+        if not isinstance(record, dict):
+            record = {}
+            furniture_states[str(state_key)] = record
+        today = self.town_npc_day_key()
+        household_days = record.get("household_use_days", {})
+        if not isinstance(household_days, dict):
+            household_days = {}
+        if str(household_days.get(str(actor_id), "")) == today:
+            return
+        household_days[str(actor_id)] = today
+        record["household_use_days"] = household_days
+        record["name"] = str(obj_name)
+        record["uses"] = max(0, int(record.get("uses", 0) or 0)) + 1
+        record["household_uses"] = max(0, int(record.get("household_uses", 0) or 0)) + 1
+        record["last_household_user"] = str(actor_id)
+        record["last_action"] = str(token or "household")
+        record["last_used_day"] = today
+        if (
+            str(record.get("assigned_actor_id", "")) == str(actor_id)
+            and str(record.get("assigned_bond_day", "")) != today
+        ):
+            record["assigned_bond_day"] = today
+            self.adjust_family_bond(1)
+
+    def family_furniture_activity_position(
+        self, actor_id: str, preferences: Tuple[str, ...], occupied: set,
+    ) -> Optional[Tuple[int, int]]:
+        candidates: List[Tuple[int, str, str, str, Tuple[int, int], str]] = []
+        for record in self.family_house_furniture_records():
+            name = str(record["name"])
+            function = str(record["function"])
+            x, y = int(record["x"]), int(record["y"])
+            width, height = int(record["width"]), int(record["height"])
+            rotation = int(record["rotation"])
+            assigned_actor_id = str(record.get("assigned_actor_id", ""))
+            if assigned_actor_id and assigned_actor_id != str(actor_id):
+                continue
+            assignment_bias = -20 if assigned_actor_id == str(actor_id) else 0
+            for offset_y in range(height):
+                for offset_x in range(width):
+                    if furniture_walkable_kind(name, offset_x, offset_y, rotation) != "seat":
+                        continue
+                    stand_x, stand_y = x + offset_x, y + offset_y
+                    if (stand_x, stand_y) in occupied or not self.in_house_bounds_for_npc(stand_x, stand_y):
+                        continue
+                    component = furniture_component_at(name, offset_x, offset_y, rotation)
+                    tokens = {name, function, component}
+                    for priority, preference in enumerate(preferences):
+                        if preference in tokens:
+                            candidates.append((
+                                priority * 2 + assignment_bias, f"0:{record['key']}:{offset_y},{offset_x}",
+                                name, component or function or name, (stand_x, stand_y),
+                                str(record.get("state_key", "")),
+                            ))
+                            break
+            edges = tuple(self.rotated_furniture_use_edges(name, rotation)) or (
+                "north", "east", "south", "west",
+            )
+            edge_targets: List[Tuple[int, int, int, int]] = []
+            if "north" in edges:
+                edge_targets.extend((x + dx, y, x + dx, y - 1) for dx in range(width))
+            if "south" in edges:
+                edge_targets.extend((x + dx, y + height - 1, x + dx, y + height) for dx in range(width))
+            if "west" in edges:
+                edge_targets.extend((x, y + dy, x - 1, y + dy) for dy in range(height))
+            if "east" in edges:
+                edge_targets.extend((x + width - 1, y + dy, x + width, y + dy) for dy in range(height))
+            for target_x, target_y, stand_x, stand_y in edge_targets:
+                if (stand_x, stand_y) in occupied or not self.in_house_bounds_for_npc(stand_x, stand_y):
+                    continue
+                component = furniture_component_at(
+                    name, target_x - x, target_y - y, rotation,
+                )
+                tokens = {name, function, component}
+                for priority, preference in enumerate(preferences):
+                    if preference in tokens:
+                        candidates.append(
+                            (
+                                priority * 2 + 1 + assignment_bias, f"1:{record['key']}:{stand_y},{stand_x}",
+                                name, component or function or name, (stand_x, stand_y),
+                                str(record.get("state_key", "")),
+                            )
+                        )
+                        break
+        if not candidates:
+            self.family_furniture_activity_cache().pop(str(actor_id), None)
+            return None
+        candidates.sort(key=lambda entry: (entry[0], entry[1], entry[4][1], entry[4][0]))
+        best_priority = candidates[0][0]
+        best = [entry for entry in candidates if entry[0] == best_priority]
+        stable_index = sum(ord(char) for char in str(actor_id)) % len(best)
+        _priority, _sort_key, obj_name, token, position, state_key = best[stable_index]
+        self.family_furniture_activity_cache()[str(actor_id)] = self.family_furniture_activity_label(token, obj_name)
+        self.family_record_furniture_use(actor_id, state_key, obj_name, token)
+        return position
+
+    def family_procedural_furniture_activity_position(
+        self, actor_id: str, preferences: Tuple[str, ...], occupied: set,
+    ) -> Optional[Tuple[int, int]]:
+        grid = self.active_map()
+        scope = self.current_object_location_key()
+        placed_signature = tuple(
+            sorted(
+                (
+                    str(record["key"]), str(record["name"]),
+                    int(record.get("rotation", 0)),
+                    self.family_furniture_assigned_actor(
+                        str(record["key"]), str(record["name"]),
+                    ),
+                )
+                for record in self.placed_objects_for_scope(scope)
+            )
+        )
+        cache_key = (id(grid), scope, placed_signature)
+        candidate_cache = getattr(self, "_family_procedural_furniture_candidate_cache", None)
+        if not isinstance(candidate_cache, dict):
+            candidate_cache = {}
+            self._family_procedural_furniture_candidate_cache = candidate_cache
+        candidates = candidate_cache.get(cache_key)
+        if candidates is None:
+            candidates = []
+            object_lookup = self.build_frame_placed_object_lookup()
+            directions = (
+                (0, -1, "north"), (1, 0, "east"),
+                (0, 1, "south"), (-1, 0, "west"),
+            )
+            for (target_x, target_y), (key, name, anchor_x, anchor_y) in object_lookup.items():
+                data = INFRASTRUCTURE_DATA.get(name, {})
+                if data.get("placement_layer") == "floor":
+                    continue
+                rotation = self.object_rotation_for_key(key, name)
+                component = furniture_component_at(
+                    name, int(target_x) - int(anchor_x), int(target_y) - int(anchor_y), rotation,
+                )
+                function = str(data.get("furniture_function", ""))
+                allowed = tuple(self.rotated_furniture_use_edges(name, rotation))
+                tokens = {str(name), function, component}
+                walkable_kind = furniture_walkable_kind(
+                    name, int(target_x) - int(anchor_x), int(target_y) - int(anchor_y), rotation,
+                )
+                state_key = f"placed:{key}:{name}"
+                furniture_state = dict(getattr(self.state, "furniture_states", {}) or {}).get(
+                    state_key, {}
+                )
+                assigned_actor_id = str(
+                    furniture_state.get("assigned_actor_id", "")
+                    if isinstance(furniture_state, dict) else ""
+                )
+                if walkable_kind:
+                    if walkable_kind == "seat":
+                        candidates.append((
+                            f"0:{key}:{target_y},{target_x}", str(name),
+                            component or function or str(name), tokens,
+                            (int(target_x), int(target_y)), state_key, assigned_actor_id,
+                        ))
+                    continue
+                for dx, dy, approach in directions:
+                    if allowed and approach not in allowed:
+                        continue
+                    stand_x, stand_y = int(target_x) + dx, int(target_y) + dy
+                    if not (0 <= stand_y < len(grid) and 0 <= stand_x < len(grid[stand_y])):
+                        continue
+                    if not self.procedural_town_interior_tile_passable(grid[stand_y][stand_x]):
+                        continue
+                    if (stand_x, stand_y) in object_lookup:
+                        continue
+                    candidates.append((
+                        f"1:{key}:{stand_y},{stand_x}", str(name),
+                        component or function or str(name), tokens, (stand_x, stand_y),
+                        state_key, assigned_actor_id,
+                    ))
+            candidate_cache.clear()
+            candidate_cache[cache_key] = candidates
+
+        matches = []
+        for key, name, token, tokens, position, state_key, assigned_actor_id in candidates:
+            if position in occupied:
+                continue
+            if assigned_actor_id and assigned_actor_id != str(actor_id):
+                continue
+            assignment_bias = -20 if assigned_actor_id == str(actor_id) else 0
+            for priority, preference in enumerate(preferences):
+                if preference in tokens:
+                    candidate_rank = 0 if str(key).startswith("0:") else 1
+                    matches.append((
+                        priority * 2 + candidate_rank + assignment_bias,
+                        key, name, token, position, state_key,
+                    ))
+                    break
+        if not matches:
+            self.family_furniture_activity_cache().pop(str(actor_id), None)
+            return None
+        matches.sort(key=lambda entry: (entry[0], entry[1], entry[4][1], entry[4][0]))
+        best_priority = matches[0][0]
+        best = [entry for entry in matches if entry[0] == best_priority]
+        selected = best[sum(ord(char) for char in str(actor_id)) % len(best)]
+        _priority, _key, name, token, position, state_key = selected
+        self.family_furniture_activity_cache()[str(actor_id)] = self.family_furniture_activity_label(token, name)
+        self.family_record_furniture_use(actor_id, state_key, name, token)
+        return position
+
+    def spouse_farmhouse_position(self) -> Tuple[int, int]:
+        spouse = self.npc_record_by_id(str(getattr(self.state, "spouse_npc_id", "")))
+        if spouse and str(self.family_spouse_destination(spouse).get("location", "")) != "HouseInterior":
+            return super().spouse_farmhouse_position()
+        actor_id = f"spouse:{spouse.get('id', '')}" if spouse else "spouse"
+        occupied = {(int(self.state.player_x), int(self.state.player_y))}
+        position = self.family_furniture_activity_position(
+            actor_id, self.family_furniture_activity_preferences("spouse"), occupied,
+        )
+        if position is not None:
+            if spouse:
+                activity = self.family_furniture_activity_cache().get(actor_id, "following the household routine")
+                spouse["activity"] = activity
+                spouse["runtime_activity"] = activity
+            return position
+        return super().spouse_farmhouse_position()
+
+    def household_child_positions(self) -> Dict[int, Tuple[int, int]]:
+        fallback = super().household_child_positions()
+        occupied = {(int(self.state.player_x), int(self.state.player_y))}
+        if self.spouse_lives_on_farm():
+            occupied.add(self.spouse_farmhouse_position())
+        positions: Dict[int, Tuple[int, int]] = {}
+        for child in self.state.children:
+            child_id = int(child.get("id", 0) or 0)
+            if str(self.family_child_destination(child).get("location", "")) != "Home":
+                positions[child_id] = fallback.get(child_id, (1, 1))
+                continue
+            actor_id = f"household_child:{child_id}"
+            position = self.family_furniture_activity_position(
+                actor_id,
+                self.family_furniture_activity_preferences("child", child),
+                occupied,
+            )
+            if position is None:
+                position = fallback.get(child_id, (1, 1))
+            if position in occupied:
+                min_x, min_y, max_x, max_y = self.house_floor_bounds()
+                replacement = next(
+                    (
+                        (x, y)
+                        for y in range(min_y, max_y + 1)
+                        for x in range(min_x, max_x + 1)
+                        if (x, y) not in occupied and self.in_house_bounds_for_npc(x, y)
+                    ),
+                    position,
+                )
+                position = replacement
+            positions[child_id] = position
+            occupied.add(position)
+        return positions
+
     def household_child_npcs(self) -> List[Dict[str, object]]:
         actors = super().household_child_npcs()
         if not self.on_house():
@@ -342,10 +715,17 @@ class FamilyWorldMixin:
             for child in self.state.children
             if str(self.family_child_destination(child).get("location")) == "Home"
         }
-        return [
+        actors = [
             actor for actor in actors
             if int(str(actor.get("id", "0")).split(":")[-1] or 0) in home_ids
         ]
+        activity_cache = self.family_furniture_activity_cache()
+        for actor in actors:
+            activity = activity_cache.get(str(actor.get("id", "")))
+            if activity:
+                actor["activity"] = activity
+                actor["runtime_activity"] = activity
+        return actors
 
     def authored_town_exterior_npc_positions(self, *, normalize: bool = True) -> Dict[Tuple[int, int], Dict[str, object]]:
         lookup = super().authored_town_exterior_npc_positions(normalize=normalize)
@@ -444,14 +824,40 @@ class FamilyWorldMixin:
             members.append(spouse)
         members.extend(self.family_child_actor(child, self.family_child_destination(child)) for child in self.state.children)
         for member in members:
-            position = next((point for point in candidates if point not in occupied), None)
+            child = self.child_record_from_npc(member) if self.is_household_child_npc(member) else None
+            actor_id = str(member.get("id", "household_member"))
+            preferences = self.family_furniture_activity_preferences(
+                "child" if child else "spouse", child,
+            )
+            position = self.family_procedural_furniture_activity_position(
+                actor_id, preferences, occupied,
+            )
+            if position is None:
+                position = next((point for point in candidates if point not in occupied), None)
             if position is None:
                 break
+            activity = self.family_furniture_activity_cache().get(actor_id)
+            if activity:
+                member["activity"] = activity
+                member["runtime_activity"] = activity
             lookup[position] = member
             occupied.add(position)
 
     def town_npc_position_lookup(self) -> Dict[Tuple[int, int], Dict[str, object]]:
         lookup = super().town_npc_position_lookup()
+        if self.on_house():
+            spouse_id = str(getattr(self.state, "spouse_npc_id", ""))
+            spouse = self.npc_record_by_id(spouse_id)
+            spouse_home = bool(
+                spouse
+                and str(self.family_spouse_destination(spouse).get("location", "")) == "HouseInterior"
+            )
+            if not spouse_home:
+                lookup = {
+                    position: actor
+                    for position, actor in lookup.items()
+                    if str(actor.get("id", "")) != spouse_id
+                }
         if self.on_town_interior():
             location = self.town_npc_observed_runtime_location()
             occupied = set(lookup) | {(int(self.state.player_x), int(self.state.player_y))}
@@ -469,13 +875,25 @@ class FamilyWorldMixin:
 
     def family_member_schedule_lines(self) -> List[str]:
         lines = ["HOUSEHOLD WHEREABOUTS", ""]
+        if self.on_house():
+            if self.spouse_lives_on_farm():
+                self.spouse_farmhouse_position()
+            self.household_child_positions()
+        activity_cache = self.family_furniture_activity_cache()
         spouse = self.npc_record_by_id(str(getattr(self.state, "spouse_npc_id", "")))
         if spouse:
             destination = self.family_spouse_destination(spouse)
-            lines.append(f"- {spouse.get('name', 'Spouse')}: {destination.get('activity')} ({destination.get('label')})")
+            activity = activity_cache.get(
+                f"spouse:{spouse.get('id', '')}", str(destination.get("activity", "at home")),
+            )
+            lines.append(f"- {spouse.get('name', 'Spouse')}: {activity} ({destination.get('label')})")
         for child in self.state.children:
             destination = self.family_child_destination(child)
-            lines.append(f"- {child.get('name', 'Child')}: {destination.get('activity')} ({destination.get('label')})")
+            activity = activity_cache.get(
+                f"household_child:{int(child.get('id', 0) or 0)}",
+                str(destination.get("activity", "at home")),
+            )
+            lines.append(f"- {child.get('name', 'Child')}: {activity} ({destination.get('label')})")
         if not spouse and not self.state.children:
             lines.append("- No spouse or children are part of the household yet.")
         lines.extend(["", "Schedules change with age, weather, weekday, household priorities, and planned outings."])
@@ -549,20 +967,45 @@ class FamilyWorldMixin:
         self.adjust_family_bond(gain)
         self.adjust_town_npc_relationship(str(self.state.spouse_npc_id), 3)
         self.record_family_event("Partnership Check-In", f"You agreed to center the week on {priority.lower()}.")
-        self.vertical_panel_view(
-            "Partnership Check-In",
-            [
-                "You make room for an honest household conversation.",
-                "",
-                f"Weekly priority: {priority}",
-                str(FAMILY_PRIORITIES[priority]["summary"]),
-                "",
-                "You compare schedules, name one worry each, and decide what can wait.",
-                f"Household bond +{gain}; spouse relationship +3.",
-            ],
-            LEFT_PANEL_WIDTH,
-            LEFT_PANEL_HEIGHT,
-        )
+        spouse_id = str(self.state.spouse_npc_id)
+        spouse_name = self.town_npc_name(spouse_id)
+        if hasattr(self, "play_world_event_scene"):
+            self.play_world_event_scene(
+                f"partnership_checkin:{spouse_id}:{self.family_world_week_key()}",
+                "A Household Check-In",
+                [
+                    {
+                        "type": "narration",
+                        "text": "You both make room for an honest household conversation where you actually live, comparing schedules before the week carries either of you away.",
+                    },
+                    {
+                        "type": "dialogue",
+                        "speaker": spouse_name,
+                        "npc_id": spouse_id,
+                        "text": f"Let us center this week on {priority.lower()}. We can name what matters now, and let the rest wait.",
+                    },
+                    {
+                        "type": "narration",
+                        "text": f"{FAMILY_PRIORITIES[priority]['summary']} Household bond rises by {gain}, and your relationship with {spouse_name} rises by 3.",
+                    },
+                ],
+                f"Completed the weekly partnership check-in. Household bond +{gain}.",
+            )
+        else:
+            self.vertical_panel_view(
+                "Partnership Check-In",
+                [
+                    "You make room for an honest household conversation.",
+                    "",
+                    f"Weekly priority: {priority}",
+                    str(FAMILY_PRIORITIES[priority]["summary"]),
+                    "",
+                    "You compare schedules, name one worry each, and decide what can wait.",
+                    f"Household bond +{gain}; spouse relationship +3.",
+                ],
+                LEFT_PANEL_WIDTH,
+                LEFT_PANEL_HEIGHT,
+            )
         self.autosave_with_message(f"Completed the weekly partnership check-in. Household bond +{gain}.")
         return True
 
@@ -679,7 +1122,41 @@ class FamilyWorldMixin:
             outing_type,
             f"Visited {data['destination']} with {', '.join(record['participants']) if record['participants'] else 'your spouse'}. Household bond +{bond_gain}.",
         )
-        self.vertical_panel_view(outing_type, self.family_outing_scene_lines(outing_type, children), LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
+        if hasattr(self, "play_world_event_scene"):
+            steps: List[Dict[str, object]] = [{
+                "type": "narration",
+                "text": f"The family travels to {data['destination']} in {str(self.state.season).lower()} {str(self.state.weather).lower()} conditions. The road, weather, and destination remain visible around the time you share.",
+            }]
+            if getattr(self.state, "spouse_npc_id", ""):
+                spouse_id = str(self.state.spouse_npc_id)
+                steps.append({
+                    "type": "dialogue", "speaker": self.town_npc_name(spouse_id), "npc_id": spouse_id,
+                    "text": "I am glad we made this a real day together instead of another good intention left on the calendar.",
+                })
+            reactions = {
+                "Curious": "How many stories can one place have before nobody remembers the first one?",
+                "Outdoorsy": "I found a route ahead, but I came back because it is better when everyone sees it.",
+                "Studious": "I wrote down the part I want to remember. The weather belongs in the record too.",
+                "Practical": "Next time we should pack one more meal and half as many things nobody used.",
+                "Gentle": "Can we wait a moment? I want everyone to be here before we move on.",
+                "Bold": "That safe path looks good, but I want to see where the harder one goes someday.",
+                "Musical": "The road and water keep almost the same rhythm if you listen long enough.",
+                "Tinkering": "I want to know who built that, and why they chose to make it that way.",
+            }
+            for child in children[:4]:
+                trait = str(self.ensure_child_profile_fields(child).get("personality_trait", "Curious"))
+                steps.append({
+                    "type": "dialogue", "speaker": str(child.get("name", "Child")),
+                    "text": reactions.get(trait, "I think I will remember this place differently when I am older."),
+                })
+            steps.append({
+                "type": "narration",
+                "text": f"The outing becomes part of the household record: bond +{bond_gain}, affection +5 for each participating child, and {topic} learning +{learning_gain}.",
+            })
+            self.play_world_event_scene(
+                f"family_outing:{outing_type}:{self.state.year}:{self.state.month}:{self.state.day}:{len(state['outing_history'])}",
+                outing_type, steps, f"Completed {outing_type}. Household bond +{bond_gain}.",
+            )
         self.advance_time(int(data.get("minutes", 120)))
         self.autosave_with_message(f"Completed {outing_type}. Household bond +{bond_gain}.")
         return True

@@ -6,7 +6,7 @@ from collections import deque
 import copy
 import math
 import random
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from ascii_farmstead_data import (
     LEFT_PANEL_HEIGHT,
@@ -15,16 +15,29 @@ from ascii_farmstead_data import (
 )
 from ascii_farmstead_npc_builder import (
     procedural_custom_building_template,
+    procedural_building_program_variant,
     procedural_population_key,
     sanitize_procedural_job_profile,
     stable_text_seed,
 )
 from ascii_farmstead_npc_dialogue import BAD_WEATHER
 from ascii_farmstead_custom_extended import (
+    BUILDING_TEMPLATE_FURNISHING_DATA,
+    BUILDING_TEMPLATE_GENERIC_FIXTURE_DATA,
+    building_template_functional_furniture_name,
+    building_template_fixture_catalog,
     custom_building_template_signature,
     stamp_custom_building_template,
 )
 from ascii_farmstead_game_tables import GAME_TABLE_DATA, venue_game_ids
+from ascii_farmstead_containers import CONTAINER_PROFILES
+from ascii_farmstead_furniture_catalog import FURNITURE_CATALOG_DATA
+from ascii_farmstead_procedural_interiors import (
+    build_procedural_ground_floor,
+    build_procedural_upper_floor,
+    procedural_interior_room_plan,
+    sanitize_procedural_room_overrides,
+)
 from ascii_farmstead_town_builder import (
     SETTLEMENT_BUILDING_CATALOG,
     SETTLEMENT_STYLES,
@@ -37,7 +50,7 @@ from ascii_farmstead_ui import MenuItem
 
 
 Position = Tuple[int, int]
-PROCEDURAL_TOWN_RUNTIME_VERSION = 17
+PROCEDURAL_TOWN_RUNTIME_VERSION = 19
 PROCEDURAL_TOWN_GRID_SIZE = 13
 PROCEDURAL_TOWN_MIN_DISTANCE = 8
 PROCEDURAL_TOWN_OVERWORLD_SYMBOL = "t"
@@ -2140,6 +2153,88 @@ class ProceduralTownRuntimeMixin:
             return [list(row) for row in zip(*result)][::-1]
         return result
 
+    @staticmethod
+    def procedural_town_orient_furniture_glyph(glyph: str, side: str) -> str:
+        """Rotate directional artwork characters with an oriented interior."""
+        glyph = str(glyph or " ")[:1]
+        clockwise = {
+            "-": "|", "|": "-", "_": "|",
+            "/": "\\", "\\": "/",
+            "<": "^", "^": ">", ">": "v", "v": "<",
+        }
+        turns = {"south": 0, "west": 1, "north": 2, "east": 3}.get(str(side), 0)
+        for _ in range(turns):
+            glyph = clockwise.get(glyph, glyph)
+        return glyph
+
+    def procedural_town_store_catalog_furniture(
+        self,
+        plan: Dict[str, object],
+        building: Dict[str, object],
+        floor_index: int,
+        placements: Sequence[Dict[str, object]],
+    ) -> None:
+        """Store an orientation-aware per-cell lookup for generated furniture."""
+        scope_key = (
+            str(plan.get("id", "")),
+            str(building.get("id", "")),
+            int(floor_index),
+        )
+        cache = getattr(self, "_procedural_town_catalog_furniture_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._procedural_town_catalog_furniture_cache = cache
+        side = self.procedural_town_building_door_side(building)
+        source_width, source_height = self.procedural_town_interior_source_dimensions(
+            building, floor_index
+        )
+        lookup: Dict[Position, Dict[str, object]] = {}
+        for placement in placements:
+            if not isinstance(placement, dict):
+                continue
+            common = {
+                key: placement.get(key)
+                for key in (
+                    "name", "collection", "form", "room_id", "room_role",
+                    "rotation", "width", "height",
+                )
+            }
+            common["building_side"] = side
+            for cell in placement.get("cells", ()) or ():
+                if not isinstance(cell, dict):
+                    continue
+                source_x, source_y = int(cell.get("x", 0)), int(cell.get("y", 0))
+                display_x, display_y = self.procedural_town_orient_position(
+                    source_x, source_y, source_width, source_height, side
+                )
+                record = dict(common)
+                record.update(cell)
+                record["source_x"] = source_x
+                record["source_y"] = source_y
+                record["x"] = display_x
+                record["y"] = display_y
+                record["glyph"] = self.procedural_town_orient_furniture_glyph(
+                    str(cell.get("glyph", " ")), side
+                )
+                lookup[(display_x, display_y)] = record
+        cache[scope_key] = lookup
+
+    def procedural_town_catalog_furniture_at(
+        self, x: int, y: int
+    ) -> Optional[Dict[str, object]]:
+        if not self.on_procedural_town_interior():
+            return None
+        plan = self.current_procedural_town_plan() or {}
+        building = self.current_procedural_town_building() or {}
+        floor_index = int(getattr(self.state, "current_procedural_building_floor", 0) or 0)
+        cache = getattr(self, "_procedural_town_catalog_furniture_cache", {})
+        if not isinstance(cache, dict):
+            return None
+        return cache.get(
+            (str(plan.get("id", "")), str(building.get("id", "")), floor_index),
+            {},
+        ).get((int(x), int(y)))
+
     def procedural_town_interior_source_dimensions(
         self, building: Dict[str, object], floor: Optional[int] = None
     ) -> Tuple[int, int]:
@@ -2169,6 +2264,126 @@ class ProceduralTownRuntimeMixin:
         if side == "east":
             return width - 1 - int(y), int(x)
         return int(x), int(y)
+
+    def procedural_town_room_at_position(
+        self,
+        x: int,
+        y: int,
+        building: Optional[Dict[str, object]] = None,
+        floor: Optional[int] = None,
+    ) -> Optional[Dict[str, object]]:
+        """Resolve a displayed fixture back to its authored/generated room."""
+        plan = self.current_procedural_town_plan() or {}
+        building = building or self.current_procedural_town_building()
+        if not plan or not isinstance(building, dict):
+            return None
+        type_id = str(building.get("type_id", "home"))
+        floor_guess = max(0, min(3, int(
+            getattr(self.state, "current_procedural_building_floor", 0)
+            if floor is None
+            else floor
+        )))
+        conversion_signature = tuple(sorted(
+            sanitize_procedural_room_overrides(
+                building.get("room_conversions", {})
+            ).items()
+        ))
+        try:
+            program_cache_variant = int(building.get("room_program_variant", -1))
+        except Exception:
+            program_cache_variant = -1
+        cache_key = (
+            str(plan.get("id", "")),
+            str(building.get("id", "")),
+            type_id,
+            floor_guess,
+            self.procedural_town_building_door_side(building),
+            int(building.get("floor_count", 1) or 1),
+            program_cache_variant,
+            conversion_signature,
+        )
+        cache = getattr(self, "_procedural_town_room_lookup_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._procedural_town_room_lookup_cache = cache
+        if cache_key in cache:
+            return cache[cache_key].get((int(x), int(y)))
+        property_record = (
+            self.player_property_for_building(plan, building)
+            if hasattr(self, "player_property_for_building") and type_id == "home"
+            else None
+        )
+        template = self.procedural_town_custom_building_template(
+            plan,
+            building,
+            property_record,
+        )
+        floor_count = self.procedural_town_building_floor_count(
+            plan,
+            building,
+            template,
+            property_record,
+        )
+        floor_index = (
+            self.current_procedural_building_floor(plan, building)
+            if floor is None
+            else max(0, min(floor_count - 1, int(floor)))
+        )
+        room_lookup: Dict[Position, Dict[str, object]] = {}
+        side = self.procedural_town_building_door_side(building)
+        if template:
+            source_grid = stamp_custom_building_template(template, floor_index)
+            source_height = len(source_grid) if source_grid else 28
+            source_width = len(source_grid[0]) if source_grid and source_grid[0] else 64
+            zones = []
+            for index, zone in enumerate(template.get("zones", []) or []):
+                if not isinstance(zone, dict) or int(zone.get("floor", 0) or 0) != floor_index:
+                    continue
+                x1, x2 = sorted((int(zone.get("x1", 0)), int(zone.get("x2", 0))))
+                y1, y2 = sorted((int(zone.get("y1", 0)), int(zone.get("y2", 0))))
+                zones.append(((x2 - x1 + 1) * (y2 - y1 + 1), index, zone, x1, y1, x2, y2))
+            for _area, index, zone, x1, y1, x2, y2 in sorted(zones, reverse=True):
+                role = str(zone.get("kind", "room"))
+                record = {
+                    "id": f"floor:{floor_index}:zone:{index}",
+                    "source_id": f"zone:{index}",
+                    "floor": floor_index,
+                    "role": role,
+                    "privacy": "private" if role in {"bedroom", "primary_bedroom", "guest_room", "nursery", "bathroom", "private_hall"} else "service" if role in {"storage", "pantry", "stockroom", "service_hall"} else "public",
+                    "custom_zone": True,
+                }
+                for source_y in range(y1, y2 + 1):
+                    for source_x in range(x1, x2 + 1):
+                        display_position = self.procedural_town_orient_position(
+                            source_x, source_y, source_width, source_height, side
+                        )
+                        room_lookup[display_position] = record
+        else:
+            layout_variant = self.procedural_town_building_layout_variant(plan, building)
+            room_plan = procedural_interior_room_plan(
+                type_id,
+                layout_variant,
+                floor_count,
+                floor_index,
+                sanitize_procedural_room_overrides(building.get("room_conversions", {})),
+                procedural_building_program_variant(plan, building),
+            )
+            for room in room_plan.get("rooms", ()):
+                if not isinstance(room, dict):
+                    continue
+                x1, y1, x2, y2 = room.get("rect", (0, 0, 0, 0))
+                record = dict(room)
+                record["source_id"] = str(room.get("id", "room"))
+                record["id"] = f"floor:{floor_index}:{room.get('id', 'room')}"
+                record["floor"] = floor_index
+                for source_y in range(int(y1) + 1, int(y2)):
+                    for source_x in range(int(x1) + 1, int(x2)):
+                        display_position = self.procedural_town_orient_position(
+                            source_x, source_y, 64, 28, side
+                        )
+                        room_lookup[display_position] = record
+        cache[cache_key] = room_lookup
+        return room_lookup.get((int(x), int(y)))
 
     def procedural_town_interior_entry_landing(
         self, grid: List[List[str]], building: Dict[str, object]
@@ -2219,10 +2434,337 @@ class ProceduralTownRuntimeMixin:
         return {
             " ", "#", "-", "&", "$", "+", "l", "w", "x", "a",
             "b", "t", "c", "s", "f", "P", "d", "p", "<", "_",
-        }
+            "!", "1", "2", "3", "4", "5", "6", "7", "8",
+            "A", "B", "C", "E", "F", "G", "L", "M", "S", "T",
+            "e", "h", "k", "m", "n", "o", "q", "u", "v",
+        } | set(BUILDING_TEMPLATE_FURNISHING_DATA)
 
     def procedural_town_interior_tile_passable(self, tile: str) -> bool:
         return str(tile) not in self.procedural_town_interior_blocking_tiles()
+
+    def procedural_town_interior_tile_catalog(
+        self,
+        building: Optional[Dict[str, object]] = None,
+    ) -> Dict[str, Dict[str, str]]:
+        """Describe the shared architectural language of generated interiors.
+
+        Every deliberately placed glyph belongs here. Building-specific
+        overrides keep an identical character meaningful in its local context
+        instead of treating fixtures as anonymous collision.
+        """
+        building = building or self.current_procedural_town_building() or {}
+        type_id = str(building.get("type_id", "building"))
+        building_name = str(building.get("name", "settlement building"))
+        catalog = {
+            " ": {
+                "desc": f"Space beyond the finished rooms of {building_name}.",
+                "hint": "I: inspect building boundary",
+            },
+            "#": {
+                "desc": f"Load-bearing wall of {building_name}.",
+                "hint": "I: inspect wall",
+            },
+            ".": {
+                "desc": f"Clear wooden floor inside {building_name}.",
+                "hint": "I: inspect floor",
+            },
+            ",": {
+                "desc": f"Woven local rug defining a furnished area in {building_name}.",
+                "hint": "I: inspect rug",
+            },
+            "D": {
+                "desc": f"Exterior doorway of {building_name}.",
+                "hint": "Walk into door: leave building",
+            },
+            "|": {
+                "desc": f"Open room door inside {building_name}.",
+                "hint": "Z/Enter: close room door",
+            },
+            "_": {
+                "desc": f"Closed door protecting a private room in {building_name}.",
+                "hint": "Z/Enter: open room door",
+            },
+            "<": {
+                "desc": f"Stairway leading to the next floor of {building_name}.",
+                "hint": "Walk onto stairs: go up",
+            },
+            "U": {
+                "desc": f"Stairway leading to the next floor of {building_name}.",
+                "hint": "Walk onto stairs: go up",
+            },
+            ">": {
+                "desc": f"Stairway leading down through {building_name}.",
+                "hint": "Walk onto stairs: go down",
+            },
+            "-": {
+                "desc": f"Solid counter section or room partition in {building_name}.",
+                "hint": "Z/Enter: inspect counter",
+            },
+            "&": {
+                "desc": f"Primary staffed service point for {building_name}.",
+                "hint": "Z/Enter: request service",
+            },
+            "$": {
+                "desc": f"Organized stock display and transaction forms for {building_name}.",
+                "hint": "Z/Enter: inspect stock display",
+            },
+            "b": {
+                "desc": f"Properly made bed in a private room of {building_name}.",
+                "hint": "Z/Enter: inspect bed",
+            },
+            "t": {
+                "desc": f"Practical table used by the occupants of {building_name}.",
+                "hint": "Z/Enter: inspect table",
+            },
+            "c": {
+                "desc": f"Chair placed beside a useful table in {building_name}.",
+                "hint": "Z/Enter: inspect chair",
+            },
+            "s": {
+                "desc": f"Labeled storage shelves serving {building_name}.",
+                "hint": "Z/Enter: inspect storage",
+            },
+            "l": {
+                "desc": f"Bookcase containing local reference material for {building_name}.",
+                "hint": "Z/Enter: inspect bookcase",
+            },
+            "w": {
+                "desc": f"Working bench with an active project in {building_name}.",
+                "hint": "Z/Enter: inspect workbench",
+            },
+            "a": {
+                "desc": f"Tool rack organized for the work done in {building_name}.",
+                "hint": "Z/Enter: inspect tool rack",
+            },
+            "x": {
+                "desc": f"Materials bench holding measured components for {building_name}.",
+                "hint": "Z/Enter: inspect materials bench",
+            },
+            "+": {
+                "desc": f"Specialized care supplies stored in {building_name}.",
+                "hint": "Z/Enter: inspect supplies",
+            },
+            "P": {
+                "desc": f"Public records and notices for {building_name}.",
+                "hint": "Z/Enter: inspect records",
+            },
+            "d": {
+                "desc": f"Writing desk with current work from {building_name}.",
+                "hint": "Z/Enter: inspect desk",
+            },
+            "f": {
+                "desc": f"Maintained hearth providing heat and light to {building_name}.",
+                "hint": "Z/Enter: inspect hearth",
+            },
+            "p": {
+                "desc": f"Living planter cared for by the occupants of {building_name}.",
+                "hint": "Z/Enter: inspect planter",
+            },
+        }
+        catalog.update({
+            str(symbol): {
+                "desc": f"{record['description']} It belongs to {building_name}.",
+                "hint": (
+                    f"Z/Enter: open {str(record['name']).lower()}"
+                    if record.get("container_profile")
+                    else f"Z/Enter: inspect {str(record['name']).lower()}"
+                ),
+            }
+            for symbol, record in BUILDING_TEMPLATE_FURNISHING_DATA.items()
+        })
+        for symbol, record in building_template_fixture_catalog(building_name).items():
+            catalog.setdefault(symbol, record)
+        typed = {
+            "inn": {
+                "b": {"desc": "One guest bed in a private inn room.", "hint": "Z/Enter: inspect guest room"},
+                "t": {"desc": "Common-room dining table for meals and conversation.", "hint": "Z/Enter: inspect dining table"},
+                "c": {"desc": "Dining chair arranged around a common-room table.", "hint": "Z/Enter: inspect dining chair"},
+                "s": {"desc": "Inn pantry storing linens, meal supplies, and travel provisions.", "hint": "Z/Enter: inspect inn pantry"},
+                "f": {"desc": "Inn kitchen hearth used for meals and hot drinks.", "hint": "Z/Enter: inspect kitchen hearth"},
+                "P": {"desc": "Guest register recording occupied rooms and recent arrivals.", "hint": "Z/Enter: inspect guest register"},
+            },
+            "home": {
+                "&": {"desc": "Household desk for residence plans, bills, and local arrangements.", "hint": "Z/Enter: review residence"},
+                "b": {"desc": "Resident's bed placed against the bedroom wall.", "hint": "Z/Enter: inspect bedroom"},
+                "t": {"desc": "Household table used for meals, letters, and planning.", "hint": "Z/Enter: inspect household table"},
+                "c": {"desc": "Household chair arranged beside the main table.", "hint": "Z/Enter: inspect chair"},
+                "s": {"desc": "Household storage for linens, pantry goods, and travel supplies.", "hint": "Z/Enter: inspect household storage"},
+                "f": {"desc": "Cooking hearth serving as the home's kitchen.", "hint": "Z/Enter: inspect kitchen hearth"},
+                "P": {"desc": "Residence notes listing ownership, occupancy, and improvements.", "hint": "Z/Enter: review residence notes"},
+            },
+            "general_store": {
+                "$": {"desc": "Stock display with priced goods arranged by category.", "hint": "Z/Enter: inspect store stock"},
+                "s": {"desc": "General Store shelf holding routine local supplies.", "hint": "Z/Enter: inspect supply shelf"},
+                "P": {"desc": "Store notice with hours, deliveries, and market information.", "hint": "Z/Enter: inspect store notice"},
+            },
+            "market_stall": {
+                "$": {"desc": "Market display holding today's priced regional goods.", "hint": "Z/Enter: inspect market stock"},
+                "s": {"desc": "Crates and shelves for rotating market inventory.", "hint": "Z/Enter: inspect market storage"},
+                "P": {"desc": "Market notice listing today's vendors and shortages.", "hint": "Z/Enter: inspect market notice"},
+            },
+            "clinic": {
+                "b": {"desc": "Clean treatment bed in a private examination room.", "hint": "Z/Enter: inspect treatment bed"},
+                "+": {"desc": "Clinic cabinet stocked with remedies and bandaging supplies.", "hint": "Z/Enter: inspect medical supplies"},
+                "s": {"desc": "Clinic storage for linens, herbs, and sealed instruments.", "hint": "Z/Enter: inspect clinic storage"},
+                "P": {"desc": "Clinic notice listing services and current health guidance.", "hint": "Z/Enter: inspect clinic notice"},
+            },
+            "sheriff_office": {
+                "d": {"desc": "Patrol desk with reports, maps, and witness statements.", "hint": "Z/Enter: inspect patrol desk"},
+                "s": {"desc": "Evidence and records shelving kept in careful order.", "hint": "Z/Enter: inspect sheriff records"},
+                "P": {"desc": "Wanted board listing active regional bounties.", "hint": "Z/Enter: open bounty board"},
+            },
+            "library": {
+                "l": {"desc": "Library bookcase organized by subject and local history.", "hint": "Z/Enter: inspect bookcase"},
+                "t": {"desc": "Reading table with reference notes left open.", "hint": "Z/Enter: inspect reading table"},
+                "c": {"desc": "Quiet reading chair placed beside a table.", "hint": "Z/Enter: inspect reading chair"},
+                "P": {"desc": "Library catalog and community research notice.", "hint": "Z/Enter: inspect library catalog"},
+            },
+            "carpenter": {
+                "w": {"desc": "Carpenter's bench holding a measured joinery project.", "hint": "Z/Enter: inspect carpenter bench"},
+                "a": {"desc": "Rack of saws, planes, clamps, and chisels.", "hint": "Z/Enter: inspect carpenter tools"},
+                "x": {"desc": "Materials bench with cut lumber and marked fittings.", "hint": "Z/Enter: inspect project materials"},
+                "P": {"desc": "Construction board showing current plans and commissions.", "hint": "Z/Enter: inspect construction board"},
+            },
+            "workshop": {
+                "w": {"desc": "Workshop bench holding the current fabrication project.", "hint": "Z/Enter: inspect workshop bench"},
+                "a": {"desc": "Specialized tool rack for local repair work.", "hint": "Z/Enter: inspect workshop tools"},
+                "x": {"desc": "Parts bench with sorted components and measurements.", "hint": "Z/Enter: inspect parts bench"},
+                "P": {"desc": "Workshop order board listing repairs and commissions.", "hint": "Z/Enter: inspect work orders"},
+            },
+            "town_hall": {
+                "d": {"desc": "Civic writing desk with current proposals and minutes.", "hint": "Z/Enter: inspect civic desk"},
+                "P": {"desc": "Public notice board recording projects, decisions, and meetings.", "hint": "Z/Enter: inspect civic notice"},
+                "f": {"desc": "Permanent civic display commemorating a resolved local concern.", "hint": "Z/Enter: inspect civic display"},
+                "t": {"desc": "Meeting table arranged for public deliberation.", "hint": "Z/Enter: inspect meeting table"},
+                "c": {"desc": "Public meeting chair placed around the civic table.", "hint": "Z/Enter: inspect meeting chair"},
+            },
+        }
+        catalog.update(typed.get(type_id, {}))
+        return catalog
+
+    def procedural_town_interior_tile_description(
+        self,
+        tile: str,
+        building: Optional[Dict[str, object]] = None,
+        x: Optional[int] = None,
+        y: Optional[int] = None,
+    ) -> str:
+        tile = str(tile)
+        game_id = (
+            self.game_table_fixture_id(tile)
+            if hasattr(self, "game_table_fixture_id")
+            else ""
+        )
+        if game_id:
+            return f"{GAME_TABLE_DATA[game_id]['name']}, set up and ready to play."
+        if x is not None and y is not None:
+            building = building or self.current_procedural_town_building() or {}
+            catalog_furniture = self.procedural_town_catalog_furniture_at(int(x), int(y))
+            room = self.procedural_town_room_at_position(int(x), int(y), building)
+            if isinstance(room, dict) and hasattr(self, "procedural_room_container_profile"):
+                profile = self.procedural_room_container_profile(
+                    str(building.get("type_id", "")),
+                    str(room.get("role", "")),
+                    str(room.get("source_id", room.get("id", ""))),
+                    tile,
+                )
+                if profile:
+                    profile_name = str(CONTAINER_PROFILES.get(profile, {}).get("name", "Container"))
+                    room_name = str(room.get("role", "room")).replace("_", " ")
+                    ownership = (
+                        "It is part of your household storage."
+                        if str(building.get("type_id", "")) == "home"
+                        and getattr(self, "on_player_owned_procedural_residence", lambda: False)()
+                        else f"Its contents belong to {building.get('name', 'the occupants')}."
+                    )
+                    furniture_name = (
+                        str(catalog_furniture.get("name", ""))
+                        if isinstance(catalog_furniture, dict)
+                        else ""
+                    )
+                    lead = f"{furniture_name}, serving as a {profile_name.lower()}" if furniture_name else profile_name
+                    status = (
+                        self.furniture_status_text(
+                            furniture_name, int(x), int(y), catalog_furniture,
+                        )
+                        if furniture_name and hasattr(self, "furniture_status_text")
+                        else ""
+                    )
+                    return f"{lead} in the {room_name}. {ownership}{status}"
+            if isinstance(catalog_furniture, dict):
+                name = str(catalog_furniture.get("name", "Furniture"))
+                data = FURNITURE_CATALOG_DATA.get(name, {})
+                detail = str(data.get("description", "Purpose-built furniture."))
+                room_name = str(catalog_furniture.get("room_role", "room")).replace("_", " ")
+                action = (
+                    self.furniture_action_hint_for(name).split(" |", 1)[0].replace("Z: ", "")
+                    if hasattr(self, "furniture_action_hint_for")
+                    else "use this furniture"
+                )
+                status = (
+                    self.furniture_status_text(name, int(x), int(y), catalog_furniture)
+                    if hasattr(self, "furniture_status_text") else ""
+                )
+                return f"{name} in the {room_name}. {detail} You can {action}.{status}"
+        record = self.procedural_town_interior_tile_catalog(building).get(tile)
+        if record:
+            return str(record["desc"])
+        building = building or self.current_procedural_town_building() or {}
+        building_name = str(building.get("name", "this building"))
+        return (
+            f"Custom fixture '{tile}' belonging to {building_name}."
+            if tile.strip()
+            else f"Space outside the finished rooms of {building_name}."
+        )
+
+    def procedural_town_interior_tile_hint(
+        self,
+        tile: str,
+        building: Optional[Dict[str, object]] = None,
+        x: Optional[int] = None,
+        y: Optional[int] = None,
+    ) -> str:
+        tile = str(tile)
+        game_id = (
+            self.game_table_fixture_id(tile)
+            if hasattr(self, "game_table_fixture_id")
+            else ""
+        )
+        if game_id:
+            return f"Z/Enter: play {GAME_TABLE_DATA[game_id]['name']}"
+        if x is not None and y is not None and hasattr(self, "container_interaction_hint_at"):
+            container_hint = self.container_interaction_hint_at(int(x), int(y))
+            if container_hint:
+                return container_hint
+            catalog_furniture = self.procedural_town_catalog_furniture_at(int(x), int(y))
+            if isinstance(catalog_furniture, dict):
+                name = str(catalog_furniture.get("name", "Furniture"))
+                if hasattr(self, "catalog_furniture_action_hint"):
+                    return self.catalog_furniture_action_hint(catalog_furniture).replace("Z:", "Z/Enter:")
+                return f"Z/Enter: use {name}"
+        record = self.procedural_town_interior_tile_catalog(building).get(tile)
+        if record:
+            return str(record["hint"])
+        return "Z/Enter: inspect custom fixture" if tile.strip() else "I: inspect building boundary"
+
+    def procedural_town_interior_tile_interactable(
+        self,
+        tile: str,
+        building: Optional[Dict[str, object]] = None,
+        x: Optional[int] = None,
+        y: Optional[int] = None,
+    ) -> bool:
+        tile = str(tile)
+        if x is not None and y is not None and self.procedural_town_catalog_furniture_at(int(x), int(y)):
+            return True
+        if hasattr(self, "game_table_fixture_id") and self.game_table_fixture_id(tile):
+            return True
+        if tile in {" ", "#", ".", ","}:
+            return False
+        # Unknown non-floor glyphs may come from an enabled custom template.
+        # They still deserve an explicit inspection instead of becoming dead
+        # visual noise.
+        return bool(tile.strip())
 
     def procedural_town_custom_building_template(
         self,
@@ -2249,19 +2791,27 @@ class ProceduralTownRuntimeMixin:
         if custom_template:
             floors = custom_template.get("floors", [])
             if isinstance(floors, list) and floors:
-                return max(1, min(4, len(floors)))
-            return 1
+                floor_count = max(1, min(4, len(floors)))
+            else:
+                floor_count = 1
+            building["floor_count"] = floor_count
+            return floor_count
         type_id = str(building.get("type_id", "home"))
         seed = stable_text_seed(f"{plan.get('seed')}:{building.get('id')}:floors")
         development = self.procedural_town_development_rank(plan)
         if property_record:
             upgrade_level = int(property_record.get("upgrade_level", 0) or 0)
-            return 2 if upgrade_level >= 2 or property_record.get("household_moved") else 1
+            floor_count = 2 if upgrade_level >= 2 or property_record.get("household_moved") else 1
+            building["floor_count"] = floor_count
+            return floor_count
         if type_id == "inn":
-            return 2 if development >= 1 or seed % 100 < 70 else 1
-        if type_id == "home":
-            return 2 if seed % 100 < 35 else 1
-        return 1
+            floor_count = 2 if development >= 1 or seed % 100 < 70 else 1
+        elif type_id == "home":
+            floor_count = 2 if seed % 100 < 35 else 1
+        else:
+            floor_count = 1
+        building["floor_count"] = floor_count
+        return floor_count
 
     def current_procedural_building_floor(
         self,
@@ -2286,13 +2836,48 @@ class ProceduralTownRuntimeMixin:
         floor_count = self.procedural_town_building_floor_count(plan, building, template, property_record)
         return max(0, min(floor_count - 1, requested))
 
+    def procedural_town_building_layout_variant(
+        self,
+        plan: Dict[str, object],
+        building: Dict[str, object],
+    ) -> int:
+        type_id = str(building.get("type_id", "home"))
+        same_type_ids = sorted(
+            str(candidate.get("id", ""))
+            for candidate in plan.get("buildings", {}).values()
+            if isinstance(candidate, dict)
+            and str(candidate.get("type_id", "")) == type_id
+        )
+        try:
+            same_type_index = same_type_ids.index(str(building.get("id", "")))
+        except ValueError:
+            same_type_index = 0
+        variant_seed = stable_text_seed(
+            f"{plan.get('seed')}:{type_id}:{building.get('id')}:interior-variants"
+        )
+        return (variant_seed + same_type_index) % 4
+
     def procedural_town_generated_upper_floor_map(
         self,
         plan: Dict[str, object],
         building: Dict[str, object],
         floor_index: int,
         floor_count: int,
+        layout_variant: Optional[int] = None,
+        furniture_placements: Optional[List[Dict[str, object]]] = None,
     ) -> List[List[str]]:
+        if layout_variant is None:
+            layout_variant = self.procedural_town_building_layout_variant(plan, building)
+        return build_procedural_upper_floor(
+            str(building.get("type_id", "home")),
+            int(layout_variant),
+            int(floor_index),
+            int(floor_count),
+            sanitize_procedural_room_overrides(building.get("room_conversions", {})),
+            procedural_building_program_variant(plan, building),
+            furniture_placements,
+        )
+
         width, height = 64, 28
         grid = [[" " for _ in range(width)] for _ in range(height)]
         floor_cells: Set[Position] = set()
@@ -2541,6 +3126,7 @@ class ProceduralTownRuntimeMixin:
         community: Dict[str, object],
         layout_variant: int,
         fixture_variant: int,
+        furniture_placements: Optional[List[Dict[str, object]]] = None,
     ) -> List[List[str]]:
         """Build practical, type-specific settlement interiors.
 
@@ -2548,6 +3134,37 @@ class ProceduralTownRuntimeMixin:
         counter where service exists, rooms that match the building's purpose,
         and a small number of useful fixtures instead of decorative clutter.
         """
+        type_id = str(building.get("type_id", "home"))
+        game_ids = venue_game_ids(
+            f"{plan.get('id')}:{building.get('id')}",
+            "inn",
+            count=2,
+        ) if type_id == "inn" else ()
+        game_glyphs = tuple(
+            str(GAME_TABLE_DATA[game_id]["glyph"])
+            for game_id in game_ids
+            if game_id in GAME_TABLE_DATA
+        )
+        return build_procedural_ground_floor(
+            type_id,
+            int(layout_variant),
+            int(fixture_variant),
+            int(floor_count),
+            game_table_glyphs=game_glyphs,
+            business_upgrade=(
+                int(business_record.get("upgrade_level", 0) or 0)
+                if isinstance(business_record, dict)
+                else 0
+            ),
+            story_completed=bool(community.get("story_completed")),
+            player_owned=bool(property_record),
+            room_overrides=sanitize_procedural_room_overrides(
+                building.get("room_conversions", {})
+            ),
+            program_variant=procedural_building_program_variant(plan, building),
+            furniture_placements=furniture_placements,
+        )
+
         width, height = 64, 28
         door_x, door_y = width // 2, height - 1
         grid = [[" " for _ in range(width)] for _ in range(height)]
@@ -3023,8 +3640,15 @@ class ProceduralTownRuntimeMixin:
         variant_seed = stable_text_seed(
             f"{plan.get('seed')}:{type_id}:{building.get('id')}:interior-variants"
         )
-        layout_variant = (variant_seed + same_type_index) % 4
+        layout_variant = self.procedural_town_building_layout_variant(plan, building)
+        program_variant = procedural_building_program_variant(plan, building)
         fixture_variant = ((variant_seed // 7) + same_type_index * 2) % 4
+        room_overrides = sanitize_procedural_room_overrides(
+            building.get("room_conversions", {})
+        )
+        room_override_signature = ",".join(
+            f"{room_id}={role}" for room_id, role in sorted(room_overrides.items())
+        )
         family_signature = ""
         if type_id == "home":
             family_signature = (
@@ -3040,30 +3664,51 @@ class ProceduralTownRuntimeMixin:
             f"{bool(property_record and property_record.get('household_moved'))}:"
             f"{int(business_record.get('upgrade_level', 0)) if business_record else 0}"
             f":floor={floor_index}:floors={floor_count}:layout={layout_variant}:fixtures={fixture_variant}:"
+            f"program={program_variant}:"
             f"custom={custom_template_signature}:"
+            f"rooms={room_override_signature}:"
             f"{family_signature}"
         )
-        if cache_key in cache:
+        furniture_scope_key = (
+            str(plan.get("id", "")), str(building.get("id", "")), floor_index
+        )
+        furniture_cache = getattr(self, "_procedural_town_catalog_furniture_cache", None)
+        if not isinstance(furniture_cache, dict):
+            furniture_cache = {}
+            self._procedural_town_catalog_furniture_cache = furniture_cache
+        if cache_key in cache and furniture_scope_key in furniture_cache:
             return cache[cache_key]
+        if cache_key in cache:
+            cache.pop(cache_key, None)
 
         if custom_template:
             custom_grid = stamp_custom_building_template(custom_template, floor_index)
             if custom_grid:
                 custom_grid = self.procedural_town_orient_interior_grid(custom_grid, building)
+                self.procedural_town_store_catalog_furniture(
+                    plan, building, floor_index, ()
+                )
                 cache[cache_key] = custom_grid
                 return custom_grid
 
         if floor_index > 0:
+            furniture_placements: List[Dict[str, object]] = []
             upper_grid = self.procedural_town_generated_upper_floor_map(
                 plan,
                 building,
                 floor_index,
                 floor_count,
+                layout_variant,
+                furniture_placements,
             )
             upper_grid = self.procedural_town_orient_interior_grid(upper_grid, building)
+            self.procedural_town_store_catalog_furniture(
+                plan, building, floor_index, furniture_placements
+            )
             cache[cache_key] = upper_grid
             return upper_grid
 
+        furniture_placements = []
         generated_grid = self.procedural_town_generated_ground_floor_map(
             plan,
             building,
@@ -3073,8 +3718,12 @@ class ProceduralTownRuntimeMixin:
             community,
             layout_variant,
             fixture_variant,
+            furniture_placements,
         )
         generated_grid = self.procedural_town_orient_interior_grid(generated_grid, building)
+        self.procedural_town_store_catalog_furniture(
+            plan, building, floor_index, furniture_placements
+        )
         cache[cache_key] = generated_grid
         return generated_grid
 
@@ -3550,6 +4199,123 @@ class ProceduralTownRuntimeMixin:
         )
         return True
 
+    def procedural_town_room_assignment_lines(
+        self,
+        population: Dict[str, object],
+        building: Dict[str, object],
+    ) -> List[str]:
+        residents = population.get("residents", {})
+        lines: List[str] = []
+        for household in population.get("households", {}).values():
+            if not isinstance(household, dict) or str(household.get("home_building_id", "")) != str(building.get("id", "")):
+                continue
+            labels = household.get("room_labels", {}) if isinstance(household.get("room_labels"), dict) else {}
+            assignments = household.get("room_assignments", {}) if isinstance(household.get("room_assignments"), dict) else {}
+            for room_id, occupant_ids in assignments.items():
+                names = [
+                    str(residents[resident_id].get("name", resident_id))
+                    for resident_id in occupant_ids
+                    if resident_id in residents
+                ]
+                if names:
+                    lines.append(f"{labels.get(room_id, 'Bedroom')}: {', '.join(names)}")
+            unassigned = [
+                str(residents[resident_id].get("name", resident_id))
+                for resident_id in household.get("unassigned_room_member_ids", []) or []
+                if resident_id in residents
+            ]
+            if unassigned:
+                lines.append(f"Without a private room: {', '.join(unassigned)}")
+        return lines
+
+    def procedural_town_modular_architecture_lines(
+        self,
+        plan: Dict[str, object],
+        building: Dict[str, object],
+    ) -> List[str]:
+        type_id = str(building.get("type_id", "home"))
+        property_record = (
+            self.player_property_for_building(plan, building)
+            if hasattr(self, "player_property_for_building") and type_id == "home"
+            else None
+        )
+        template = self.procedural_town_custom_building_template(plan, building, property_record)
+        if template:
+            return []
+        floor_count = self.procedural_town_building_floor_count(
+            plan,
+            building,
+            template,
+            property_record,
+        )
+        layout_variant = self.procedural_town_building_layout_variant(plan, building)
+        room_plans = [
+            procedural_interior_room_plan(
+                type_id,
+                layout_variant,
+                floor_count,
+                floor_index,
+                sanitize_procedural_room_overrides(building.get("room_conversions", {})),
+                procedural_building_program_variant(plan, building),
+            )
+            for floor_index in range(floor_count)
+        ]
+        rooms = [
+            room
+            for room_plan in room_plans
+            for room in room_plan.get("rooms", ())
+            if isinstance(room, dict)
+        ]
+        bedrooms = sum(
+            str(room.get("role", "")) in {"primary_bedroom", "bedroom", "guest_room", "nursery"}
+            for room in rooms
+        )
+        dependent_rooms = sum(
+            str(room.get("connection", "")) == "direct"
+            for room in rooms
+        )
+        social_rooms = sum(
+            str(room.get("role", ""))
+            in {"common", "common_room", "reading", "waiting", "lobby", "council", "meeting"}
+            for room in rooms
+        )
+        work_rooms = sum(
+            str(room.get("role", ""))
+            in {
+                "kitchen", "study", "office", "examination", "clinic_ward",
+                "pharmacy", "woodshop", "workshop", "forge", "finishing",
+                "sales", "service", "stockroom",
+            }
+            for room in rooms
+        )
+        resident_capacity = sum(int(room_plan.get("resident_capacity", 0)) for room_plan in room_plans)
+        guest_capacity = sum(int(room_plan.get("guest_capacity", 0)) for room_plan in room_plans)
+        capacity_text = (
+            f"{guest_capacity} private guest rooms"
+            if type_id == "inn"
+            else f"{resident_capacity} residents"
+            if resident_capacity
+            else "non-residential"
+        )
+        program_name = str(room_plans[0].get("program_name", "Standard")) if room_plans else "Standard"
+        lines = [
+            f"Architecture: {program_name} program; {len(rooms)} rooms across {floor_count} floor{'s' if floor_count != 1 else ''}; {dependent_rooms} directly connected rooms",
+            f"Bedroom plan: {bedrooms} rooms; capacity {capacity_text}",
+            f"Furnishing plan: {social_rooms} social and {work_rooms} work-room ensembles; doorway and hall lanes kept clear",
+        ]
+        adapted_rooms = [
+            room for room in rooms if str(room.get("adapted_from", ""))
+        ]
+        if adapted_rooms:
+            labels = [
+                f"Floor {int(room_plan.get('floor', 0)) + 1} study converted to {str(room.get('role', 'bedroom')).replace('_', ' ')}"
+                for room_plan in room_plans
+                for room in room_plan.get("rooms", ())
+                if isinstance(room, dict) and str(room.get("adapted_from", ""))
+            ]
+            lines.append(f"Household adaptations: {'; '.join(labels)}")
+        return lines
+
     def procedural_town_building_lines(
         self,
         building: Dict[str, object],
@@ -3599,6 +4365,8 @@ class ProceduralTownRuntimeMixin:
             if hours
             else "Hours: Always accessible"
         )
+        architecture_lines = self.procedural_town_modular_architecture_lines(plan, building)
+        room_assignment_lines = self.procedural_town_room_assignment_lines(population, building)
         return [
             str(building.get("name", "Settlement Building")).upper(),
             "",
@@ -3606,6 +4374,8 @@ class ProceduralTownRuntimeMixin:
             f"Type: {catalog.get('name', building.get('type_id', 'Building'))}",
             f"Purpose: {purposes.get(type_id, 'A working part of the settlement')}",
             hours_line,
+            *architecture_lines,
+            *(room_assignment_lines[:8] or ["Room assignments: none"] if type_id in {"home", "inn"} else []),
             f"Staff: {', '.join(staff) if staff else 'No assigned staff'}",
             f"Inside now: {', '.join(occupants) if occupants else 'No one visible'}",
             f"Local style: {self.procedural_town_identity(plan).get('architecture', 'practical frontier construction')}",
@@ -3903,6 +4673,7 @@ class ProceduralTownRuntimeMixin:
             "home": ["bedroom", "kitchen", "dining"],
             "inn": ["shopping_counter", "kitchen", "dining", "bedroom"],
             "general_store": ["shopping_counter", "stockroom", "storage"],
+            "market_stall": ["shopping_counter", "stockroom", "storage", "dining"],
             "clinic": ["clinic_ward", "office", "storage"],
             "sheriff_office": ["shopping_counter", "office", "storage"],
             "library": ["library_stacks", "office", "public_hall"],
@@ -3915,6 +4686,199 @@ class ProceduralTownRuntimeMixin:
             + type_zones.get(type_id, [])
             + ["public_hall", "dining", "storage"]
         ))
+
+    @staticmethod
+    def procedural_town_template_zone_kind_aliases(kind: str) -> Set[str]:
+        return {
+            "bedroom": {"bedroom", "primary_bedroom", "guest_room", "nursery"},
+            "kitchen": {"kitchen", "pantry"},
+            "storage": {"storage", "pantry"},
+            "dining": {"dining", "living_room"},
+            "public_hall": {"public_hall", "living_room", "private_hall"},
+        }.get(str(kind), {str(kind)})
+
+    @staticmethod
+    def procedural_town_zone_fixture_symbols(zone_kind: str) -> Set[str]:
+        return {
+            "bedroom": {"b", "B", "I", "J", "K", "N", "Y"},
+            "kitchen": {"f", "k", "Z", "W", "X"},
+            "shopping_counter": {"&", "$", "V"},
+            "stockroom": {"s", "j", "g", "W", "y", "z", "X", "Z"},
+            "storage": {"s", "j", "g", "W", "y", "z", "N", "V", "X", "Y", "Z"},
+            "clinic_ward": {"+", "b", "B", "K", "W", "g", "j"},
+            "library_stacks": {"l", "L", "H", "i", "V"},
+            "workshop": {"w", "a", "x", "j", "W", "y", "z", "X"},
+            "office": {"d", "P", "g", "W", "H", "i"},
+            "dining": {"t", "T", "c", "O", "Q", "R"},
+            "public_hall": {"P", "t", "T", "c", "O", "Q", "R"},
+        }.get(str(zone_kind), set())
+
+    def procedural_town_resident_fixture_symbols(
+        self,
+        resident: Dict[str, object],
+        building: Dict[str, object],
+        phase: str,
+        activity: str = "",
+    ) -> Set[str]:
+        activity_key = str(activity).casefold()
+        building_id = str(building.get("id", ""))
+        at_home = str(resident.get("home_building_id", "")) == building_id
+        if str(phase) == "late" and at_home:
+            return self.procedural_town_zone_fixture_symbols("bedroom")
+        if (
+            str(phase) in {"work_morning", "work_afternoon", "bad_weather"}
+            and str(resident.get("role", "")) in {
+                "Shopkeeper", "Innkeeper", "Merchant", "Doctor", "Sheriff",
+                "Librarian", "Carpenter", "Mayor",
+            }
+        ):
+            return {"&"}
+        keyword_zones = (
+            (("sleep", "bed", "resting in", "turning in"), "bedroom"),
+            (("cook", "breakfast", "supper", "meal", "food", "pantry"), "kitchen"),
+            (("read", "study", "research", "book", "archive"), "library_stacks"),
+            (("patient", "treatment", "remed", "clinic", "wound"), "clinic_ward"),
+            (("stock", "inventory", "shelv", "supply", "storage"), "storage"),
+            (("craft", "repair", "workbench", "tool", "forge"), "workshop"),
+            (("record", "paper", "permit", "report", "office"), "office"),
+            (("shop", "counter", "serve", "customer", "vendor"), "shopping_counter"),
+            (("eat", "dining", "conversation", "social"), "dining"),
+        )
+        for keywords, zone_kind in keyword_zones:
+            if any(keyword in activity_key for keyword in keywords):
+                return self.procedural_town_zone_fixture_symbols(zone_kind)
+        zone_kinds = self.procedural_town_zone_kind_preferences(
+            resident,
+            building,
+            phase,
+        )
+        for zone_kind in zone_kinds:
+            symbols = self.procedural_town_zone_fixture_symbols(zone_kind)
+            if symbols:
+                return symbols
+        return set()
+
+    def procedural_town_fixture_interaction_anchors(
+        self,
+        grid: List[List[str]],
+        symbols: Set[str],
+        seed_key: str = "",
+    ) -> List[Position]:
+        fixtures = [
+            (x, y)
+            for y, row in enumerate(grid)
+            for x, tile in enumerate(row)
+            if tile in symbols
+        ]
+        if not fixtures:
+            return []
+        fixtures.sort(key=lambda point: (
+            stable_text_seed(f"{seed_key}:{point[0]},{point[1]}"),
+            point[1],
+            point[0],
+        ))
+        anchors: List[Position] = []
+        for fixture_x, fixture_y in fixtures:
+            neighbors = [
+                (fixture_x + 1, fixture_y),
+                (fixture_x - 1, fixture_y),
+                (fixture_x, fixture_y + 1),
+                (fixture_x, fixture_y - 1),
+            ]
+            rotation = stable_text_seed(
+                f"{seed_key}:{fixture_x},{fixture_y}:side"
+            ) % len(neighbors)
+            neighbors = neighbors[rotation:] + neighbors[:rotation]
+            anchors.extend(
+                (x, y)
+                for x, y in neighbors
+                if (
+                    0 <= y < len(grid)
+                    and 0 <= x < len(grid[y])
+                    and grid[y][x] in {".", ",", ":"}
+                    and self.procedural_town_interior_tile_passable(grid[y][x])
+                )
+            )
+        return list(dict.fromkeys(anchors))
+
+    @staticmethod
+    def procedural_town_adjacent_fixture_symbol(
+        grid: List[List[str]],
+        position: Position,
+        symbols: Set[str],
+    ) -> str:
+        x, y = int(position[0]), int(position[1])
+        for fixture_x, fixture_y in (
+            (x + 1, y),
+            (x - 1, y),
+            (x, y + 1),
+            (x, y - 1),
+        ):
+            if (
+                0 <= fixture_y < len(grid)
+                and 0 <= fixture_x < len(grid[fixture_y])
+                and grid[fixture_y][fixture_x] in symbols
+            ):
+                return str(grid[fixture_y][fixture_x])
+        return ""
+
+    @staticmethod
+    def procedural_town_face_adjacent_fixture(
+        grid: List[List[str]],
+        position: Position,
+        symbols: Set[str],
+    ) -> str:
+        x, y = int(position[0]), int(position[1])
+        for fixture_x, fixture_y, facing in (
+            (x + 1, y, "RIGHT"),
+            (x - 1, y, "LEFT"),
+            (x, y + 1, "DOWN"),
+            (x, y - 1, "UP"),
+        ):
+            if (
+                0 <= fixture_y < len(grid)
+                and 0 <= fixture_x < len(grid[fixture_y])
+                and grid[fixture_y][fixture_x] in symbols
+            ):
+                return facing
+        return ""
+
+    def procedural_town_resident_fixture_activity(
+        self,
+        symbol: str,
+        phase: str,
+        base_activity: str,
+        building: Optional[Dict[str, object]] = None,
+    ) -> str:
+        symbol = str(symbol)
+        type_id = str((building or {}).get("type_id", ""))
+        if symbol in {"b", "B", "I", "J", "K"}:
+            return (
+                "settling into bed for the night"
+                if str(phase) == "late"
+                else "making the bed and preparing for the day"
+            )
+        if symbol in {"+", "g", "W"} and type_id == "clinic":
+            return "checking remedies and treatment supplies"
+        if symbol in {"w", "a", "x", "W", "X"} and type_id in {"workshop", "carpenter"}:
+            return "working carefully at the workshop fixtures"
+        if symbol in {"f", "k", "Z"} or (
+            symbol in {"W", "X"} and type_id in {"home", "inn"}
+        ):
+            return "preparing food and household provisions"
+        if symbol in {"l", "L", "H", "i"}:
+            return "reading and organizing the local shelves"
+        if symbol in {"w", "a", "x"}:
+            return "working carefully at the workshop fixtures"
+        if symbol in {"d", "P"}:
+            return "reviewing records and current work"
+        if symbol in {"&", "$", "V"}:
+            return "staffing the service and display area"
+        if symbol in {"s", "j", "g", "W", "y", "z", "N", "X", "Y", "Z"}:
+            return "sorting and checking stored supplies"
+        if symbol in {"t", "T", "c", "O", "Q", "R"}:
+            return "using the furnished common area"
+        return str(base_activity)
 
     def procedural_town_zone_rect_candidates(
         self,
@@ -3966,8 +4930,9 @@ class ProceduralTownRuntimeMixin:
         side = self.procedural_town_building_door_side(building)
         anchors: List[Position] = []
         for kind in zone_kinds:
+            accepted_kinds = self.procedural_town_template_zone_kind_aliases(kind)
             for zone in template.get("zones", []) or []:
-                if not isinstance(zone, dict) or str(zone.get("kind")) != str(kind):
+                if not isinstance(zone, dict) or str(zone.get("kind")) not in accepted_kinds:
                     continue
                 if int(zone.get("floor", 0) or 0) != current_floor:
                     continue
@@ -4098,6 +5063,15 @@ class ProceduralTownRuntimeMixin:
     ) -> int:
         if floor_count <= 1:
             return 0
+        if (
+            str(phase) in {"wake", "late"}
+            and str(resident.get("home_building_id", "")) == str(building.get("id", ""))
+            and str(resident.get("assigned_room_id", ""))
+        ):
+            return max(
+                0,
+                min(floor_count - 1, int(resident.get("assigned_room_floor", 0) or 0)),
+            )
         zone_kinds = self.procedural_town_zone_kind_preferences(resident, building, phase)
         type_id = str(building.get("type_id", ""))
         property_record = (
@@ -4113,8 +5087,9 @@ class ProceduralTownRuntimeMixin:
                     continue
                 possible_floors.append(max(0, min(floor_count - 1, int(spawn.get("floor", 0) or 0))))
             for kind in zone_kinds:
+                accepted_kinds = self.procedural_town_template_zone_kind_aliases(kind)
                 for zone in template.get("zones", []) or []:
-                    if not isinstance(zone, dict) or str(zone.get("kind")) != str(kind):
+                    if not isinstance(zone, dict) or str(zone.get("kind")) not in accepted_kinds:
                         continue
                     possible_floors.append(max(0, min(floor_count - 1, int(zone.get("floor", 0) or 0))))
         if possible_floors:
@@ -4179,17 +5154,12 @@ class ProceduralTownRuntimeMixin:
     ) -> List[Position]:
         grid = self.procedural_town_interior_map(building)
         symbol_map: Dict[str, Set[str]] = {
-            "bedroom": {"b", "B"},
-            "kitchen": {"f"},
-            "shopping_counter": {"&"},
-            "stockroom": {"s", "$"},
-            "storage": {"s", "$"},
-            "clinic_ward": {"+", "b"},
-            "library_stacks": {"l"},
-            "workshop": {"w", "a", "x"},
-            "office": {"d", "P"},
-            "dining": {"t", "c"},
-            "public_hall": {"P", "t"},
+            kind: self.procedural_town_zone_fixture_symbols(kind)
+            for kind in (
+                "bedroom", "kitchen", "shopping_counter", "stockroom",
+                "storage", "clinic_ward", "library_stacks", "workshop",
+                "office", "dining", "public_hall",
+            )
         }
         anchors: List[Position] = []
         for kind in zone_kinds:
@@ -4198,16 +5168,250 @@ class ProceduralTownRuntimeMixin:
                 anchors.extend(self.procedural_town_tile_cluster_anchors(grid, symbols))
         return list(dict.fromkeys(anchors))
 
+    def procedural_town_assigned_room_anchor(
+        self,
+        plan: Dict[str, object],
+        building: Dict[str, object],
+        resident: Dict[str, object],
+    ) -> List[Position]:
+        room_id = str(resident.get("assigned_room_id", ""))
+        if (
+            not room_id
+            or str(resident.get("home_building_id", "")) != str(building.get("id", ""))
+        ):
+            return []
+        floor_index = self.current_procedural_building_floor(plan, building)
+        if floor_index != int(resident.get("assigned_room_floor", 0) or 0):
+            return []
+        type_id = str(building.get("type_id", "home"))
+        property_record = (
+            self.player_property_for_building(plan, building)
+            if hasattr(self, "player_property_for_building") and type_id == "home"
+            else None
+        )
+        template = self.procedural_town_custom_building_template(plan, building, property_record)
+        source_rect: Optional[Tuple[int, int, int, int]] = None
+        source_width, source_height = 64, 28
+        if template and ":zone:" in room_id:
+            try:
+                zone_index = int(room_id.rsplit(":zone:", 1)[1])
+            except (TypeError, ValueError):
+                zone_index = -1
+            zones = template.get("zones", []) or []
+            if 0 <= zone_index < len(zones) and isinstance(zones[zone_index], dict):
+                zone = zones[zone_index]
+                if int(zone.get("floor", 0) or 0) == floor_index:
+                    source_rect = (
+                        int(zone.get("x1", 0)),
+                        int(zone.get("y1", 0)),
+                        int(zone.get("x2", zone.get("x1", 0))),
+                        int(zone.get("y2", zone.get("y1", 0))),
+                    )
+            source_grid = stamp_custom_building_template(template, floor_index)
+            if source_grid:
+                source_height = len(source_grid)
+                source_width = len(source_grid[0]) if source_grid[0] else source_width
+        elif not template:
+            floor_count = self.procedural_town_building_floor_count(
+                plan,
+                building,
+                None,
+                property_record,
+            )
+            layout_variant = self.procedural_town_building_layout_variant(plan, building)
+            room_plan = procedural_interior_room_plan(
+                type_id,
+                layout_variant,
+                floor_count,
+                floor_index,
+                sanitize_procedural_room_overrides(building.get("room_conversions", {})),
+                procedural_building_program_variant(plan, building),
+            )
+            source_id = room_id.split(":", 2)[2] if room_id.count(":") >= 2 else room_id
+            room = next(
+                (
+                    value for value in room_plan.get("rooms", ())
+                    if isinstance(value, dict) and str(value.get("id", "")) == source_id
+                ),
+                None,
+            )
+            if room is not None:
+                source_rect = tuple(room.get("rect", (0, 0, 0, 0)))
+        if source_rect is None:
+            return []
+        x1, y1, x2, y2 = source_rect
+        left, right = sorted((x1, x2))
+        top, bottom = sorted((y1, y2))
+        center_x, center_y = (left + right) // 2, (top + bottom) // 2
+        source_candidates = sorted(
+            (
+                (x, y)
+                for y in range(top + 1, bottom)
+                for x in range(left + 1, right)
+            ),
+            key=lambda pos: (abs(pos[0] - center_x) + abs(pos[1] - center_y), pos[1], pos[0]),
+        )
+        grid = self.procedural_town_interior_map(building, floor=floor_index)
+        side = self.procedural_town_building_door_side(building)
+        for source_x, source_y in source_candidates:
+            target_x, target_y = self.procedural_town_orient_position(
+                source_x,
+                source_y,
+                source_width,
+                source_height,
+                side,
+            )
+            if (
+                0 <= target_y < len(grid)
+                and 0 <= target_x < len(grid[target_y])
+                and self.procedural_town_interior_tile_passable(grid[target_y][target_x])
+            ):
+                return [(target_x, target_y)]
+        return []
+
+    def procedural_town_modular_room_anchors(
+        self,
+        plan: Dict[str, object],
+        building: Dict[str, object],
+        zone_kinds: List[str],
+        floor: Optional[int] = None,
+    ) -> List[Position]:
+        """Resolve schedule targets from generated room purposes, not glyph guesses."""
+        type_id = str(building.get("type_id", "home"))
+        property_record = (
+            self.player_property_for_building(plan, building)
+            if hasattr(self, "player_property_for_building") and type_id == "home"
+            else None
+        )
+        template = self.procedural_town_custom_building_template(plan, building, property_record)
+        if template:
+            return []
+        floor_count = self.procedural_town_building_floor_count(
+            plan,
+            building,
+            template,
+            property_record,
+        )
+        floor_index = (
+            self.current_procedural_building_floor(plan, building)
+            if floor is None
+            else max(0, min(floor_count - 1, int(floor)))
+        )
+        layout_variant = self.procedural_town_building_layout_variant(plan, building)
+        room_plan = procedural_interior_room_plan(
+            type_id,
+            layout_variant,
+            floor_count,
+            floor_index,
+            sanitize_procedural_room_overrides(building.get("room_conversions", {})),
+            procedural_building_program_variant(plan, building),
+        )
+        role_preferences: Dict[str, Set[str]] = {
+            "bedroom": {"primary_bedroom", "bedroom", "guest_room", "nursery"},
+            "kitchen": {"kitchen", "pantry"},
+            "shopping_counter": {"sales", "showroom", "service", "reception", "circulation", "lobby"},
+            "stockroom": {"stockroom", "delivery", "produce", "lumber", "materials"},
+            "storage": {"storage", "pantry", "archive", "records", "armory"},
+            "clinic_ward": {"examination", "clinic_ward", "pharmacy"},
+            "library_stacks": {"stacks", "reading", "archive", "study"},
+            "workshop": {"woodshop", "workshop", "forge", "finishing", "materials"},
+            "office": {"office", "records", "study"},
+            "dining": {"common", "common_room", "meeting", "council"},
+            "public_hall": {"common", "common_room", "waiting", "reception", "circulation", "lobby", "sales", "showroom", "service", "display"},
+        }
+        wanted_roles: Set[str] = set()
+        for kind in zone_kinds:
+            wanted_roles.update(role_preferences.get(str(kind), set()))
+        if not wanted_roles:
+            return []
+        grid = self.procedural_town_interior_map(building, floor=floor_index)
+        side = self.procedural_town_building_door_side(building)
+        entrance = next(
+            (
+                (x, y)
+                for y, row in enumerate(grid)
+                for x, tile in enumerate(row)
+                if tile == "D"
+            ),
+            None,
+        )
+
+        def in_entry_lane(x: int, y: int) -> bool:
+            if entrance is None:
+                return False
+            door_x, door_y = entrance
+            if door_y == len(grid) - 1:
+                return abs(x - door_x) <= 1 and y >= door_y - 9
+            if door_y == 0:
+                return abs(x - door_x) <= 1 and y <= 9
+            if door_x == len(grid[0]) - 1:
+                return abs(y - door_y) <= 1 and x >= door_x - 9
+            if door_x == 0:
+                return abs(y - door_y) <= 1 and x <= 9
+            return False
+
+        anchors: List[Position] = []
+        for room in room_plan.get("rooms", ()):
+            if not isinstance(room, dict) or str(room.get("role", "")) not in wanted_roles:
+                continue
+            x1, y1, x2, y2 = room.get("rect", (0, 0, 0, 0))
+            center_x, center_y = (x1 + x2) // 2, (y1 + y2) // 2
+            candidates = sorted(
+                (
+                    (x, y)
+                    for y in range(y1 + 1, y2)
+                    for x in range(x1 + 1, x2)
+                ),
+                key=lambda pos: (abs(pos[0] - center_x) + abs(pos[1] - center_y), pos[1], pos[0]),
+            )
+            for source_x, source_y in candidates:
+                target_x, target_y = self.procedural_town_orient_position(
+                    source_x,
+                    source_y,
+                    64,
+                    28,
+                    side,
+                )
+                if (
+                    0 <= target_y < len(grid)
+                    and 0 <= target_x < len(grid[target_y])
+                    and self.procedural_town_interior_tile_passable(grid[target_y][target_x])
+                    and not in_entry_lane(target_x, target_y)
+                ):
+                    anchors.append((target_x, target_y))
+                    break
+        return list(dict.fromkeys(anchors))
+
     def procedural_town_interior_resident_candidates_for(
         self,
         plan: Dict[str, object],
         building: Dict[str, object],
         resident: Dict[str, object],
         phase: str,
+        activity: str = "",
     ) -> List[Position]:
         zone_kinds = self.procedural_town_zone_kind_preferences(resident, building, phase)
+        grid = self.procedural_town_interior_map(building)
+        fixture_symbols = self.procedural_town_resident_fixture_symbols(
+            resident,
+            building,
+            phase,
+            activity,
+        )
+        assigned_room_anchors = (
+            self.procedural_town_assigned_room_anchor(plan, building, resident)
+            if str(phase) in {"wake", "late"}
+            else []
+        )
         candidates = (
-            self.procedural_town_template_zone_anchors(plan, building, zone_kinds)
+            assigned_room_anchors
+            + self.procedural_town_fixture_interaction_anchors(
+                grid,
+                fixture_symbols,
+                f"{resident.get('id')}:{phase}:{activity}",
+            )
+            + self.procedural_town_template_zone_anchors(plan, building, zone_kinds)
+            + self.procedural_town_modular_room_anchors(plan, building, zone_kinds)
             + self.procedural_town_inferred_zone_anchors(building, zone_kinds)
             + self.procedural_town_template_spawn_anchors(plan, building)
             + self.procedural_town_default_interior_resident_candidates()
@@ -4221,6 +5425,15 @@ class ProceduralTownRuntimeMixin:
             return self.procedural_town_default_interior_resident_candidates()
         return list(dict.fromkeys(
             self.procedural_town_template_spawn_anchors(plan, building)
+            + self.procedural_town_modular_room_anchors(
+                plan,
+                building,
+                [
+                    "shopping_counter", "bedroom", "kitchen", "dining",
+                    "office", "clinic_ward", "library_stacks", "workshop",
+                    "public_hall", "storage",
+                ],
+            )
             + self.procedural_town_inferred_zone_anchors(
                 building,
                 [
@@ -4661,6 +5874,8 @@ class ProceduralTownRuntimeMixin:
             resident["runtime_activity"] = self.procedural_town_resident_runtime_activity(
                 desired_location, actual_location, activity, phase
             )
+            if not interior:
+                resident["runtime_fixture_symbol"] = ""
 
             if interior:
                 if actual_location != f"building:{current_building_id}":
@@ -4695,6 +5910,7 @@ class ProceduralTownRuntimeMixin:
                 except Exception:
                     floor_changed = True
                 resident["runtime_floor"] = resident_floor
+                resident["runtime_fixture_symbol"] = ""
                 if resident_floor != current_floor:
                     indoor_index += 1
                     continue
@@ -4708,6 +5924,7 @@ class ProceduralTownRuntimeMixin:
                         current_building,
                         resident,
                         phase,
+                        str(resident.get("runtime_activity", activity)),
                     )
                 )
                 if not candidates:
@@ -4732,6 +5949,34 @@ class ProceduralTownRuntimeMixin:
                 )
                 reserved_targets.add(preferred)
                 resident["runtime_target_x"], resident["runtime_target_y"] = preferred
+                fixture_symbols = self.procedural_town_resident_fixture_symbols(
+                    resident,
+                    current_building,
+                    phase,
+                    str(resident.get("runtime_activity", activity)),
+                )
+                fixture_symbol = self.procedural_town_adjacent_fixture_symbol(
+                    self.procedural_town_interior_map(current_building),
+                    preferred,
+                    fixture_symbols,
+                )
+                if fixture_symbol:
+                    resident["runtime_fixture_symbol"] = fixture_symbol
+                    fixture_facing = self.procedural_town_face_adjacent_fixture(
+                        self.procedural_town_interior_map(current_building),
+                        preferred,
+                        fixture_symbols,
+                    )
+                    if fixture_facing:
+                        resident["runtime_facing"] = fixture_facing
+                    resident["runtime_activity"] = self.procedural_town_resident_fixture_activity(
+                        fixture_symbol,
+                        phase,
+                        str(resident.get("runtime_activity", activity)),
+                        current_building,
+                    )
+                else:
+                    resident["runtime_fixture_symbol"] = ""
                 if force_reanchor or floor_changed or not self.procedural_town_runtime_tile_passable(
                     int(resident.get("runtime_x", -1)),
                     int(resident.get("runtime_y", -1)),
@@ -5047,6 +6292,12 @@ class ProceduralTownRuntimeMixin:
                 continue
             occupied.discard((x, y))
             if (x, y) == target and not transition:
+                if interior and str(resident.get("runtime_fixture_symbol", "")):
+                    # A resident deliberately using furniture should remain at
+                    # its reserved adjacent interaction spot until the schedule
+                    # changes, rather than immediately wandering away from it.
+                    occupied.add((x, y))
+                    continue
                 if (
                     str(resident.get("runtime_phase", ""))
                     in {"work_morning", "work_afternoon", "bad_weather"}
@@ -6341,21 +7592,6 @@ class ProceduralTownRuntimeMixin:
         plan = self.current_procedural_town_plan()
         if not plan:
             return []
-        cx, cy = int(plan["chunk_x"]), int(plan["chunk_y"])
-        resident_id = str(resident.get("id", ""))
-        available_topics = set(
-            self.procedural_settlement_dialogue_topics(cx, cy, resident_id)
-        )
-        gifted_today = str(resident.get("last_gift_day", "")) == (
-            f"{int(getattr(self.state, 'year', 1))}-"
-            f"{int(getattr(self.state, 'month', 1))}-"
-            f"{int(getattr(self.state, 'day', 1))}"
-        )
-        request_status = self.procedural_settlement_request_status(
-            cx,
-            cy,
-            resident_id,
-        )
         current_building = self.current_procedural_town_building()
         works_here = bool(
             current_building
@@ -6375,7 +7611,7 @@ class ProceduralTownRuntimeMixin:
             "inn": "Ask about meals and rooms",
             "town_hall": "Request civic service",
         }
-        items = [MenuItem(label="Talk", value="talk", enabled=True)]
+        items = [MenuItem(label="Talk", value="talk", enabled=True, hint="conversation, requests, rumors, gifts, relationships, and plans")]
         if works_here and current_building and str(current_building.get("type_id", "")) in service_labels:
             is_open = self.procedural_town_building_is_open(current_building)
             items.append(
@@ -6385,140 +7621,6 @@ class ProceduralTownRuntimeMixin:
                     enabled=is_open,
                     hint="On duty" if is_open else "Workplace closed",
                 )
-            )
-        items.extend([
-            MenuItem(
-                label="Give Gift",
-                value="gift",
-                enabled=not gifted_today,
-                hint="Already gave a gift today" if gifted_today else "Choose a carried item",
-            ),
-            MenuItem(
-                label="Ask Rumor",
-                value="rumor",
-                enabled="rumor" in available_topics,
-                hint="Build friendship first" if "rumor" not in available_topics else "",
-            ),
-            MenuItem(
-                label="Request",
-                value="request",
-                enabled="request" in available_topics,
-                hint=request_status,
-            ),
-        ])
-        if self.is_marriageable_npc(resident):
-            court_ok, court_reason = self.can_court_town_npc(resident)
-            proposal_ok, proposal_reason = self.can_propose_to_town_npc(resident)
-            items.append(
-                MenuItem(
-                    label="Courtship",
-                    value="courtship",
-                    enabled=True,
-                    hint="Available" if court_ok else court_reason,
-                )
-            )
-            if str(getattr(self.state, "engaged_npc_id", "")) == resident_id:
-                items.append(
-                    MenuItem(
-                        label="Wedding plans",
-                        value="wedding_plans",
-                        enabled=True,
-                        hint=self.wedding_date_label(),
-                    )
-                )
-            else:
-                items.append(
-                    MenuItem(
-                        label="Propose",
-                        value="proposal",
-                        enabled=True,
-                        hint="Ready" if proposal_ok else proposal_reason,
-                    )
-                )
-        if str(getattr(self.state, "spouse_npc_id", "")) == resident_id:
-            move_ok, move_reason = self.can_invite_spouse_to_farm(resident)
-            _family_ok, family_reason = self.can_start_pregnancy_with_spouse(
-                resident
-            )
-            scene_key, scene_title = self.available_marriage_scene(resident)
-            items.extend(
-                [
-                    MenuItem(
-                        label="Household dashboard",
-                        value="household_dashboard",
-                        enabled=True,
-                        hint=self.family_weekly_priority() if hasattr(self, "family_weekly_priority") else self.family_bond_rank(),
-                    ),
-                    MenuItem(
-                        label="Move in together",
-                        value="move_spouse",
-                        enabled=move_ok,
-                        hint=move_reason,
-                    ),
-                    MenuItem(
-                        label="Marriage event",
-                        value="marriage_scene",
-                        enabled=bool(scene_key),
-                        hint=scene_title if scene_title else "none ready",
-                    ),
-                    MenuItem(
-                        label="Family memories",
-                        value="family_memories",
-                        enabled=True,
-                        hint=f"{len(self.state.family_event_log or [])} logged",
-                    ),
-                    MenuItem(
-                        label="Plan family",
-                        value="plan_family",
-                        enabled=True,
-                        hint=family_reason,
-                    ),
-                ]
-            )
-            if self.state.pregnancy_active:
-                items.append(
-                    MenuItem(
-                        label="Pregnancy check-in",
-                        value="pregnancy_checkup",
-                        enabled=True,
-                        hint=(
-                            "ready"
-                            if self.pregnancy_checkup_available()
-                            else "view"
-                        ),
-                    )
-                )
-            items.extend(
-                [
-                    MenuItem(
-                        label="Family status",
-                        value="family_status",
-                        enabled=True,
-                        hint=f"{len(self.state.children)} child(ren)",
-                    ),
-                    MenuItem(
-                        label="Family meal",
-                        value="family_meal",
-                        enabled=True,
-                        hint=self.family_meal_available()[1],
-                    ),
-                    MenuItem(
-                        label="Spouse support",
-                        value="spouse_support",
-                        enabled=self.state.spouse_moved_to_farm,
-                        hint=self.spouse_support_mode(),
-                    ),
-                    MenuItem(
-                        label="Household help",
-                        value="household_help",
-                        enabled=True,
-                        hint=(
-                            "enabled"
-                            if self.state.family_help_enabled
-                            else "disabled"
-                        ),
-                    ),
-                ]
             )
         items.extend(
             [
@@ -7084,10 +8186,12 @@ class ProceduralTownRuntimeMixin:
         )
         if property_record:
             residents = []
+        room_assignment_lines = self.procedural_town_room_assignment_lines(population, building)
         lines = [
             str(building.get("name", "Settlement Home")).upper(),
             "",
             f"Residents: {', '.join(residents) if residents else 'Unoccupied'}",
+            *(room_assignment_lines[:8] or ["Room assignments: none"]),
             (
                 f"Your residence: {property_record.get('name')}"
                 if property_record
@@ -7789,7 +8893,11 @@ class ProceduralTownRuntimeMixin:
             else None
         )
         if property_record:
-            placed = self.get_placed_object(x, y) if self.in_active_bounds(x, y) else None
+            placed_key, placed, placed_ax, placed_ay = (
+                self.placed_object_at(x, y)
+                if self.in_active_bounds(x, y)
+                else (None, None, None, None)
+            )
             if placed:
                 if placed == "Bed":
                     if self.can_sleep_at_primary_town_residence():
@@ -7805,8 +8913,19 @@ class ProceduralTownRuntimeMixin:
                     else:
                         self.use_house_furniture(placed)
                     return
-                self.use_house_furniture(placed)
+                component = ""
+                if placed_ax is not None and placed_ay is not None and hasattr(self, "object_rotation_for_key"):
+                    from ascii_farmstead_furniture import furniture_component_at
+                    component = furniture_component_at(
+                        placed,
+                        int(x) - int(placed_ax),
+                        int(y) - int(placed_ay),
+                        self.object_rotation_for_key(placed_key, placed),
+                    )
+                self.use_house_furniture(placed, component, x, y)
                 return
+        if hasattr(self, "use_catalog_furniture_action_at") and self.use_catalog_furniture_action_at(x, y):
+            return
         tile = self.procedural_town_interior_map()[y][x]
         if tile == "D":
             self.exit_procedural_town_building()
@@ -7899,7 +9018,22 @@ class ProceduralTownRuntimeMixin:
                 "A permanent display commemorates the local concern the town overcame."
             )
             return
-        self.set_message("Nothing here needs your attention.")
+        if tile == "$" and building and str(building.get("type_id", "")) in {
+            "general_store", "blacksmith", "clinic", "inn", "furniture_store",
+            "carpenter", "animal_store", "market", "market_stall", "workshop",
+        }:
+            self.procedural_town_building_service(building)
+            return
+        fixture = BUILDING_TEMPLATE_FURNISHING_DATA.get(str(tile))
+        if not isinstance(fixture, dict):
+            fixture = BUILDING_TEMPLATE_GENERIC_FIXTURE_DATA.get(str(tile))
+        if isinstance(fixture, dict) and hasattr(self, "use_functional_furniture"):
+            fixture_name = building_template_functional_furniture_name(fixture)
+            if self.use_functional_furniture(fixture_name, x, y):
+                return
+        self.set_message(
+            self.procedural_town_interior_tile_description(tile, building, x, y)
+        )
 
     def procedural_town_report_lines(
         self,

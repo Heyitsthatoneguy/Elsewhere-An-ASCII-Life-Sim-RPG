@@ -519,7 +519,7 @@ class ExcavationMixin:
             "R: suggested tool",
             "Z/Enter/Space: use",
             "H: field guide",
-            "X/Esc: leave",
+            "B/X/Esc/Tab: leave",
         )
 
     def _show_excavation_help(self, discipline: str) -> None:
@@ -599,7 +599,7 @@ class ExcavationMixin:
             if key == "h":
                 self._show_excavation_help(discipline)
                 continue
-            if key in {"x", "\x1b"}:
+            if key in {"b", "x", "\x1b", "\t"}:
                 break
             if key in MENU_CONFIRM_KEYS:
                 action = EXCAVATION_TOOLS[tool_index][0]

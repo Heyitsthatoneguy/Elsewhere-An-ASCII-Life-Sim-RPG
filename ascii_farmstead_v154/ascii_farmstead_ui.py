@@ -20,6 +20,7 @@ from ascii_farmstead_support import (
     normalize_key,
     pad_visual,
     read_key,
+    read_key_or_mouse,
 )
 from ascii_farmstead_data import (
     GUTTER_WIDTH,
@@ -301,7 +302,49 @@ def draw_menu(
         max_visible_items=max_visible_items,
     )))
 
-def menu_select(title: str, items: List[MenuItem], footer: str = "", extra_lines: Optional[List[str]] = None) -> Optional[MenuItem]:
+def menu_mouse_item_index(
+    x: int,
+    y: int,
+    title: str,
+    items: List[MenuItem],
+    extra_lines: Optional[List[str]],
+    item_offset: int,
+    max_visible_items: int,
+) -> Optional[int]:
+    """Map a console click to the item row produced by menu_render_lines."""
+    _ = title
+    available = max(24, terminal_width() - 2)
+    frame_width = max(24, min(60, available))
+    if not (0 <= int(x) < frame_width):
+        return None
+    row = 1
+    if extra_lines:
+        row += sum(
+            len(wrap_panel_row(raw, frame_width - 4))
+            for raw in extra_lines
+        )
+        row += 1
+    item_offset = max(0, min(int(item_offset), max(0, len(items) - 1)))
+    if item_offset > 0:
+        row += 1
+    visible_count = min(
+        max(1, int(max_visible_items)),
+        max(0, len(items) - item_offset),
+    )
+    relative = int(y) - row
+    if 0 <= relative < visible_count:
+        return item_offset + relative
+    return None
+
+
+def menu_select(
+    title: str,
+    items: List[MenuItem],
+    footer: str = "",
+    extra_lines: Optional[List[str]] = None,
+    *,
+    mouse_enabled: bool = False,
+) -> Optional[MenuItem]:
     """Arrow-key controlled menu. Returns selected MenuItem or None if cancelled."""
     if not items:
         return None
@@ -317,13 +360,17 @@ def menu_select(title: str, items: List[MenuItem], footer: str = "", extra_lines
     extra_height = len(wrap_panel_rows(list(extra_lines or []), 56)) if extra_lines else 0
     max_visible = max(4, min(14, terminal_height() - extra_height - 10))
     item_offset = max(0, min(selected, max(0, len(items) - max_visible)))
+    previous_left = False
+    previous_right = False
 
     while True:
         if selected < item_offset:
             item_offset = selected
         elif selected >= item_offset + max_visible:
             item_offset = selected - max_visible + 1
-        controls = "W/S or ↑/↓ move | A/D or ←/→ page | Z/Enter select | B/X/Esc/Q cancel"
+        controls = "W/S or ↑/↓ move | A/D or ←/→ page | Z/Enter select | B/X/Esc/Q/Tab cancel"
+        if mouse_enabled:
+            controls = "Click select | Wheel scroll | Right-click cancel | " + controls
         context_footer = f"{footer} | {controls}" if footer else controls
         draw_menu(
             title,
@@ -334,7 +381,37 @@ def menu_select(title: str, items: List[MenuItem], footer: str = "", extra_lines
             item_offset=item_offset,
             max_visible_items=max_visible,
         )
-        key = normalize_key(read_key())
+        event = read_key_or_mouse() if mouse_enabled else {"kind": "key", "key": read_key()}
+        if event.get("kind") == "mouse":
+            wheel = int(event.get("wheel", 0) or 0)
+            if wheel:
+                selected = (selected - wheel) % len(items)
+                previous_left = bool(event.get("left", False))
+                previous_right = bool(event.get("right", False))
+                continue
+            left = bool(event.get("left", False))
+            right = bool(event.get("right", False))
+            if right and not previous_right:
+                return None
+            if left and not previous_left:
+                clicked = menu_mouse_item_index(
+                    int(event.get("x", -1)),
+                    int(event.get("y", -1)),
+                    title,
+                    items,
+                    extra_lines,
+                    item_offset,
+                    max_visible,
+                )
+                if clicked is not None:
+                    selected = clicked
+                    if items[selected].enabled:
+                        return items[selected]
+            previous_left = left
+            previous_right = right
+            continue
+
+        key = normalize_key(str(event.get("key", "")))
 
         if key in ["\t", "\x1b", "q", "x", "b"]:
             return None
@@ -409,10 +486,10 @@ def quantity_menu(title: str, unit_label: str, unit_price: int, max_qty: int, st
         print("Left/Right or A/D: -/+ 1")
         print("Up/Down or W/S:    +/- 5")
         print("Z/Enter/Space:       Confirm")
-        print("X/Esc/Q:           Cancel")
+        print("B/X/Esc/Q/Tab:     Cancel")
 
         key = normalize_key(read_key())
-        if key in ["\t", "\x1b", "q", "x"]:
+        if key in ["\t", "\x1b", "q", "x", "b"]:
             return 0
         if key in ["a", "LEFT"]:
             qty = max(1, qty - 1)
@@ -451,9 +528,9 @@ def compact_menu_select(game, title: str, items: List[MenuItem], footer: str = "
         game.draw()
         print()
         context_footer = (
-            f"{footer} | Arrow keys/WASD move | Z/Enter select | B/X/Esc/Q cancel"
+            f"{footer} | Arrow keys/WASD move | Z/Enter select | B/X/Esc/Q/Tab cancel"
             if footer
-            else "Arrow keys/WASD move | Z/Enter select | B/X/Esc/Q cancel"
+            else "Arrow keys/WASD move | Z/Enter select | B/X/Esc/Q/Tab cancel"
         )
         print("\n".join(menu_render_lines(
             title,
@@ -496,10 +573,10 @@ def compact_quantity_menu(game, title: str, unit_label: str, unit_price: int, ma
         print(f"| Quantity:  {qty}")
         print(f"| Total:     ${qty * unit_price}")
         print("+" + "-" * 60)
-        print("Left/Right or A/D: -/+1 | Up/Down or W/S: +/-5 | Z/Enter: confirm | X/Esc/Q: cancel")
+        print("Left/Right or A/D: -/+1 | Up/Down or W/S: +/-5 | Z/Enter: confirm | B/X/Esc/Q/Tab: cancel")
 
         key = normalize_key(read_key())
-        if key in ["\t", "\x1b", "q", "x"]:
+        if key in ["\t", "\x1b", "q", "x", "b"]:
             return 0
         if key in ["a", "LEFT"]:
             qty = max(1, qty - 1)

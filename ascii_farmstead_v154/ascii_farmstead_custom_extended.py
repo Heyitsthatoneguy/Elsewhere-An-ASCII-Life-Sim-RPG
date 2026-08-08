@@ -4,6 +4,7 @@ import random
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from ascii_battle_prototype.combat.models import Pos, Unit, Weapon
+from ascii_farmstead_game_tables import GAME_TABLE_DATA
 
 
 ENEMY_ARCHETYPES: Dict[str, Dict[str, object]] = {
@@ -23,8 +24,10 @@ DUNGEON_ROOM_PATTERNS = ("Open", "Pillars", "Crossroads", "Pools", "Ruined Ring"
 BUILDING_TEMPLATE_TYPES = (
     "home",
     "general_store",
+    "market_stall",
     "inn",
     "clinic",
+    "sheriff_office",
     "library",
     "carpenter",
     "workshop",
@@ -33,8 +36,10 @@ BUILDING_TEMPLATE_TYPES = (
 BUILDING_TEMPLATE_TYPE_LABELS = {
     "home": "Home",
     "general_store": "General Store",
+    "market_stall": "Market",
     "inn": "Inn",
     "clinic": "Clinic",
+    "sheriff_office": "Sheriff Office",
     "library": "Library",
     "carpenter": "Carpenter",
     "workshop": "Workshop",
@@ -42,7 +47,13 @@ BUILDING_TEMPLATE_TYPE_LABELS = {
 }
 BUILDING_TEMPLATE_ZONE_KINDS = (
     "bedroom",
+    "primary_bedroom",
+    "guest_room",
+    "nursery",
+    "bathroom",
     "kitchen",
+    "pantry",
+    "living_room",
     "shopping_counter",
     "stockroom",
     "clinic_ward",
@@ -52,6 +63,8 @@ BUILDING_TEMPLATE_ZONE_KINDS = (
     "dining",
     "storage",
     "public_hall",
+    "private_hall",
+    "service_hall",
 )
 
 # Rendering procedural interiors asks for the same filtered template pool
@@ -63,7 +76,13 @@ _CUSTOM_BUILDING_TEMPLATE_RECORD_CACHE: Dict[
 ] = {}
 BUILDING_TEMPLATE_ZONE_LABELS = {
     "bedroom": "Bedroom",
+    "primary_bedroom": "Primary Bedroom",
+    "guest_room": "Private Guest Room",
+    "nursery": "Nursery",
+    "bathroom": "Bathroom / En Suite",
     "kitchen": "Kitchen",
+    "pantry": "Pantry",
+    "living_room": "Living Room",
     "shopping_counter": "Shopping Counter",
     "stockroom": "Stockroom",
     "clinic_ward": "Clinic Ward",
@@ -73,15 +92,267 @@ BUILDING_TEMPLATE_ZONE_LABELS = {
     "dining": "Dining/Common Room",
     "storage": "Storage",
     "public_hall": "Public Hall",
+    "private_hall": "Private Hall",
+    "service_hall": "Service Hall",
 }
 BUILDING_TEMPLATE_WIDTH = 64
 BUILDING_TEMPLATE_HEIGHT = 28
 BUILDING_TEMPLATE_MAX_FLOORS = 4
+BUILDING_TEMPLATE_FURNISHING_DATA: Dict[str, Dict[str, object]] = {
+    "H": {
+        "name": "Tall Bookcase",
+        "category": "Books & Displays",
+        "hint": "full-height book storage",
+        "description": "A tall bookcase packed with reference books, journals, and local records.",
+        "container_profile": "bookshelf",
+    },
+    "i": {
+        "name": "Low Bookshelf",
+        "category": "Books & Displays",
+        "hint": "low book storage or reading-room divider",
+        "description": "A low bookshelf arranged for easy browsing without closing off the room.",
+        "container_profile": "bookshelf",
+    },
+    "j": {
+        "name": "Wall Shelf",
+        "category": "Storage & Containers",
+        "hint": "compact general-purpose shelf",
+        "description": "A sturdy wall shelf holding small supplies and everyday objects.",
+        "container_profile": "shelf",
+    },
+    "g": {
+        "name": "Cabinet",
+        "category": "Storage & Containers",
+        "hint": "enclosed household or office storage",
+        "description": "An enclosed cabinet with labeled drawers and carefully sorted contents.",
+        "container_profile": "cabinet",
+    },
+    "W": {
+        "name": "Wall Cabinet",
+        "category": "Storage & Containers",
+        "hint": "small elevated cabinet",
+        "description": "A compact wall cabinet used for supplies that should remain close at hand.",
+        "container_profile": "wall_cabinet",
+    },
+    "y": {
+        "name": "Storage Chest",
+        "category": "Storage & Containers",
+        "hint": "large general storage container",
+        "description": "A broad storage chest reinforced for tools, supplies, and personal belongings.",
+        "container_profile": "storage_chest",
+    },
+    "z": {
+        "name": "Supply Crate",
+        "category": "Storage & Containers",
+        "hint": "stackable shipping and stock storage",
+        "description": "A marked supply crate containing bundled stock or travel provisions.",
+        "container_profile": "crate",
+    },
+    "N": {
+        "name": "Nightstand",
+        "category": "Storage & Containers",
+        "hint": "small bedside container",
+        "description": "A bedside nightstand with room for letters, keepsakes, and daily necessities.",
+        "container_profile": "nightstand",
+    },
+    "V": {
+        "name": "Display Case",
+        "category": "Books & Displays",
+        "hint": "protected merchandise or exhibit display",
+        "description": "A glass-fronted display case protecting valuable merchandise or exhibits.",
+        "container_profile": "display_case",
+    },
+    "X": {
+        "name": "Barrel",
+        "category": "Storage & Containers",
+        "hint": "bulk food, drink, or material storage",
+        "description": "A sealed barrel used for bulk provisions, drink, or workshop materials.",
+        "container_profile": "barrel",
+    },
+    "Y": {
+        "name": "Dresser",
+        "category": "Storage & Containers",
+        "hint": "bedroom clothing and linen storage",
+        "description": "A bedroom dresser with several drawers for clothing, linens, and personal effects.",
+        "container_profile": "dresser",
+    },
+    "Z": {
+        "name": "Pantry Cupboard",
+        "category": "Storage & Containers",
+        "hint": "enclosed kitchen provision storage",
+        "description": "A pantry cupboard stocked with preserved ingredients, dishes, and household provisions.",
+        "container_profile": "pantry",
+    },
+    "I": {
+        "name": "Double Bed",
+        "category": "Beds",
+        "hint": "large household bed",
+        "description": "A broad double bed intended for a permanent household bedroom.",
+    },
+    "J": {
+        "name": "Bunk Bed",
+        "category": "Beds",
+        "hint": "space-saving bed for two",
+        "description": "A sturdy bunk bed that provides two sleeping places without crowding the room.",
+    },
+    "K": {
+        "name": "Cot",
+        "category": "Beds",
+        "hint": "simple guest, clinic, or barracks bed",
+        "description": "A narrow cot suitable for a guest room, clinic ward, or temporary quarters.",
+    },
+    "O": {
+        "name": "Bench",
+        "category": "Seating",
+        "hint": "shared seating for halls or dining rooms",
+        "description": "A long wooden bench providing practical shared seating.",
+    },
+    "Q": {
+        "name": "Sofa",
+        "category": "Seating",
+        "hint": "comfortable household or common-room seating",
+        "description": "A comfortable sofa arranged for conversation and quiet evenings.",
+    },
+    "R": {
+        "name": "Armchair",
+        "category": "Seating",
+        "hint": "comfortable individual seating",
+        "description": "A deep armchair positioned for reading, conversation, or resting by the hearth.",
+    },
+}
+
+# These are the neutral meanings of editor-placeable fixtures.  Individual
+# building types may specialize them (a shelf in a clinic is medical storage,
+# for example), but no fixture should lose its identity merely because an
+# author placed it in a different kind of building.
+BUILDING_TEMPLATE_GENERIC_FIXTURE_DATA: Dict[str, Dict[str, str]] = {
+    "&": {"name": "Service Counter", "description": "A staffed counter or service point for this building.", "hint": "Z/Enter: request service"},
+    "$": {"name": "Stock Display", "description": "An organized display for stock, merchandise, or transaction materials.", "hint": "Z/Enter: inspect stock display"},
+    "+": {"name": "Clinic Supplies", "description": "A clean station holding treatment and care supplies.", "hint": "Z/Enter: inspect care supplies"},
+    "l": {"name": "Bookcase", "description": "A bookcase filled with useful reading and local records.", "hint": "Z/Enter: inspect bookcase"},
+    "w": {"name": "Workbench", "description": "A practical workbench with tools and an active project.", "hint": "Z/Enter: inspect workbench"},
+    "a": {"name": "Tool Rack", "description": "An orderly rack of tools suited to the work done here.", "hint": "Z/Enter: inspect tool rack"},
+    "x": {"name": "Materials Bench", "description": "A materials bench holding measured components and supplies.", "hint": "Z/Enter: inspect materials bench"},
+    "b": {"name": "Bed", "description": "A properly made single bed placed near the room wall.", "hint": "Z/Enter: inspect bed"},
+    "B": {"name": "Large Bed", "description": "A large, properly made bed belonging to this room.", "hint": "Z/Enter: inspect bed"},
+    "t": {"name": "Table", "description": "A practical table arranged for work, meals, or conversation.", "hint": "Z/Enter: inspect table"},
+    "T": {"name": "Large Table", "description": "A large table with room for several people or a substantial display.", "hint": "Z/Enter: inspect large table"},
+    "c": {"name": "Chair", "description": "A chair placed where someone can use the nearby room or table.", "hint": "Z/Enter: inspect chair"},
+    "C": {"name": "Large Chair", "description": "A comfortable large chair positioned for regular use.", "hint": "Z/Enter: inspect chair"},
+    "s": {"name": "Storage Shelf", "description": "A labeled shelf used for the building's everyday storage.", "hint": "Z/Enter: inspect storage shelf"},
+    "f": {"name": "Hearth", "description": "A maintained hearth providing warmth, light, or cooking heat.", "hint": "Z/Enter: inspect hearth"},
+    "P": {"name": "Records Board", "description": "A board or desk holding the records and notices used here.", "hint": "Z/Enter: inspect records"},
+    "d": {"name": "Writing Desk", "description": "A writing desk with current notes, correspondence, and work.", "hint": "Z/Enter: inspect writing desk"},
+    "p": {"name": "Planter", "description": "A cared-for planter adding a little life to the room.", "hint": "Z/Enter: inspect planter"},
+    "k": {"name": "Kitchen", "description": "A compact working kitchen used to prepare daily meals.", "hint": "Z/Enter: inspect kitchen"},
+    "m": {"name": "Supply Cabinet", "description": "A cabinet of supplies appropriate to the people who use this building.", "hint": "Z/Enter: inspect supply cabinet"},
+    "n": {"name": "Notice", "description": "A posted notice with information relevant to this building.", "hint": "Z/Enter: read notice"},
+    "r": {"name": "Rug", "description": "A woven rug defining a furnished part of the room.", "hint": "Z/Enter: inspect rug"},
+    "u": {"name": "Wardrobe", "description": "A wardrobe or enclosed utility cabinet used by the occupants.", "hint": "Z/Enter: inspect wardrobe"},
+    "v": {"name": "Produce Display", "description": "A produce display arranged for easy viewing and selection.", "hint": "Z/Enter: inspect produce display"},
+    "e": {"name": "Examination Fixture", "description": "A clean examination fixture with nearby care supplies.", "hint": "Z/Enter: inspect examination fixture"},
+    "h": {"name": "Animal Fixture", "description": "A practical fixture for feeding, housing, or caring for animals.", "hint": "Z/Enter: inspect animal fixture"},
+    "q": {"name": "Forge Fixture", "description": "A heat-resistant forge or quenching fixture used for metalwork.", "hint": "Z/Enter: inspect forge fixture"},
+    "o": {"name": "Ore Storage", "description": "Heavy storage intended for ore, coal, stone, and metalworking stock.", "hint": "Z/Enter: inspect ore storage"},
+    "A": {"name": "Display A", "description": "A deliberate display whose subject is chosen by the building's author.", "hint": "Z/Enter: inspect display"},
+    "E": {"name": "Display E", "description": "A deliberate display whose subject is chosen by the building's author.", "hint": "Z/Enter: inspect display"},
+    "F": {"name": "Display F", "description": "A deliberate display whose subject is chosen by the building's author.", "hint": "Z/Enter: inspect display"},
+    "G": {"name": "Display G", "description": "A deliberate display whose subject is chosen by the building's author.", "hint": "Z/Enter: inspect display"},
+    "L": {"name": "Lamp", "description": "A standing lamp positioned to illuminate the furnished room.", "hint": "Z/Enter: inspect lamp"},
+    "M": {"name": "Display M", "description": "A deliberate display whose subject is chosen by the building's author.", "hint": "Z/Enter: inspect display"},
+    "S": {"name": "Display S", "description": "A deliberate display whose subject is chosen by the building's author.", "hint": "Z/Enter: inspect display"},
+    "!": {"name": "Catalog or Warning", "description": "A prominent catalog, placard, or warning meant to be read.", "hint": "Z/Enter: read placard"},
+}
+
+
+# Editor/authored fixtures keep compact, building-neutral names in map data.
+# Runtime mechanics and visuals resolve them to the closest full furniture
+# record so they share the same interaction system without rewriting templates.
+BUILDING_TEMPLATE_FURNITURE_ALIASES: Dict[str, str] = {
+    "Tall Bookcase": "Bookshelf",
+    "Low Bookshelf": "Bookshelf",
+    "Bookcase": "Bookshelf",
+    "Wall Shelf": "Shelf",
+    "Cabinet": "Shelf",
+    "Wall Cabinet": "Shelf",
+    "Supply Cabinet": "Shelf",
+    "Storage Shelf": "Shelf",
+    "Storage Chest": "Keepsake Chest",
+    "Supply Crate": "Shelf",
+    "Display Case": "Display Counter",
+    "Pantry Cupboard": "Pantry",
+    "Barrel": "Pantry",
+    "Double Bed": "Bed",
+    "Bunk Bed": "Bed",
+    "Large Bed": "Bed",
+    "Cot": "Bed",
+    "Bench": "Wooden Chair",
+    "Chair": "Wooden Chair",
+    "Large Chair": "Armchair",
+    "Sofa": "Couch",
+    "Table": "Wooden Table",
+    "Large Table": "Family Table",
+    "Hearth": "Fireplace",
+    "Planter": "House Plant",
+    "Kitchen": "Kitchen Counter",
+    "Rug": "Decorative Rug",
+    "Lamp": "Standing Lamp",
+}
+
+
+def building_template_functional_furniture_name(record: object) -> str:
+    """Resolve an authored fixture record to its full furniture mechanic."""
+    if not isinstance(record, dict):
+        return "Furniture"
+    name = str(record.get("name", "Furniture") or "Furniture")
+    return BUILDING_TEMPLATE_FURNITURE_ALIASES.get(name, name)
+
+
+def building_template_fixture_catalog(building_name: object = "building") -> Dict[str, Dict[str, str]]:
+    """Return building-neutral semantics for every editor-placeable fixture."""
+    name = str(building_name or "building")
+    catalog: Dict[str, Dict[str, str]] = {
+        " ": {"desc": f"Space beyond the finished rooms of {name}.", "hint": "I: inspect building boundary"},
+        "#": {"desc": f"Load-bearing wall of {name}.", "hint": "I: inspect wall"},
+        ".": {"desc": f"Clear floor inside {name}.", "hint": "I: inspect floor"},
+        ",": {"desc": f"Woven rug or accent flooring inside {name}.", "hint": "I: inspect rug"},
+        "-": {"desc": f"Counter edge or room partition in {name}.", "hint": "Z/Enter: inspect partition"},
+        "D": {"desc": f"Exterior doorway of {name}.", "hint": "Walk into door: leave building"},
+        "|": {"desc": f"Open room door inside {name}.", "hint": "Z/Enter: close room door"},
+        "_": {"desc": f"Closed room door inside {name}.", "hint": "Z/Enter: open room door"},
+        "<": {"desc": f"Stairway leading up through {name}.", "hint": "Walk onto stairs: go up"},
+        "U": {"desc": f"Stairway leading up through {name}.", "hint": "Walk onto stairs: go up"},
+        ">": {"desc": f"Stairway leading down through {name}.", "hint": "Walk onto stairs: go down"},
+    }
+    for symbol, record in BUILDING_TEMPLATE_GENERIC_FIXTURE_DATA.items():
+        catalog[str(symbol)] = {
+            "desc": f"{record['description']} It belongs to {name}.",
+            "hint": str(record["hint"]),
+        }
+    for symbol, record in BUILDING_TEMPLATE_FURNISHING_DATA.items():
+        catalog[str(symbol)] = {
+            "desc": f"{record['description']} It belongs to {name}.",
+            "hint": (
+                f"Z/Enter: open {str(record['name']).lower()}"
+                if record.get("container_profile")
+                else f"Z/Enter: inspect {str(record['name']).lower()}"
+            ),
+        }
+    for game_id, record in GAME_TABLE_DATA.items():
+        symbol = str(record["glyph"])
+        catalog[symbol] = {
+            "desc": str(record["description"]),
+            "hint": f"Z/Enter: play {record['name']}",
+        }
+    return catalog
+
 BUILDING_TEMPLATE_ALLOWED_TILES = {
     " ", "#", "-", ".", ",", "D", "&", "$", "+", "l", "w", "x",
     "a", "b", "t", "c", "s", "f", "P", "d", "p", "<", "U", ">",
-    "|", "_",
-}
+    "|", "_", "!", "1", "2", "3", "4", "5", "6", "7", "8",
+    "A", "B", "C", "E", "F", "G", "L", "M", "S", "T",
+    "e", "h", "k", "m", "n", "o", "q", "r", "u", "v",
+} | set(BUILDING_TEMPLATE_FURNISHING_DATA)
 BUILDING_TEMPLATE_COLOR_KEYS = (
     "default",
     "white",
@@ -111,12 +382,20 @@ BUILDING_TEMPLATE_MAX_SPAWNS = 32
 BUILDING_TEMPLATE_REQUIRED_TILES = {
     "home": ("&", "b", "f"),
     "general_store": ("&", "$", "s"),
+    "market_stall": ("&", "$", "s"),
     "inn": ("&", "$", "b", "f"),
     "clinic": ("&", "+", "b"),
+    "sheriff_office": ("&", "d", "P"),
     "library": ("&", "l", "P"),
     "carpenter": ("&", "w", "a", "x"),
     "workshop": ("&", "w", "a", "x"),
     "town_hall": ("&", "d", "P"),
+}
+BUILDING_TEMPLATE_TILE_EQUIVALENTS = {
+    "b": {"b", "B", "I", "J", "K"},
+    "f": {"f", "k"},
+    "l": {"l", "L", "H", "i"},
+    "s": {"s", "j", "g", "W", "y", "z", "N", "V", "X", "Y", "Z"},
 }
 
 
@@ -679,8 +958,10 @@ def default_custom_building_template_rows(building_type: str = "home", floor_ind
         upstairs_tiles = {
             "home": [(14, 8, "b"), (18, 19, "t"), (47, 8, "P"), (48, 19, "s")],
             "general_store": [(14, 8, "s"), (47, 8, "$"), (18, 19, "d"), (48, 19, "s")],
+            "market_stall": [(14, 8, "$"), (47, 8, "s"), (18, 19, "t"), (48, 19, "P")],
             "inn": [(14, 8, "b"), (47, 8, "b"), (14, 19, "b"), (47, 19, "b")],
             "clinic": [(14, 8, "b"), (47, 8, "+"), (18, 19, "s"), (48, 19, "d")],
+            "sheriff_office": [(14, 8, "d"), (47, 8, "P"), (18, 19, "s"), (48, 19, "t")],
             "library": [(14, 8, "l"), (47, 8, "l"), (18, 19, "P"), (48, 19, "d")],
             "carpenter": [(14, 8, "w"), (47, 8, "a"), (18, 19, "x"), (48, 19, "s")],
             "workshop": [(14, 8, "w"), (47, 8, "a"), (18, 19, "x"), (48, 19, "s")],
@@ -713,8 +994,10 @@ def default_custom_building_template_rows(building_type: str = "home", floor_ind
     starter_tiles = {
         "home": [(door_x + 4, 21, "&"), (14, 8, "b"), (13, 17, "f"), (48, 8, "s")],
         "general_store": [(door_x + 4, 21, "&"), (14, 8, "$"), (48, 8, "s"), (48, 20, "$")],
+        "market_stall": [(door_x + 4, 21, "&"), (14, 8, "$"), (48, 8, "s"), (48, 20, "t")],
         "inn": [(door_x + 4, 21, "&"), (14, 8, "b"), (48, 8, "b"), (13, 17, "f"), (48, 21, "$")],
         "clinic": [(door_x + 4, 21, "&"), (14, 8, "+"), (48, 8, "b"), (48, 20, "s")],
+        "sheriff_office": [(door_x + 4, 21, "&"), (14, 8, "d"), (48, 8, "P"), (48, 20, "s")],
         "library": [(door_x + 4, 21, "&"), (14, 8, "l"), (48, 8, "l"), (31, 8, "P")],
         "carpenter": [(door_x + 4, 21, "&"), (14, 8, "w"), (48, 8, "a"), (31, 8, "x")],
         "workshop": [(door_x + 4, 21, "&"), (14, 8, "w"), (48, 8, "a"), (31, 8, "x")],
@@ -806,7 +1089,8 @@ def _place_required_custom_building_tiles(
         (30, 8), (30, 23), (18, 14), (46, 14),
     ]
     for tile in required:
-        if any(ch == tile for row in rows for ch in row):
+        equivalents = BUILDING_TEMPLATE_TILE_EQUIVALENTS.get(tile, {tile})
+        if any(ch in equivalents for row in rows for ch in row):
             continue
         placed = False
         for x, y in preferred + floor_positions:
@@ -960,10 +1244,12 @@ def sanitize_custom_building_template(raw: object) -> Optional[Dict[str, object]
         {"floor": floor, "x": x, "y": y, "color": color}
         for (floor, x, y), color in sorted(color_map.items())
     ]
-    for floor_index, floor in enumerate(floors):
-        rows = floor.get("rows")
-        if isinstance(rows, list):
-            _place_required_custom_building_tiles(rows, building_type, zones, floor_index)
+    manual_layout = bool(raw.get("manual_layout", False))
+    if not manual_layout:
+        for floor_index, floor in enumerate(floors):
+            rows = floor.get("rows")
+            if isinstance(rows, list):
+                _place_required_custom_building_tiles(rows, building_type, zones, floor_index)
     _ensure_custom_building_floor_stairs(floors)
     floor_records = [
         {
@@ -973,18 +1259,25 @@ def sanitize_custom_building_template(raw: object) -> Optional[Dict[str, object]
         for floor in floors
     ]
     rows = list(floor_records[0]["rows"])
-    return {
+    template = {
         "name": name,
         "description": _clean_text(raw.get("description"), 220) or "A custom procedural-town building template.",
         "building_type": building_type,
         "max_occupancy": _clean_int(raw.get("max_occupancy"), 4 if building_type == "home" else 0, 0, 24),
+        "generation_weight": _clean_int(raw.get("generation_weight"), 5, 1, 10),
         "enabled": bool(raw.get("enabled", True)),
+        "manual_layout": manual_layout,
         "rows": rows,
         "floors": floor_records,
         "zones": zones,
         "spawns": spawns,
         "colors": colors,
     }
+    builtin_preset_id = _clean_text(raw.get("builtin_preset_id"), 96)
+    if builtin_preset_id:
+        template["builtin_preset_id"] = builtin_preset_id
+        template["overrides_builtin"] = bool(raw.get("overrides_builtin", False))
+    return template
 
 
 def custom_building_template_summary(record: Dict[str, object]) -> List[str]:
@@ -1008,6 +1301,7 @@ def custom_building_template_summary(record: Dict[str, object]) -> List[str]:
         (
             f"Type: {BUILDING_TEMPLATE_TYPE_LABELS.get(str(template['building_type']), template['building_type'])} | "
             f"Max occupancy: {template['max_occupancy']} | "
+            f"Pool weight: {template['generation_weight']}/10 | "
             f"Status: {'enabled' if template['enabled'] else 'disabled'}"
         ),
         (
@@ -1023,7 +1317,11 @@ def custom_building_template_summary(record: Dict[str, object]) -> List[str]:
         "Ground floor preview:",
         *template["rows"],
         "",
-        "Enabled templates join the procedural pool for their building type. Stairs: < up, > down.",
+        (
+            "This saved edit replaces one exact built-in game map. Stairs: < up, > down."
+            if template.get("overrides_builtin")
+            else "Enabled templates join the procedural pool for their building type. Stairs: < up, > down."
+        ),
     ]
 
 
@@ -1036,7 +1334,11 @@ def custom_building_template_signature(record: Dict[str, object]) -> str:
         str(template["name"]),
         str(template["building_type"]),
         str(template["max_occupancy"]),
+        str(template["generation_weight"]),
         str(template["enabled"]),
+        str(template.get("manual_layout", False)),
+        str(template.get("builtin_preset_id", "")),
+        str(template.get("overrides_builtin", False)),
         *[
             f"F{index}:{floor.get('name', '')}:{row}"
             for index, floor in enumerate(template.get("floors", []) or [])
@@ -1082,6 +1384,10 @@ def custom_building_template_records(
         template = sanitize_custom_building_template(raw)
         if template is None:
             continue
+        # Built-in overrides replace one exact authored/procedural layout.
+        # They are not additional entries in the ordinary custom-template pool.
+        if template.get("overrides_builtin"):
+            continue
         if building_type and str(template["building_type"]) != str(building_type):
             continue
         if enabled_only and not template["enabled"]:
@@ -1093,6 +1399,25 @@ def custom_building_template_records(
         _CUSTOM_BUILDING_TEMPLATE_RECORD_CACHE.clear()
     _CUSTOM_BUILDING_TEMPLATE_RECORD_CACHE[cache_key] = tuple(templates)
     return list(templates)
+
+
+def custom_building_template_override(preset_id: str) -> Optional[Dict[str, object]]:
+    """Return the saved replacement for one exact built-in layout, if any."""
+    from ascii_farmstead_custom_content import load_custom_content
+
+    wanted = str(preset_id or "").strip()
+    if not wanted:
+        return None
+    content, _warnings = load_custom_content()
+    for raw in reversed(content.get("building_templates", [])):
+        template = sanitize_custom_building_template(raw)
+        if (
+            template is not None
+            and template.get("overrides_builtin")
+            and str(template.get("builtin_preset_id", "")) == wanted
+        ):
+            return template
+    return None
 
 
 def stamp_custom_building_template(template: Dict[str, object], floor: int = 0) -> Optional[List[List[str]]]:

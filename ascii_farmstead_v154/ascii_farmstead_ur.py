@@ -316,7 +316,7 @@ class UrMixin:
             "- Friendly, Practiced, and Expert opponents make increasingly careful choices.",
             "- Free games are available. Wagered wins earn 1x, 1.5x, or 2x profit by difficulty; draws are impossible.",
             "- R or confirm rolls. W/S, A/D, or arrows choose a move; number keys jump to listed legal moves.",
-            "- Confirm moves. X/Escape/Q pauses with the current roll saved.",
+            "- Confirm moves. B/X/Escape/Q/Tab pauses with the current roll saved.",
         ]
 
     def ur_stats_lines(self) -> List[str]:
@@ -404,7 +404,7 @@ class UrMixin:
             "1-7: jump to option",
             "Z/Enter/Space: move",
             "H: rules",
-            "X/Esc/Q: pause",
+            "B/X/Esc/Q/Tab: pause",
         )
 
     def _ur_rng(self, match: Dict[str, object]) -> random.Random:
@@ -496,7 +496,7 @@ class UrMixin:
             selected = min(selected, max(0, len(legal) - 1))
             self._draw_ur_board(match, legal, selected)
             key = normalize_key(read_key())
-            if key in {"x", "\x1b", "q"}:
+            if key in {"b", "x", "\x1b", "q", "\t"}:
                 self.pause_ur_match()
                 return
             if key == "h":
