@@ -19303,7 +19303,9 @@ def main() -> int:
         override_directory = Path(temp_dir) / "custom_elsewhere_data"
         os.environ["ELSEWHERE_DATA_DIR"] = str(override_directory)
         try:
-            assert support.get_game_data_directory() == override_directory
+            # Windows runners may expose the temporary directory through an
+            # alias whose canonical path differs from its original spelling.
+            assert support.get_game_data_directory() == override_directory.resolve()
         finally:
             if original_data_override is None:
                 os.environ.pop("ELSEWHERE_DATA_DIR", None)
