@@ -1,0 +1,780 @@
+"""Physical, useful wilderness landmark sites."""
+
+from __future__ import annotations
+
+import random
+from typing import Dict, List, Tuple
+
+from ascii_farmstead_data import MENU_BACK
+from ascii_farmstead_inventory import add_inventory_items, format_drops
+
+
+class WildernessLandmarkMixin:
+    """Multi-tile landmark construction and action-led interactions."""
+
+    LANDMARK_PROTECTED = {"S", "V", "X", "!", "A", "E", "q", "k", "h", ":", "="}
+
+    def _landmark_set(
+        self, grid: List[List[str]], x: int, y: int, tile: str,
+        preserve_water: bool = True, overwrite_route: bool = False,
+    ) -> None:
+        if not grid or not (1 <= y < len(grid) - 1 and 1 <= x < len(grid[0]) - 1):
+            return
+        old = grid[y][x]
+        if old in self.LANDMARK_PROTECTED and not (overwrite_route and old == ":"):
+            return
+        if preserve_water and old in {"~", "="}:
+            return
+        grid[y][x] = tile
+
+    def _landmark_clear(self, grid: List[List[str]], cx: int, cy: int, rx: int, ry: int, floor: str = ".") -> None:
+        # A landmark reclaims its own footprint, including plain water. Leaving
+        # river cells in place made `_landmark_set` silently refuse to draw the
+        # structure's walls there, punching holes in finished boundaries.
+        # Bridges and route tiles stay protected via LANDMARK_PROTECTED.
+        for y in range(max(1, cy - ry), min(len(grid) - 1, cy + ry + 1)):
+            for x in range(max(1, cx - rx), min(len(grid[0]) - 1, cx + rx + 1)):
+                if grid[y][x] not in self.LANDMARK_PROTECTED:
+                    grid[y][x] = floor
+
+    def choose_wilderness_landmark_center(
+        self, grid: List[List[str]], preferred_x: int, preferred_y: int
+    ) -> Tuple[int, int]:
+        """Move a planned site locally onto a dry footprint without changing its chunk identity."""
+        if not grid:
+            return int(preferred_x), int(preferred_y)
+        h, w = len(grid), len(grid[0])
+        candidates = []
+        for y in range(max(6, int(preferred_y) - 11), min(h - 6, int(preferred_y) + 12), 2):
+            for x in range(max(9, int(preferred_x) - 15), min(w - 9, int(preferred_x) + 16), 2):
+                if grid[y][x] in self.LANDMARK_PROTECTED | {"~", "#"}:
+                    continue
+                footprint = [
+                    grid[yy][xx]
+                    for yy in range(y - 4, y + 5)
+                    for xx in range(x - 8, x + 9)
+                ]
+                dry = sum(tile not in {"~", "="} for tile in footprint)
+                conflicts = sum(tile in self.LANDMARK_PROTECTED for tile in footprint)
+                distance = abs(x - int(preferred_x)) + abs(y - int(preferred_y))
+                candidates.append((dry * 3 - conflicts * 12 - distance, x, y))
+        if not candidates:
+            return max(9, min(w - 10, int(preferred_x))), max(6, min(h - 7, int(preferred_y)))
+        _score, x, y = max(candidates)
+        return x, y
+
+    def stamp_wilderness_landmark_site(
+        self, grid: List[List[str]], cx: int, cy: int, type_id: str, rng: random.Random
+    ) -> None:
+        """Build a complete outdoor site around one functional anchor."""
+        if not grid:
+            return
+        h, w = len(grid), len(grid[0])
+        cx, cy = max(9, min(w - 10, int(cx))), max(6, min(h - 7, int(cy)))
+
+        if type_id == "ranger_camp":
+            self._landmark_clear(grid, cx, cy, 8, 5)
+            for tent_x in (cx - 5, cx + 3):
+                for x in range(tent_x - 2, tent_x + 3):
+                    self._landmark_set(grid, x, cy - 3, "#")
+                for y in range(cy - 3, cy + 1):
+                    self._landmark_set(grid, tent_x - 2, y, "#")
+                    self._landmark_set(grid, tent_x + 2, y, "#")
+                self._landmark_set(grid, tent_x, cy, ".")
+            self._landmark_set(grid, cx, cy + 1, "H")
+            self._landmark_set(grid, cx + 3, cy + 2, "B")
+            self._landmark_set(grid, cx - 2, cy + 2, "R", overwrite_route=True)
+        elif type_id == "stone_ruin":
+            self._landmark_clear(grid, cx, cy, 9, 5, ",")
+            for x in range(cx - 7, cx + 8):
+                if x not in {cx - 1, cx, cx + 1}:
+                    self._landmark_set(grid, x, cy - 4, "#")
+                if x not in {cx, cx + 1}:
+                    self._landmark_set(grid, x, cy + 4, "#")
+            for y in range(cy - 4, cy + 5):
+                if y not in {cy - 1, cy, cy + 1}:
+                    self._landmark_set(grid, cx - 7, y, "#")
+                    self._landmark_set(grid, cx + 7, y, "#")
+            for dx, dy in ((-4, -2), (4, -2), (-4, 2), (4, 2), (0, -2)):
+                self._landmark_set(grid, cx + dx, cy + dy, "J")
+            self._landmark_set(grid, cx, cy, "P", overwrite_route=True)
+        elif type_id == "trail_shelter":
+            self._landmark_clear(grid, cx, cy, 7, 5)
+            for x in range(cx - 5, cx + 6):
+                self._landmark_set(grid, x, cy - 3, "#")
+                self._landmark_set(grid, x, cy + 2, "#")
+            for y in range(cy - 3, cy + 3):
+                self._landmark_set(grid, cx - 5, y, "#")
+                self._landmark_set(grid, cx + 5, y, "#")
+            self._landmark_set(grid, cx, cy + 2, ".")
+            self._landmark_set(grid, cx - 3, cy, "H")
+            self._landmark_set(grid, cx + 3, cy, "B")
+            self._landmark_set(grid, cx + 5, cy + 3, "Q", overwrite_route=True)
+        elif type_id == "overlook":
+            self._landmark_clear(grid, cx, cy, 8, 5)
+            for y in range(cy - 3, cy + 2):
+                for x in range(cx - 6, cx + 7):
+                    self._landmark_set(grid, x, y, ",")
+            for x in range(cx - 6, cx + 7):
+                self._landmark_set(grid, x, cy - 3, "#")
+            for y in range(cy - 3, cy + 2):
+                self._landmark_set(grid, cx - 6, y, "#")
+                self._landmark_set(grid, cx + 6, y, "#")
+            self._landmark_set(grid, cx, cy - 1, "K", overwrite_route=True)
+        elif type_id == "old_quarry":
+            self._landmark_clear(grid, cx, cy, 9, 5, "x")
+            for radius in (8, 6, 4):
+                for x in range(cx - radius, cx + radius + 1):
+                    if rng.random() < 0.72:
+                        self._landmark_set(grid, x, cy - max(2, radius // 2), "#")
+            for dx, dy in ((-5, 1), (4, -1), (6, 2), (-2, -2)):
+                self._landmark_set(grid, cx + dx, cy + dy, "M")
+            self._landmark_set(grid, cx, cy, "?", overwrite_route=True)
+        elif type_id in {"spring_garden", "fungal_garden"}:
+            floor = ";" if type_id == "spring_garden" else "l"
+            crop = "Y" if type_id == "spring_garden" else "u"
+            self._landmark_clear(grid, cx, cy, 9, 5, floor)
+            for x in range(cx - 8, cx + 9):
+                if x not in {cx, cx + 1}:
+                    self._landmark_set(grid, x, cy - 4, "#")
+                    self._landmark_set(grid, x, cy + 4, "#")
+            for y in range(cy - 4, cy + 5):
+                self._landmark_set(grid, cx - 8, y, "#")
+                self._landmark_set(grid, cx + 8, y, "#")
+            for y in (cy - 2, cy, cy + 2):
+                for x in range(cx - 6, cx + 7, 3):
+                    if (x, y) != (cx, cy):
+                        self._landmark_set(grid, x, y, crop)
+            self._landmark_set(grid, cx + 5, cy, "~", preserve_water=False)
+            self._landmark_set(grid, cx, cy, "?", overwrite_route=True)
+        else:
+            self._landmark_clear(grid, cx, cy, 8, 5)
+            for dx, dy in ((-5, 0), (5, 0), (0, -3), (-4, -2), (4, -2), (-4, 2), (4, 2)):
+                self._landmark_set(grid, cx + dx, cy + dy, "#")
+            for x in range(cx - 7, cx + 8):
+                self._landmark_set(grid, x, cy, ":")
+            for y in range(cy - 4, cy + 6):
+                self._landmark_set(grid, cx, y, ":")
+            self._landmark_set(grid, cx, cy, "?", overwrite_route=True)
+
+        for y in range(cy + 3, min(h - 1, cy + 7)):
+            self._landmark_set(grid, cx, y, ":")
+
+    def stamp_wilderness_field_station(self, grid: List[List[str]], x: int, y: int, biome: str) -> None:
+        """Retired compatibility hook for old naturalist field-site generation."""
+        return
+
+        """Turn a field marker into a working survey compound."""
+        floor = biome if biome not in {"~", "="} else "."
+        self._landmark_clear(grid, x, y, 8, 5, floor)
+        # A roofed records bay makes the station read as infrastructure rather
+        # than a letter placed in open terrain.  The south opening stays clear.
+        for xx in range(x - 6, x + 2):
+            self._landmark_set(grid, xx, y - 4, "#")
+            if xx not in {x - 3, x - 2}:
+                self._landmark_set(grid, xx, y, "#")
+        for yy in range(y - 4, y + 1):
+            self._landmark_set(grid, x - 6, yy, "#")
+            self._landmark_set(grid, x + 1, yy, "#")
+        self._landmark_set(grid, x - 5, y - 2, "B")
+        self._landmark_set(grid, x - 3, y - 2, "H")
+        # Three clearly separated survey beds occupy the open work yard.
+        for plot_x in (x + 3, x + 6):
+            for yy in range(y - 3, y + 3):
+                self._landmark_set(grid, plot_x, yy, ",")
+        self._landmark_set(grid, x, y, "E", overwrite_route=True)
+        for yy in range(y + 1, min(len(grid) - 1, y + 7)):
+            self._landmark_set(grid, x, yy, ":")
+
+    def wilderness_minor_landmark_profile(self, chunk_x: int, chunk_y: int) -> Dict[str, str]:
+        """Return a biome-specific practical identity for a planned minor site."""
+        wx, wy = self.wilderness_world_coords(int(chunk_x), int(chunk_y), 43, 19)
+        biome_id = str(self.wilderness_world_biome_id(wx, wy))
+        options = {
+            "meadow": ("spring_garden", "overlook", "waystone"),
+            "prairie": ("ranger_camp", "overlook", "waystone"),
+            "moorland": ("trail_shelter", "stone_ruin", "waystone"),
+            "birch_grove": ("ranger_camp", "spring_garden", "trail_shelter"),
+            "pine_forest": ("ranger_camp", "trail_shelter", "old_quarry"),
+            "old_growth": ("fungal_garden", "stone_ruin", "trail_shelter"),
+            "bog": ("fungal_garden", "trail_shelter", "overlook"),
+            "floodplain": ("spring_garden", "overlook", "stone_ruin"),
+            "oasis": ("spring_garden", "trail_shelter", "waystone"),
+            "alpine_meadow": ("overlook", "old_quarry", "trail_shelter"),
+            "rocky_valley": ("old_quarry", "stone_ruin", "overlook"),
+            "scrubland": ("waystone", "old_quarry", "trail_shelter"),
+            "dune_desert": ("waystone", "stone_ruin", "trail_shelter"),
+            "badlands": ("old_quarry", "stone_ruin", "overlook"),
+            "taiga": ("trail_shelter", "ranger_camp", "overlook"),
+            "glacier": ("trail_shelter", "overlook", "waystone"),
+            "tidal_flat": ("overlook", "trail_shelter", "stone_ruin"),
+            "mangrove": ("trail_shelter", "overlook", "fungal_garden"),
+            "tropical_isle": ("spring_garden", "stone_ruin", "overlook"),
+        }.get(biome_id, ("waystone", "trail_shelter", "overlook"))
+        index = int(self.wilderness_hash01(int(chunk_x), int(chunk_y), 88321) * len(options)) % len(options)
+        kind = str(options[index])
+        region = str(self.wilderness_region_profile(int(chunk_x), int(chunk_y)).get("name", "Wilderness"))
+        suffix = {
+            "ranger_camp": "Ranger Camp", "stone_ruin": "Old Route Ruin",
+            "trail_shelter": "Trail Shelter", "overlook": "Overlook",
+            "old_quarry": "Old Quarry", "spring_garden": "Spring Garden",
+            "fungal_garden": "Fungal Garden", "waystone": "Route Marker Crossroads",
+        }.get(kind, "Landmark")
+        return {"kind": kind, "name": f"{region} {suffix}", "biome_id": biome_id}
+
+    def wilderness_minor_landmark_name(self, kind: str) -> str:
+        """Use a stable regional name for planned sites and a legacy-safe fallback."""
+        fallbacks = {
+            "ranger_camp": "Ranger Camp", "stone_ruin": "Old Route Ruin",
+            "trail_shelter": "Wilderness Shelter", "overlook": "Wilderness Overlook",
+            "old_quarry": "Old Quarry", "spring_garden": "Abandoned Spring Garden",
+            "fungal_garden": "Sheltered Fungal Garden", "waystone": "Route Marker Crossroads",
+        }
+        cx, cy = int(self.state.wilderness_chunk_x), int(self.state.wilderness_chunk_y)
+        if self.wilderness_uses_overhaul_generation() and self.wilderness_chunk_has_region_site(cx, cy, "minor"):
+            profile = self.wilderness_minor_landmark_profile(cx, cy)
+            if str(profile.get("kind", "")) == str(kind):
+                return str(profile.get("name", fallbacks.get(str(kind), "Wilderness Landmark")))
+        return fallbacks.get(str(kind), "Wilderness Landmark")
+
+    def stamp_wilderness_vitality_site(
+        self, grid: List[List[str]], x: int, y: int, kind: str, symbol: str
+    ) -> None:
+        """Retired compatibility hook for old region-wide vitality facilities."""
+        return
+
+        x = max(8, min(len(grid[0]) - 9, int(x)))
+        y = max(6, min(len(grid) - 7, int(y)))
+        self._landmark_clear(grid, x, y, 7, 5)
+        if kind == "refuge":
+            for xx in range(x - 6, x + 7):
+                if xx not in {x, x + 1}:
+                    self._landmark_set(grid, xx, y - 4, "#")
+                    self._landmark_set(grid, xx, y + 3, "#")
+            for yy in range(y - 4, y + 4):
+                self._landmark_set(grid, x - 6, yy, "#")
+                self._landmark_set(grid, x + 6, yy, "#")
+            for dx, dy in ((-3, -1), (-2, -1), (3, 1), (4, 1)):
+                self._landmark_set(grid, x + dx, y + dy, "~", preserve_water=False)
+        elif kind == "staffed_site":
+            for xx in range(x - 5, x + 6):
+                self._landmark_set(grid, xx, y - 3, "#")
+            for yy in range(y - 3, y + 2):
+                self._landmark_set(grid, x - 5, yy, "#")
+            self._landmark_set(grid, x + 4, y - 1, "B")
+            self._landmark_set(grid, x - 2, y + 2, "H")
+        else:
+            for xx in range(x - 5, x + 6):
+                self._landmark_set(grid, xx, y - 3, "#")
+            self._landmark_set(grid, x - 5, y - 2, "#")
+            self._landmark_set(grid, x + 5, y - 2, "#")
+            self._landmark_set(grid, x - 3, y + 1, "H")
+            self._landmark_set(grid, x + 3, y + 1, "B")
+        self._landmark_set(grid, x, y, symbol, overwrite_route=True)
+        for yy in range(y + 3, min(len(grid) - 1, y + 7)):
+            self._landmark_set(grid, x, yy, ":")
+
+    def stamp_wilderness_landscape_facilities(
+        self, grid: List[List[str]], cx: int, cy: int, kind: str, marker: Tuple[int, int]
+    ) -> None:
+        """Add purpose-built paths and facilities to a broad natural formation."""
+        mx, my = marker
+        if kind in {"large_lake", "floodplain", "archipelago"}:
+            for x in range(max(2, cx - 10), min(len(grid[0]) - 2, cx + 11)):
+                if grid[cy][x] == "~":
+                    grid[cy][x] = "="
+            self._landmark_set(grid, max(2, min(len(grid[0]) - 3, cx + 8)), cy, "k", preserve_water=False)
+        elif kind == "waterfall":
+            for x in range(cx - 5, cx + 6):
+                self._landmark_set(grid, x, cy + 3, "=")
+            self._landmark_set(grid, cx + 6, cy - 2, "K")
+        elif kind == "hot_springs":
+            for dx, dy in ((-5, -2), (-4, -2), (-5, -1), (4, 2), (5, 2), (5, 1)):
+                self._landmark_set(grid, cx + dx, cy + dy, "~", preserve_water=False)
+            self._landmark_set(grid, cx - 8, cy + 2, "Q")
+            self._landmark_set(grid, cx - 5, cy + 3, "H")
+        elif kind in {"ravine", "rocky_valley", "snowy_highlands"}:
+            for offset in range(-10, 11):
+                self._landmark_set(grid, cx + offset, cy + (abs(offset) // 4) - 2, ":")
+            self._landmark_set(grid, cx + 8, cy - 3, "K")
+        elif kind in {"pine_forest", "birch_grove"}:
+            for x in range(cx - 9, cx + 10):
+                self._landmark_set(grid, x, cy - 3, ":")
+                self._landmark_set(grid, x, cy + 3, ":")
+            for y in range(cy - 3, cy + 4):
+                self._landmark_set(grid, cx - 9, y, ":")
+                self._landmark_set(grid, cx + 9, y, ":")
+        else:
+            for x in range(cx - 9, cx + 10):
+                self._landmark_set(grid, x, cy, ":")
+            for y in range(cy - 4, cy + 5):
+                self._landmark_set(grid, cx, y, ":")
+        self._landmark_set(grid, mx, my, "j", preserve_water=False, overwrite_route=True)
+
+    def wilderness_landmark_kind_at(self, x: int, y: int) -> str:
+        grid = self.active_map()
+        nearby = {
+            grid[yy][xx]
+            for yy in range(max(0, int(y) - 6), min(len(grid), int(y) + 7))
+            for xx in range(max(0, int(x) - 9), min(len(grid[0]), int(x) + 10))
+        }
+        if "R" in nearby: return "ranger_camp"
+        if "P" in nearby or "J" in nearby: return "stone_ruin"
+        if "K" in nearby: return "overlook"
+        if "Q" in nearby: return "trail_shelter"
+        if "M" in nearby: return "old_quarry"
+        if "u" in nearby: return "fungal_garden"
+        if "Y" in nearby or "G" in nearby: return "spring_garden"
+        return "waystone"
+
+    def _nearest_landmark_symbol(self, x: int, y: int, symbol: str) -> Tuple[int, int]:
+        grid = self.active_map()
+        candidates = [
+            (abs(xx - int(x)) + abs(yy - int(y)), xx, yy)
+            for yy in range(max(0, int(y) - 7), min(len(grid), int(y) + 8))
+            for xx in range(max(0, int(x) - 10), min(len(grid[0]), int(x) + 11))
+            if grid[yy][xx] == symbol
+        ]
+        best = min(candidates) if candidates else (0, int(x), int(y))
+        return best[1], best[2]
+
+    def map_nearby_wilderness_chunks(self, radius: int = 1) -> int:
+        """Reveal nearby coordinates without generating or visiting terrain."""
+        cx, cy = int(self.state.wilderness_chunk_x), int(self.state.wilderness_chunk_y)
+        added = 0
+        for ty in range(cy - int(radius), cy + int(radius) + 1):
+            for tx in range(cx - int(radius), cx + int(radius) + 1):
+                mapped = self.wilderness_region_record(tx, ty).setdefault("mapped_chunks", [])
+                key = f"{tx},{ty}"
+                if key not in mapped:
+                    mapped.append(key)
+                    added += 1
+        return added
+
+    def work_wilderness_minor_landmark(self, x: int, y: int, kind: str) -> bool:
+        record = self.wilderness_poi_record(x, y, f"landmark_{kind}")
+        week = self.stronghold_cache_week_key()
+        if record.get("work_week") == week:
+            self.set_message("This landmark's useful work is already complete for the week.")
+            return False
+        if kind == "old_quarry":
+            if not self.owns_tool("Pickaxe"):
+                self.set_message("You need a Pickaxe to work the old quarry safely.")
+                return False
+            if not self.spend_stamina(7): return False
+            rng = self.wilderness_poi_rng(x, y, kind, 55001 + int(self.state.year) * 53 + int(self.state.day))
+            drops = {"Stone": rng.randint(4, 7), "Coal": rng.randint(1, 2)}
+            if rng.random() < 0.45: drops["Copper Ore"] = 1
+            minutes, message = 55, "Worked the quarry's accessible seam"
+        elif kind in {"spring_garden", "fungal_garden"}:
+            if not self.spend_stamina(4): return False
+            if kind == "fungal_garden":
+                drops = {"Mushrooms": 2, "Fiber": 1}
+                if self.state.season == "Spring": drops["Morel"] = 1
+            else:
+                seasonal = {"Spring": "Salmonberry", "Summer": "Wild Herbs", "Fall": "Blackberry", "Winter": "Winter Root"}.get(str(self.state.season), "Wild Herbs")
+                drops = {seasonal: 2, "Mixed Seeds": 1}
+            minutes, message = 40, "Tended the abandoned growing beds"
+        else:
+            if not self.spend_stamina(3): return False
+            mapped, drops = self.map_nearby_wilderness_chunks(1), {}
+            minutes, message = 25, f"Repaired the route markers and charted {mapped} nearby area(s)"
+        if drops: add_inventory_items(self.state.inventory, drops)
+        self.advance_time(minutes)
+        record["work_week"] = week
+        reward = f": {format_drops(drops)}" if drops else "."
+        if hasattr(self, "play_world_event_scene"):
+            title = {
+                "old_quarry": "Working the Old Quarry",
+                "spring_garden": "Restoring the Spring Garden",
+                "fungal_garden": "Tending the Fungal Garden",
+                "waystone": "Repairing the Route Markers",
+            }.get(kind, "Landmark Work")
+            consequence = (
+                f"The useful material remains in your pack: {format_drops(drops)}. The landmark remains available for future visits."
+                if drops else
+                "The repaired markers reveal nearby geography and make this crossroads useful to future travelers."
+            )
+            self.play_world_event_scene(
+                f"landmark_work:{self.state.wilderness_chunk_x}:{self.state.wilderness_chunk_y}:{x}:{y}:{kind}:{week}",
+                title,
+                [
+                    {"type": "narration", "text": f"You work directly within the {kind.replace('_', ' ')} while its paths, walls, and surrounding terrain remain visible."},
+                    {"type": "narration", "text": f"{message} over {minutes} minutes. Tool use and stamina determine the work instead of a flavor-text result."},
+                    {"type": "narration", "text": consequence},
+                ],
+                f"{message}{reward}",
+            )
+        self.autosave_with_message(f"{message}{reward}")
+        return True
+
+    def open_wilderness_minor_landmark(self, x: int, y: int) -> None:
+        kind = self.wilderness_landmark_kind_at(x, y)
+        redirects = {
+            "ranger_camp": ("R", self.show_wilderness_ranger_camp),
+            "stone_ruin": ("P", self.open_wilderness_ruin_site),
+            "overlook": ("K", self.open_wilderness_overlook_site),
+            "trail_shelter": ("Q", self.show_wilderness_shelter_menu),
+        }
+        if kind in redirects:
+            symbol, callback = redirects[kind]
+            callback(*self._nearest_landmark_symbol(x, y, symbol))
+            return
+        labels = {"old_quarry": "Work the accessible seam", "spring_garden": "Tend the growing beds", "fungal_garden": "Tend the fungal beds", "waystone": "Repair markers and chart trails"}
+        items = [self._wilderness_menu_item("work", labels.get(kind, "Use landmark"), "A concrete weekly activity tied to this place.")]
+        if kind == "old_quarry":
+            items.append(self._wilderness_menu_item(
+                "fossils",
+                "Survey the fossil layers",
+                "Open a persistent paleontology dig in the quarry wall.",
+            ))
+        choice = self.vertical_panel_select(
+            self.wilderness_minor_landmark_name(kind),
+            items,
+            48, 18, return_back=True,
+        )
+        if not choice or choice.value == MENU_BACK:
+            return
+        if choice.value == "work":
+            self.work_wilderness_minor_landmark(x, y, kind)
+        elif choice.value == "fossils":
+            self.launch_excavation_minigame("paleontology", x, y, "old_quarry")
+
+    def excavate_wilderness_ruin(self, x: int, y: int) -> bool:
+        changed = self.launch_excavation_minigame("archaeology", x, y, "route_ruin")
+        if changed:
+            record = self.wilderness_poi_record(x, y, "ruin")
+            record["excavations"] = int(record.get("excavations", 0)) + 1
+        return changed
+
+    def restore_wilderness_ruin(self, x: int, y: int) -> bool:
+        record = self.wilderness_poi_record(x, y, "ruin")
+        if record.get("restored"):
+            self.set_message("The ruin's courtyard and route stones are already restored.")
+            return False
+        if not self.owns_tool("Hammer"):
+            self.set_message("Restoring this route ruin needs a Hammer from the Carpenter. Face the ruin with it selected and press F.")
+            return False
+        materials = {"Stone": 10, "Wood": 4}
+        missing = {item: qty - int(self.state.inventory.get(item, 0)) for item, qty in materials.items() if int(self.state.inventory.get(item, 0)) < qty}
+        if missing:
+            self.set_message(f"Restoration needs {format_drops(missing)}.")
+            return False
+        for item, qty in materials.items(): self.state.inventory[item] -= qty
+        record["restored"] = True
+        self.advance_time(120)
+        grid = self.active_map()
+        for yy in range(max(1, y - 4), min(len(grid) - 1, y + 5)):
+            for xx in range(max(1, x - 7), min(len(grid[0]) - 1, x + 8)):
+                if grid[yy][xx] == "J": grid[yy][xx] = "#"
+        if hasattr(self, "play_world_event_scene"):
+            self.play_world_event_scene(
+                f"ruin_restored:{self.state.wilderness_chunk_x}:{self.state.wilderness_chunk_y}:{x}:{y}",
+                "The Old Route Reopens",
+                [
+                    {"type": "narration", "text": "Loose stone becomes a stable courtyard again. New timber braces the route marker without disguising the age of the ruin."},
+                    {"type": "narration", "text": "The blocked route glyphs physically change into a usable stone path, making the restoration visible after the scene ends."},
+                    {"type": "dialogue", "speaker": "Traveler's Inscription", "text": "A road survives when the next person can understand where it leads."},
+                ],
+                "Restored the ruin's courtyard and reopened its route marker.",
+            )
+        self.autosave_with_message("Restored the ruin's courtyard and reopened its old route marker.")
+        return True
+
+    def open_wilderness_ruin_site(self, x: int, y: int) -> None:
+        record = self.wilderness_poi_record(x, y, "ruin")
+        items = [self._wilderness_menu_item("excavate", "Excavate a safe section", "Weekly salvage and archaeology work.")]
+        if record.get("restored"):
+            items.append(self._wilderness_menu_item("route", "Use restored route marker", "Chart the surrounding wilderness."))
+        else:
+            items.append(self._wilderness_menu_item("restore", "Restore with Hammer - 10 Stone, 4 Wood", "Face the route ruin and press F; this row remains as a fallback."))
+        choice = self.vertical_panel_select(self.wilderness_minor_landmark_name("stone_ruin"), items, 48, 18, return_back=True)
+        if not choice or choice.value == MENU_BACK: return
+        if choice.value == "excavate": self.excavate_wilderness_ruin(x, y)
+        elif choice.value == "restore": self.restore_wilderness_ruin(x, y)
+        elif choice.value == "route":
+            added = self.map_nearby_wilderness_chunks(2)
+            self.advance_time(20)
+            if hasattr(self, "play_world_event_scene"):
+                self.play_world_event_scene(
+                    f"restored_route_chart:{self.state.wilderness_chunk_x}:{self.state.wilderness_chunk_y}:{x}:{y}:{self.errand_day_key()}",
+                    "Reading the Restored Route",
+                    [
+                        {"type": "narration", "text": "From the reopened courtyard, the old marker's sight lines finally make sense. Worn arrows correspond to ridges, watercourses, and surviving trail cuts."},
+                        {"type": "narration", "text": f"You transfer the route into your own map and chart {added} nearby area(s). The restored ruin now functions as navigation infrastructure rather than a solitary relic."},
+                    ],
+                    f"Charted {added} nearby area(s) from the restored route marker.",
+                )
+            self.autosave_with_message(f"Used the restored route marker to chart {added} nearby area(s).")
+
+    def open_wilderness_overlook_site(self, x: int, y: int) -> None:
+        record = self.wilderness_poi_record(x, y, "overlook")
+        choice = self.vertical_panel_select(
+            self.wilderness_minor_landmark_name("overlook"),
+            [
+                self._wilderness_menu_item("survey", "Survey the surrounding area", "Chart this chunk and its immediate neighbors."),
+                self._wilderness_menu_item("watch", "Observe wildlife movement", "Spend time watching animals pass through this place."),
+            ],
+            48, 18, return_back=True,
+        )
+        if not choice or choice.value == MENU_BACK: return
+        if choice.value == "survey":
+            week = self.stronghold_cache_week_key()
+            if record.get("survey_week") == week:
+                self.set_message("You already completed this overlook's survey this week.")
+                return
+            if not self.spend_stamina(4): return
+            added = self.map_nearby_wilderness_chunks(1)
+            self.advance_time(35)
+            record["survey_week"] = week
+            if hasattr(self, "play_world_event_scene"):
+                self.play_world_event_scene(
+                    f"overlook_survey:{self.state.wilderness_chunk_x}:{self.state.wilderness_chunk_y}:{x}:{y}:{week}",
+                    "Survey from the Overlook",
+                    [
+                        {"type": "narration", "text": "You climb the overlook platform and match distant ridgelines, waterways, roads, and settlement roofs to the terrain below."},
+                        {"type": "narration", "text": f"By the time the survey is complete, {added} nearby area(s) have been added to your map. The platform remains behind as a useful landmark for future travelers."},
+                    ],
+                    f"Surveyed the overlook and charted {added} nearby area(s).",
+                )
+            self.autosave_with_message(f"Surveyed from the overlook and charted {added} nearby area(s).")
+        elif choice.value == "watch":
+            day = self.errand_day_key()
+            if record.get("watch_day") == day:
+                self.set_message("You already completed today's wildlife watch here.")
+                return
+            self.advance_time(25)
+            record["watch_day"] = day
+            if hasattr(self, "play_world_event_scene"):
+                self.play_world_event_scene(
+                    f"overlook_watch:{self.state.wilderness_chunk_x}:{self.state.wilderness_chunk_y}:{x}:{y}:{day}",
+                    "Wildlife on the Move",
+                    [
+                        {"type": "narration", "text": "From the overlook, scattered tracks become a pattern: feeding grounds, sheltered crossings, and the route animals use to avoid the busiest roads."},
+                        {"type": "narration", "text": "You watch until the route becomes clear: feeding ground, sheltered crossing, and the quieter path animals use to avoid the road."},
+                    ],
+                    "Completed the overlook wildlife watch.",
+                )
+            self.autosave_with_message("Completed a wildlife watch from the overlook.")
+
+    def explore_wilderness_landscape_route(self) -> bool:
+        record = self.wilderness_landscape_record()
+        day = self.errand_day_key()
+        if record.get("route_day") == day:
+            self.set_message("You already completed this landmark route today.")
+            return False
+        if not self.spend_stamina(5): return False
+        kind = str(record.get("type_id", "moorland"))
+        drops = {
+            "large_lake": {"Marsh Reed": 2}, "floodplain": {"Clay": 2, "Marsh Reed": 1},
+            "pine_forest": {"Wood": 2, "Fiber": 1}, "birch_grove": {"Wood": 1, "Wild Herbs": 1},
+            "flower_field": {"Wildflower": 2}, "moorland": {"Fiber": 2},
+            "rocky_valley": {"Stone": 3}, "snowy_highlands": {"Stone": 2, "Winter Root": 1},
+            "ravine": {"Stone": 2, "Wild Herbs": 1}, "hot_springs": {"Wild Herbs": 2},
+            "waterfall": {"Stone": 1, "Marsh Reed": 1}, "desert_dunes": {"Clay": 2},
+            "tundra_plain": {"Winter Root": 2}, "archipelago": {"Marsh Reed": 2, "Fiber": 1},
+            "tropical_isles": {"Wildflower": 1, "Marsh Reed": 2},
+            "desert_isles": {"Clay": 2, "Stone": 1},
+        }.get(kind, {"Fiber": 1})
+        add_inventory_items(self.state.inventory, drops)
+        self.advance_time(45)
+        record["route_day"] = day
+        record["route_completions"] = int(record.get("route_completions", 0)) + 1
+        milestone = ""
+        if int(record["route_completions"]) in {3, 8}:
+            bonus = {"Field Snack": 1, "Mixed Seeds": 1}
+            add_inventory_items(self.state.inventory, bonus)
+            milestone = f" Route milestone reward: {format_drops(bonus)}."
+        if hasattr(self, "play_world_event_scene"):
+            completion = int(record["route_completions"])
+            steps = [
+                {"type": "narration", "text": f"You follow the complete marked circuit through {record.get('name', 'the landmark')}, reading its terrain as a connected place instead of a single map symbol."},
+                {"type": "narration", "text": f"The route takes 45 minutes and yields {format_drops(drops)}. This is your {completion}{'st' if completion == 1 else 'nd' if completion == 2 else 'rd' if completion == 3 else 'th'} completed circuit here."},
+            ]
+            if milestone:
+                steps.append({"type": "narration", "text": f"Repeated familiarity reveals a useful route cache: {format_drops(bonus)}."})
+            self.play_world_event_scene(
+                f"landscape_route:{self.state.wilderness_chunk_x}:{self.state.wilderness_chunk_y}:{day}",
+                f"Route through {record.get('name', 'the Landmark')}",
+                steps,
+                f"Completed the landmark route and gathered {format_drops(drops)}.{milestone}",
+            )
+        self.autosave_with_message(
+            f"Completed the marked route through {record.get('name', 'the landmark')} and gathered {format_drops(drops)}.{milestone}"
+        )
+        return True
+
+    def open_wilderness_landscape_site(self) -> None:
+        record = self.wilderness_landscape_record()
+        work = self.WILDERNESS_LANDSCAPE_WORK.get(str(record.get("type_id", "")), {})
+        choice = self.vertical_panel_select(
+            str(record.get("name", "Major Landmark")),
+            [
+                self._wilderness_menu_item("route", str(work.get("route", "Explore the marked landmark route")), "A daily physical circuit with terrain materials and route milestones."),
+                self._wilderness_menu_item("special", str(work.get("special", "Complete landmark specialty work")), "Weekly paid work with place-specific materials."),
+                self._wilderness_menu_item("map", "Chart from the landmark station", "Reveal nearby wilderness coordinates."),
+            ],
+            50, 19, return_back=True,
+        )
+        if not choice or choice.value == MENU_BACK: return
+        if choice.value == "route": self.explore_wilderness_landscape_route()
+        elif choice.value == "special": self.interact_with_wilderness_landscape()
+        elif choice.value == "map":
+            added = self.map_nearby_wilderness_chunks(1)
+            self.advance_time(20)
+            if hasattr(self, "play_world_event_scene"):
+                self.play_world_event_scene(
+                    f"landscape_chart:{self.state.wilderness_chunk_x}:{self.state.wilderness_chunk_y}:{self.errand_day_key()}",
+                    f"Charting from {record.get('name', 'the Landmark')}",
+                    [
+                        {"type": "narration", "text": f"The landmark station gives you a stable reference point for roads, water, elevation, and the boundaries of nearby terrain."},
+                        {"type": "narration", "text": f"You chart {added} nearby area(s), turning what you can physically see from the station into usable travel knowledge."},
+                    ],
+                    f"Charted {added} nearby area(s) from the landmark station.",
+                )
+            self.autosave_with_message(f"Charted {added} nearby area(s) from the landmark station.")
+
+    def update_ranger_camp_map(self, x: int, y: int) -> bool:
+        record = self.wilderness_poi_record(x, y, "camp")
+        week = self.stronghold_cache_week_key()
+        if record.get("map_week") == week:
+            self.set_message("The ranger camp route map is already current this week.")
+            return False
+        added = self.map_nearby_wilderness_chunks(2)
+        self.advance_time(20)
+        record["map_week"] = week
+        if hasattr(self, "play_world_event_scene"):
+            self.play_world_event_scene(
+                f"ranger_route_map:{self.state.wilderness_chunk_x}:{self.state.wilderness_chunk_y}:{x}:{y}:{week}",
+                "Updating the Ranger Route Map",
+                [
+                    {"type": "narration", "text": "At the camp table, old pencil routes are checked against trail conditions, water access, and recent traveler reports."},
+                    {"type": "narration", "text": f"The corrected route map charts {added} nearby area(s) and remains posted for rangers and passing travelers."},
+                ],
+                f"Updated the ranger route map and charted {added} nearby area(s).",
+            )
+        self.autosave_with_message(f"Updated the ranger route map and charted {added} nearby area(s).")
+        return True
+
+    def maintain_wilderness_shelter(self, x: int, y: int) -> bool:
+        record = self.wilderness_poi_record(x, y, "shelter")
+        week = self.stronghold_cache_week_key()
+        if record.get("maintenance_week") == week:
+            self.set_message("This shelter has already been maintained this week.")
+            return False
+        if not self.owns_tool("Hammer"):
+            self.set_message("Trail-shelter maintenance needs a Hammer from the Carpenter. Face the shelter with it selected and press F.")
+            return False
+        materials = {"Wood": 2, "Fiber": 1}
+        missing = {item: qty - int(self.state.inventory.get(item, 0)) for item, qty in materials.items() if int(self.state.inventory.get(item, 0)) < qty}
+        if missing:
+            self.set_message(f"Shelter maintenance needs {format_drops(missing)}.")
+            return False
+        for item, qty in materials.items(): self.state.inventory[item] -= qty
+        record["maintenance_week"], record["maintained"] = week, True
+        self.advance_time(35)
+        if hasattr(self, "play_world_event_scene"):
+            self.play_world_event_scene(
+                f"trail_shelter_maintenance:{self.state.wilderness_chunk_x}:{self.state.wilderness_chunk_y}:{x}:{y}:{week}",
+                "A Shelter Made Ready",
+                [
+                    {"type": "narration", "text": "You replace weak roof slats, brace the bunks, and sort the public shelf so exhausted travelers can find supplies without emptying every crate."},
+                    {"type": "narration", "text": "The repaired shelter is visibly useful again. This route now has a dependable refuge for anyone caught outside after dark."},
+                ],
+                "Repaired the public trail shelter.",
+            )
+        self.autosave_with_message("Repaired the bunks, roof, and public supply shelf at the trail shelter.")
+        return True
+
+    def stamp_wilderness_island_compound(
+        self, grid: List[List[str]], position: Tuple[int, int], type_id: str, symbol: str
+    ) -> None:
+        """Give island restoration sites a visible purpose-specific compound."""
+        if not grid or position == (-1, -1): return
+        cx = max(8, min(len(grid[0]) - 9, int(position[0])))
+        cy = max(6, min(len(grid) - 7, int(position[1])))
+        self._landmark_clear(grid, cx, cy, 7, 5, "[")
+        if type_id == "lighthouse":
+            for y in range(cy - 3, cy + 3):
+                for x in range(cx - 3, cx + 4):
+                    if abs(x - cx) == 3 or y in {cy - 3, cy + 2}: self._landmark_set(grid, x, y, "#")
+            for y in range(cy + 3, min(len(grid) - 1, cy + 7)): self._landmark_set(grid, cx, y, "=")
+        elif type_id == "sea_fort":
+            for x in range(cx - 6, cx + 7):
+                self._landmark_set(grid, x, cy - 4, "#")
+                self._landmark_set(grid, x, cy + 4, "#")
+            for y in range(cy - 4, cy + 5):
+                self._landmark_set(grid, cx - 6, y, "#")
+                self._landmark_set(grid, cx + 6, y, "#")
+            self._landmark_set(grid, cx, cy + 4, ".")
+        elif type_id == "bird_sanctuary":
+            for x in range(cx - 6, cx + 7, 2):
+                self._landmark_set(grid, x, cy - 3, "#")
+                self._landmark_set(grid, x, cy + 3, "#")
+            for dx, dy in ((-4, -1), (-2, 2), (3, -2), (5, 1)): self._landmark_set(grid, cx + dx, cy + dy, "e")
+        elif type_id == "hidden_cove":
+            for x in range(cx - 5, cx + 1):
+                self._landmark_set(grid, x, cy - 3, "#")
+                self._landmark_set(grid, x, cy + 1, "#")
+            for y in range(cy - 3, cy + 2):
+                self._landmark_set(grid, cx - 5, y, "#")
+            self._landmark_set(grid, cx - 2, cy + 1, ".")
+            for x in range(cx - 5, cx + 6): self._landmark_set(grid, x, cy + 2, "=")
+            self._landmark_set(grid, cx - 5, cy, "Q")
+            self._landmark_set(grid, cx + 5, cy, "k")
+        else:
+            for x in range(cx - 5, cx + 6):
+                self._landmark_set(grid, x, cy - 3, "#")
+                self._landmark_set(grid, x, cy + 3, "#")
+            for y in range(cy - 3, cy + 4): self._landmark_set(grid, cx - 5, y, "#")
+            self._landmark_set(grid, cx - 5, cy, ".")
+            self._landmark_set(grid, cx + 3, cy, "K")
+        self._landmark_set(grid, cx, cy, str(symbol)[:1], preserve_water=False, overwrite_route=True)
+
+    def upgrade_wilderness_landmark_sites(
+        self, grid: List[List[str]], chunk_x: int, chunk_y: int
+    ) -> None:
+        """Expand legacy one-character landmarks when an old saved chunk is loaded."""
+        if not grid:
+            return
+        cx, cy = int(chunk_x), int(chunk_y)
+        if (
+            self.procedural_town_plan(cx, cy)
+            or self.wilderness_chunk_has_stronghold(cx, cy)
+            or self.owned_wilderness_claim(cx, cy)
+        ):
+            return
+        rng = random.Random(self.wilderness_chunk_seed(cx, cy) + 119301)
+        anchors = {
+            symbol: [(x, y) for y, row in enumerate(grid) for x, tile in enumerate(row) if tile == symbol]
+            for symbol in ("R", "P", "K", "Q", "?", "E", "j")
+        }
+        stamped: List[Tuple[int, int]] = []
+
+        def distant(x: int, y: int, radius: int = 10) -> bool:
+            return all(abs(x - px) + abs(y - py) > radius for px, py in stamped)
+
+        for symbol, kind in (("P", "stone_ruin"), ("R", "ranger_camp"), ("K", "overlook"), ("Q", "trail_shelter")):
+            for x, y in anchors[symbol]:
+                if distant(x, y):
+                    self.stamp_wilderness_landmark_site(grid, x, y, kind, rng)
+                    stamped.append((x, y))
+        for x, y in anchors["?"]:
+            if not distant(x, y):
+                continue
+            nearby = {
+                grid[yy][xx]
+                for yy in range(max(0, y - 6), min(len(grid), y + 7))
+                for xx in range(max(0, x - 9), min(len(grid[0]), x + 10))
+            }
+            kind = "old_quarry" if "M" in nearby else ("fungal_garden" if "u" in nearby else ("spring_garden" if "Y" in nearby else "waystone"))
+            self.stamp_wilderness_landmark_site(grid, x, y, kind, rng)
+            stamped.append((x, y))
+        for x, y in anchors["E"]:
+            ground = self.wilderness_world_biome_tile(*self.wilderness_world_coords(cx, cy, x, y))
+            self.stamp_wilderness_field_station(grid, x, y, ground)
+        for marker_x, marker_y in anchors["j"][:1]:
+            kind = str(self.wilderness_major_landscape_profile(cx, cy).get("type_id", "moorland"))
+            landscape_x = marker_x - (11 if kind == "large_lake" else (7 if kind == "hot_springs" else 0))
+            self.stamp_wilderness_landscape_facilities(grid, landscape_x, marker_y, kind, (marker_x, marker_y))
+        self.apply_wilderness_island_site_compound(grid, cx, cy)
