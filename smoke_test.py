@@ -116,7 +116,7 @@ def visible_terminal_len(text: object) -> int:
 def main() -> int:
     assert support.GAME_TITLE == "Elsewhere: an ASCII Life-Sim RPG"
     assert support.GAME_SHORT_TITLE == "Elsewhere"
-    assert support.GAME_VERSION == "0.9.0-beta.6"
+    assert support.GAME_VERSION == "1.0.0"
     assert support.movement_delta_for_key("NUM7") == (-1, -1)
     assert support.movement_delta_for_key("NUM8") == (0, -1)
     assert support.movement_delta_for_key("NUM3") == (1, 1)
@@ -2527,10 +2527,12 @@ def main() -> int:
     assert migrated_combat_state.equipped_accessory == "None"
     migrated_recovery_state = state.GameState(**state.prepare_loaded_state_data({
         "natural_stamina_recovery_minutes": "bad",
+        "natural_focus_recovery_minutes": 999,
         "natural_health_recovery_minutes": 999,
         "natural_health_recovery_delay_minutes": -8,
     }))
     assert migrated_recovery_state.natural_stamina_recovery_minutes == 0
+    assert migrated_recovery_state.natural_focus_recovery_minutes == 9
     assert migrated_recovery_state.natural_health_recovery_minutes == 19
     assert migrated_recovery_state.natural_health_recovery_delay_minutes == 0
     migrated_profile = build_player_combat_profile(migrated_combat_state)
@@ -3981,6 +3983,19 @@ def main() -> int:
     knowledge_game.wilderness_bridge_near_trails(decorative_bridge, random.Random(1))
     assert decorative_bridge[3][3:9] == list("~~~~~~")
 
+    starter_bin_game = FarmGame()
+    assert starter_bin_game.state.starter_shipping_bin_layout_version == 1
+    assert starter_bin_game.state.placed_objects.get("Farm:9,7") == "Shipping Bin"
+    assert starter_bin_game.state.placed_objects.get("Farm:5,7") != "Shipping Bin"
+    starter_bin_game.state.location = "Farm"
+    starter_bin_game.remove_placed_object(9, 7)
+    starter_bin_game.set_placed_object(5, 7, "Shipping Bin")
+    starter_bin_game.state.starter_shipping_bin_layout_version = 0
+    starter_bin_game.ensure_movable_shipping_bin()
+    assert starter_bin_game.state.starter_shipping_bin_layout_version == 1
+    assert starter_bin_game.state.placed_objects.get("Farm:9,7") == "Shipping Bin"
+    assert starter_bin_game.state.placed_objects.get("Farm:5,7") != "Shipping Bin"
+
     seamless_game = FarmGame()
     seamless_game.autosave_with_message = lambda message: seamless_game.set_message(message)
     seamless_game.state.wilderness_seed = 24681357
@@ -4242,6 +4257,26 @@ def main() -> int:
     assert not home_world_game.origin_world_gateway_positions()
     assert not home_world_game.origin_world_sign_positions()
     assert len(home_world_game.home_world_authored_chunks()) >= 8
+
+    # A bench retained by an old streamed home chunk must never pass
+    # town-source coordinates into furniture movement and relocate the player.
+    legacy_bench_source = (40, 29)
+    home_world_game.town_map[legacy_bench_source[1]][legacy_bench_source[0]] = "b"
+    before_legacy_bench = (
+        home_world_game.state.wilderness_chunk_x,
+        home_world_game.state.wilderness_chunk_y,
+        home_world_game.state.player_x,
+        home_world_game.state.player_y,
+    )
+    home_world_game.use_town_action(*legacy_bench_source)
+    assert (
+        home_world_game.state.wilderness_chunk_x,
+        home_world_game.state.wilderness_chunk_y,
+        home_world_game.state.player_x,
+        home_world_game.state.player_y,
+    ) == before_legacy_bench
+    assert "isn't usable" in home_world_game.state.message
+    home_world_game.town_map = home_world_game.make_town_map()
 
     def home_world_tile(game, world_x, world_y):
         chunk_x, chunk_y, local_x, local_y = game.home_world_chunk_from_world(world_x, world_y)
@@ -10468,6 +10503,16 @@ def main() -> int:
     assert game.town_map[3][57] == "↑"
     assert game.town_map[23][104] == "→"
     assert sum(row.count("?") for row in game.town_map) == 0
+    town_clutter_glyphs = {"T", "b", "!", "m", "$", "B", "?"}
+    assert not any(tile in town_clutter_glyphs for row in game.town_map for tile in row)
+    project_town_game = FarmGame()
+    project_town_game.state.completed_town_project_ids = list(project_town_game.town_project_catalog())
+    project_town_game.town_map = project_town_game.make_town_map()
+    assert not any(
+        tile in town_clutter_glyphs
+        for row in project_town_game.town_map
+        for tile in row
+    )
     sign_collision_game = FarmGame()
     sign_collision_game.state.location = "Town"
     assert sign_collision_game.passable(57, 3)
@@ -10711,6 +10756,13 @@ def main() -> int:
     assert dialogue_system.naturalize_spoken_dialogue(
         "That is why I have not left."
     ) == "That's why I haven't left."
+    assert dialogue_system.naturalize_spoken_dialogue("It is.") == "It is."
+    assert dialogue_system.naturalize_spoken_dialogue(
+        "It is pleasant outside."
+    ) == "It's pleasant outside."
+    assert dialogue_system.naturalize_spoken_dialogue(
+        "It has. The clear weather changed my plans."
+    ) == "It has. The clear weather changed my plans."
     smith_library_line = game.dialogue_library_line(first_npc | {"role": "Blacksmith"}, "work", "smoke")
     archive_library_line = game.dialogue_library_line(first_npc | {"role": "Librarian"}, "work", "smoke")
     assert smith_library_line != archive_library_line
@@ -16074,16 +16126,20 @@ def main() -> int:
     recovery_profile = build_player_combat_profile(recovery_game.state)
     recovery_game.state.stamina = recovery_game.max_stamina() - 20
     recovery_game.state.combat_current_hp = int(recovery_profile["max_hp"]) - 10
+    recovery_game.state.combat_focus = max(0, int(recovery_profile["max_focus"]) - 4)
     starting_recovery_stamina = recovery_game.state.stamina
     starting_recovery_hp = recovery_game.state.combat_current_hp
+    starting_recovery_focus = recovery_game.state.combat_focus
     recovery_game.record_player_damage()
     recovery_game.advance_time(29)
     assert recovery_game.state.stamina == starting_recovery_stamina + 5
     assert recovery_game.state.combat_current_hp == starting_recovery_hp
+    assert recovery_game.state.combat_focus == starting_recovery_focus + 2
     assert recovery_game.state.natural_health_recovery_delay_minutes == 1
     recovery_game.advance_time(1)
     assert recovery_game.state.stamina == starting_recovery_stamina + 6
     assert recovery_game.state.combat_current_hp == starting_recovery_hp
+    assert recovery_game.state.combat_focus == starting_recovery_focus + 3
     assert recovery_game.state.natural_health_recovery_delay_minutes == 0
     recovery_game.advance_time(19)
     assert recovery_game.state.combat_current_hp == starting_recovery_hp
@@ -16093,6 +16149,12 @@ def main() -> int:
     assert recovery_game.state.combat_current_hp == starting_recovery_hp + 1
     recovery_game.advance_time(40)
     assert recovery_game.state.combat_current_hp == starting_recovery_hp + 3
+    assert recovery_game.state.combat_focus == int(recovery_profile["max_focus"])
+    recovery_game.state.combat_focus -= 1
+    recovery_game.advance_time(20, allow_natural_recovery=False)
+    assert recovery_game.state.combat_focus == int(recovery_profile["max_focus"]) - 1
+    recovery_game.advance_time(10)
+    assert recovery_game.state.combat_focus == int(recovery_profile["max_focus"])
 
     item_game = FarmGame()
     item_game.autosave_with_message = lambda message: item_game.set_message(message)
@@ -18496,6 +18558,16 @@ def main() -> int:
     map_combat_enemy = dungeon_game.ensure_dungeon_roguelike_enemy(map_combat_enemy)
     assert int(map_combat_enemy["max_hp"]) > 0
     assert str(map_combat_enemy["behavior"])
+    persistent_cave_enemy = dungeon_game.ensure_dungeon_roguelike_enemy({
+        "id": "cave-health-test", "species": "Dustling", "floor": 1,
+        "x": 10, "y": 10, "field_combat_kind": "cave",
+    })
+    wounded_cave_hp = max(1, int(persistent_cave_enemy["max_hp"]) - 4)
+    persistent_cave_enemy["hp"] = wounded_cave_hp
+    dungeon_game.ensure_dungeon_roguelike_enemy(persistent_cave_enemy)
+    persistent_cave_enemy["hp"] = int(persistent_cave_enemy["max_hp"])
+    dungeon_game.ensure_dungeon_roguelike_enemy(persistent_cave_enemy)
+    assert int(persistent_cave_enemy["hp"]) == wounded_cave_hp
     player_pos = (dungeon_game.state.player_x, dungeon_game.state.player_y)
     adjacent_combat_pos = next(
         (player_pos[0] + dx, player_pos[1] + dy)
@@ -18567,6 +18639,7 @@ def main() -> int:
 
     map_combat_enemy["max_hp"] = 100
     map_combat_enemy["hp"] = 100
+    map_combat_enemy["lowest_hp"] = 100
     map_combat_enemy["defense"] = 3
     map_combat_enemy["statuses"] = {}
     dungeon_profile = build_player_combat_profile(dungeon_game.state)
@@ -18582,6 +18655,7 @@ def main() -> int:
     del dungeon_game.dungeon_available_skills
     map_combat_enemy["x"], map_combat_enemy["y"] = adjacent_combat_pos
     map_combat_enemy["hp"] = 100
+    map_combat_enemy["lowest_hp"] = 100
     map_combat_enemy["defense"] = 0
     map_combat_enemy["statuses"] = {}
     dungeon_game.dungeon_roguelike_record()["guard_turns"] = 0
@@ -18599,6 +18673,7 @@ def main() -> int:
     ranger_skills = {skill.name: skill for skill in dungeon_game.dungeon_available_skills()}
     assert "Venom Dart" in ranger_skills
     map_combat_enemy["hp"] = 100
+    map_combat_enemy["lowest_hp"] = 100
     map_combat_enemy["statuses"] = {}
     dungeon_game.state.combat_focus = dungeon_game.state.combat_max_focus
     assert dungeon_game.dungeon_cast_skill_at("Venom Dart", adjacent_combat_pos)

@@ -196,6 +196,7 @@ from ascii_farmstead_combat import (
     FARMSTEAD_MAX_PARTY_MEMBERS,
     FARMSTEAD_PARTY_TACTICS,
     MINE_ENEMY_PROFILES,
+    NATURAL_FOCUS_RECOVERY_INTERVAL_MINUTES,
     NATURAL_HEALTH_RECOVERY_DELAY_MINUTES,
     NATURAL_HEALTH_RECOVERY_INTERVAL_MINUTES,
     NATURAL_STAMINA_RECOVERY_INTERVAL_MINUTES,
@@ -375,6 +376,9 @@ from ascii_battle_prototype.combat.results import BattleRequest
 
 
 RECLAIMED_STRONGHOLD_BUILD_BOARD_SYMBOL = "n"
+STARTER_SHIPPING_BIN_LAYOUT_VERSION = 1
+STARTER_SHIPPING_BIN_POSITION = (9, 7)
+LEGACY_STARTER_SHIPPING_BIN_POSITION = (5, 7)
 
 RECLAIMED_STRONGHOLD_BUILDING_ORDER = (
     "town_hall",
@@ -982,7 +986,7 @@ class FarmGame(
         return grid
 
     def apply_visible_town_projects(self, grid: List[List[str]]) -> List[List[str]]:
-        """Visibly reflect completed Town Hall civic projects on the town map."""
+        """Reflect civic projects without adding blocking one-tile clutter."""
         width, height = TOWN_WIDTH, TOWN_HEIGHT
 
         def set_if_soft(x: int, y: int, ch: str):
@@ -993,76 +997,15 @@ class FarmGame(
             if 0 <= x < width and 0 <= y < height:
                 grid[y][x] = ch
 
-        if self.has_town_project("road_grid_signage"):
-            # Sparse guide markers at major decision points.
-            for x, y in [(49, 10), (81, 10), (49, 22), (81, 22), (49, 34), (81, 34)]:
-                set_if_soft(x, y, "?")
-            for x, y in [(48, 11), (80, 11), (48, 23), (80, 23), (48, 35), (80, 35)]:
-                set_if_soft(x, y, "!")
-
-        if self.has_town_project("market_charter"):
-            # More formal market strip with additional counters/stalls near Market Row.
-            for x, y in [(82, 30), (86, 30), (90, 30), (94, 30), (82, 36), (86, 36), (90, 36), (94, 36)]:
-                set_if_soft(x, y, "$")
-            for x, y in [(82, 27), (86, 27), (90, 27), (94, 27), (82, 32), (86, 32), (90, 32), (94, 32)]:
-                set_if_soft(x, y, "m")
-            for x, y in [(81, 29), (95, 37)]:
-                set_if_soft(x, y, "?")
-
-        if self.has_town_project("clinic_supply_board"):
-            # Clinic-side supply markers and lamps.
-            for x, y in [(7, 34), (22, 36)]:
-                set_if_soft(x, y, "!")
-            for x, y in [(8, 33), (24, 36)]:
-                set_if_soft(x, y, "?")
-
-        if self.has_town_project("errand_bonus_fund"):
-            # Extra errand/news boards around civic paths.
-            for x, y in [(44, 22), (52, 22), (44, 28), (52, 28), (65, 22), (81, 22), (103, 22)]:
-                set_if_soft(x, y, "B")
-
-        if self.has_town_project("library_outreach"):
-            # Outdoor reading corners around the Library/North Market Street.
-            for x, y in [(38, 10), (42, 10), (44, 11), (45, 12), (51, 12)]:
-                set_if_soft(x, y, "b")
-            for x, y in [(50, 11)]:
-                set_if_soft(x, y, "?")
-
-        if self.has_town_project("inn_notice_corner"):
-            # Notice corner outside the Inn with benches and lamps.
-            for x, y in [(22, 21), (24, 21), (28, 21), (30, 21)]:
-                set_if_soft(x, y, "b")
-            for x, y in [(25, 23)]:
-                set_if_soft(x, y, "?")
-
-        if self.has_town_project("park_beautification"):
-            # Central Park becomes visibly denser and more cared for.
-            for x, y in [(37, 25), (41, 28), (44, 25), (46, 27), (50, 26), (52, 28), (55, 25), (62, 27), (38, 34), (42, 35), (52, 35), (57, 34), (64, 35)]:
-                set_if_soft(x, y, "F")
-            for x, y in [(36, 24), (67, 24), (36, 36), (67, 36), (40, 24), (56, 24), (40, 36), (56, 36)]:
-                set_if_soft(x, y, "T")
-            for x, y in [(44, 29), (52, 29), (48, 26), (48, 32), (44, 33), (52, 33), (62, 33)]:
-                set_if_soft(x, y, "b")
-            for x, y in [(36, 29), (67, 29), (48, 24), (58, 36)]:
-                set_if_soft(x, y, "!")
-
         if self.has_town_project("farm_road_paving"):
             # The east farm road becomes more formal and easier to read.
             for x, y in [(88, 20), (92, 20), (96, 20), (100, 20), (104, 20), (108, 20), (110, 20)]:
                 set_any(x, y, "=")
-            for x, y in [(92, 21), (108, 21)]:
-                set_if_soft(x, y, "?")
-            for x, y in [(102, 21)]:
-                set_if_soft(x, y, "!")
 
         if self.has_town_project("wilderness_trail_bridge"):
             # The north road gets a safer bridge/trailhead feel.
             for x, y in [(56, 1), (57, 1), (58, 1), (56, 2), (57, 2), (58, 2), (56, 3), (57, 3), (58, 3)]:
                 set_if_soft(x, y, "=")
-            for x, y in [(55, 9), (60, 10)]:
-                set_if_soft(x, y, "?")
-            for x, y in [(58, 9)]:
-                set_if_soft(x, y, "!")
 
 
         return grid
@@ -1220,10 +1163,6 @@ class FarmGame(
             if 0 <= x < width and 0 <= y < height:
                 grid[y][x] = ch
 
-        def set_soft(x: int, y: int, ch: str):
-            if 0 <= x < width and 0 <= y < height and grid[y][x] in [".", ",", ":", "=", "?", "m", "$"]:
-                grid[y][x] = ch
-
         for building_id in TOWN_BUILDING_IDS:
             if self.is_town_building_unlocked(building_id):
                 continue
@@ -1237,16 +1176,6 @@ class FarmGame(
             # The boarded doorway already communicates that this service is
             # closed. A separate question-mark tile outside every locked
             # building only reads as sign clutter and can obstruct wayfinding.
-
-        if not self.is_town_building_unlocked("market_row"):
-            for y in range(27, 38):
-                for x in range(80, 96):
-                    if grid[y][x] == "$":
-                        grid[y][x] = ":"
-                    elif grid[y][x] == "m" and (x + y) % 3:
-                        grid[y][x] = ":"
-            for x, y in [(82, 28), (90, 28), (86, 32), (94, 36)]:
-                set_soft(x, y, "m")
 
         return grid
 
@@ -3090,20 +3019,12 @@ class FarmGame(
             set_tile(49, y, ":")
             set_tile(58, y, ":")
         set_tile(49, 29, "F")
-        for x, y in [(39, 25), (43, 27), (53, 25), (61, 26), (40, 32), (55, 32), (62, 33)]:
-            set_tile(x, y, "T")
-        for x, y in [(40, 29), (45, 33), (53, 29), (58, 26), (58, 32), (62, 29)]:
-            set_tile(x, y, "b")
 
         # Expanded east commons and orchard approach near the farm road.
         green_rect(92, 24, 17, 19)
         for y in range(24, 43):
             set_tile(104, y, "=")
             set_tile(105, y, "=")
-        for x, y in [(95, 26), (99, 28), (108, 30), (94, 34), (100, 37), (108, 40)]:
-            set_tile(x, y, "T")
-        for x, y in [(96, 31), (101, 35), (106, 34), (99, 41)]:
-            set_tile(x, y, "b")
 
         # South canal gives the expanded town a bottom edge without blocking main routes.
         for x in range(8, width - 8):
@@ -3113,8 +3034,8 @@ class FarmGame(
             set_tile(x, 45, "=")
             set_tile(x, 47, "=")
 
-        # Boards, directories, and easy orientation points.
-        set_tile(46, 11, "B")
+        # Two prominent notice boards and one central directory provide all
+        # necessary public information without repeating fixtures on each road.
         for notice_x, notice_y in TOWN_NOTICE_BOARD_POSITIONS:
             set_tile(notice_x, notice_y, TOWN_NOTICE_BOARD_SYMBOL)
             for ox, oy in [(notice_x - 1, notice_y), (notice_x + 1, notice_y), (notice_x, notice_y + 1), (notice_x, notice_y - 1)]:
@@ -3122,21 +3043,6 @@ class FarmGame(
                     set_tile(ox, oy, ":")
         for x, y in TOWN_DIRECTORY_TILES:
             set_tile(x, y, "D")
-
-        # Market stalls sit on the promenade instead of interrupting travel lanes.
-        for x, y in [(82, 28), (86, 28), (90, 28), (94, 28), (82, 32), (86, 32), (90, 32)]:
-            set_tile(x, y, "m")
-        for x, y in [(84, 30), (88, 30), (92, 30), (84, 36), (88, 36), (92, 36)]:
-            if grid[y][x] != "D":
-                set_tile(x, y, "$")
-
-        # Benches, lamps, and trees should help orientation without creating mazes.
-        for x, y in [(7, 10), (22, 10), (38, 10), (55, 10), (7, 22), (24, 22), (55, 22), (72, 22), (88, 22), (100, 22), (18, 36), (73, 36), (86, 36)]:
-            set_tile(x, y, "b")
-        for x, y in [(8, 11), (40, 11), (57, 10), (44, 22), (76, 22), (103, 22), (13, 34), (92, 34)]:
-            set_tile(x, y, "!")
-        for x, y in [(3, 4), (18, 5), (34, 4), (52, 5), (3, 16), (18, 16), (66, 15), (82, 15), (98, 18), (25, 34), (91, 34), (96, 12), (103, 12), (98, 44)]:
-            set_tile(x, y, "T")
 
         # Retain only the two route signs that identify exits beyond town.
         # Buildings and civic districts identify themselves without sign clutter.
@@ -11900,7 +11806,7 @@ class FarmGame(
             "final_boss": bool(enemy.get("final_boss", False)),
             "guardian": bool(enemy.get("guardian", False)),
         }
-        for field in ("max_hp", "hp", "attack", "defense", "attack_range"):
+        for field in ("max_hp", "hp", "lowest_hp", "attack", "defense", "attack_range"):
             if field in enemy:
                 try:
                     cleaned[field] = max(0, int(enemy.get(field, 0)))
@@ -13940,7 +13846,7 @@ class FarmGame(
         return False
 
     def ensure_movable_shipping_bin(self):
-        """Convert old fixed B map tiles into a movable placed Shipping Bin."""
+        """Provide the starter bin and migrate its old doorway-blocking position."""
         anchors = []
         for y in range(self.farm_height()):
             for x in range(self.farm_width()):
@@ -13950,24 +13856,56 @@ class FarmGame(
                         anchors.append((x, y))
                     self.base_map[y][x] = "."
 
-        if not self.has_shipping_bin_available():
-            previous_location = self.state.location
-            self.state.location = "Farm"
-            if anchors:
-                x, y = anchors[0]
-            else:
-                x, y = 5, 7
-            try:
-                if 0 <= y < self.farm_height() and 0 <= x < self.farm_width() - 1:
-                    # Make sure old/default spot is usable.
-                    for tx, ty in self.object_footprint_tiles("Shipping Bin", x, y):
-                        if 0 <= ty < self.farm_height() and 0 <= tx < self.farm_width():
-                            self.base_map[ty][tx] = "."
-                    self.set_placed_object(x, y, "Shipping Bin")
+        previous_location = self.state.location
+        self.state.location = "Farm"
+        try:
+            def position_is_open(anchor_x: int, anchor_y: int) -> bool:
+                for tx, ty in self.object_footprint_tiles("Shipping Bin", anchor_x, anchor_y):
+                    if not (0 <= ty < self.farm_height() and 0 <= tx < self.farm_width()):
+                        return False
+                    if self.base_map[ty][tx] not in {".", ",", "w"}:
+                        return False
+                    if self.get_placed_object(tx, ty) or self.get_crop(tx, ty):
+                        return False
+                return True
+
+            layout_version = int(
+                getattr(self.state, "starter_shipping_bin_layout_version", 0) or 0
+            )
+            if layout_version < STARTER_SHIPPING_BIN_LAYOUT_VERSION:
+                old_x, old_y = LEGACY_STARTER_SHIPPING_BIN_POSITION
+                old_key, old_name, old_anchor_x, old_anchor_y = self.placed_object_at(old_x, old_y)
+                new_x, new_y = STARTER_SHIPPING_BIN_POSITION
+                if (
+                    old_key
+                    and old_name == "Shipping Bin"
+                    and (old_anchor_x, old_anchor_y) == (old_x, old_y)
+                    and position_is_open(new_x, new_y)
+                ):
+                    self.remove_placed_object(old_x, old_y)
+                    self.set_placed_object(new_x, new_y, "Shipping Bin")
+                self.state.starter_shipping_bin_layout_version = (
+                    STARTER_SHIPPING_BIN_LAYOUT_VERSION
+                )
+
+            if not self.has_shipping_bin_available():
+                candidates = [STARTER_SHIPPING_BIN_POSITION]
+                candidates.extend(anchor for anchor in anchors if anchor not in candidates)
+                destination = next(
+                    (position for position in candidates if position_is_open(*position)),
+                    None,
+                )
+                if destination is not None:
+                    self.set_placed_object(*destination, "Shipping Bin")
                 else:
-                    self.state.inventory["Shipping Bin"] = self.state.inventory.get("Shipping Bin", 0) + 1
-            finally:
-                self.state.location = previous_location
+                    self.state.inventory["Shipping Bin"] = (
+                        self.state.inventory.get("Shipping Bin", 0) + 1
+                    )
+                self.state.starter_shipping_bin_layout_version = (
+                    STARTER_SHIPPING_BIN_LAYOUT_VERSION
+                )
+        finally:
+            self.state.location = previous_location
 
     def shipping_bin_target(self) -> Optional[Tuple[int, int]]:
         """Return a tile belonging to a shipping bin on standing/front/adjacent tiles."""
@@ -16777,20 +16715,13 @@ class FarmGame(
 
     def town_lighting_report_lines(self) -> List[str]:
         return [
-            "TOWN LIGHTING",
+            "TOWN VISIBILITY",
             "",
             f"Current light level: {self.outdoor_lighting_label()}",
-            f"Streetlamps installed: {self.town_lamp_count()}",
             "",
-            "Night behavior:",
             "- Outdoor town tiles are dimmer at night.",
-            "- Tiles near streetlamps remain easier to read.",
-            "- Civic projects can add more lamps.",
-            "",
-            "Useful projects:",
-            "- Road Grid Signage adds lamps at grid intersections.",
-            "- Clinic Supply Board adds clinic-side lamps.",
-            "- Park Beautification adds park lamps.",
+            "- Main roads, building entrances, and public boards remain clear.",
+            "- Civic projects improve services without filling streets with blocking markers.",
         ]
 
     def night_lighting_color_for_tile(self, tile: str, x: int, y: int, base_color: str) -> str:
@@ -26627,7 +26558,7 @@ class FarmGame(
         self.state.natural_health_recovery_minutes = 0
 
     def apply_natural_recovery(self, minutes: int) -> Tuple[int, int]:
-        """Recover field stamina and post-combat HP from elapsed world time."""
+        """Recover field stamina, combat MP, and post-combat HP over world time."""
         elapsed = max(0, int(minutes))
         if elapsed <= 0:
             return 0, 0
@@ -26676,6 +26607,26 @@ class FarmGame(
             self.state.natural_stamina_recovery_minutes = 0
 
         profile = build_player_combat_profile(self.state)
+        current_focus = max(0, int(self.state.combat_focus))
+        max_focus = max(1, int(profile.get("max_focus", current_focus or 1)))
+        if current_focus < max_focus:
+            focus_progress = max(
+                0,
+                int(getattr(self.state, "natural_focus_recovery_minutes", 0)),
+            ) + elapsed
+            focus_ticks, focus_remainder = divmod(
+                focus_progress,
+                NATURAL_FOCUS_RECOVERY_INTERVAL_MINUTES,
+            )
+            if focus_ticks > 0:
+                self.state.combat_focus = min(max_focus, current_focus + focus_ticks)
+            self.state.natural_focus_recovery_minutes = (
+                focus_remainder if int(self.state.combat_focus) < max_focus else 0
+            )
+        else:
+            # Full MP cannot bank progress toward an instant refill later.
+            self.state.natural_focus_recovery_minutes = 0
+
         current_hp = max(1, int(profile.get("current_hp", 1) or 1))
         max_hp = max(1, int(profile.get("max_hp", current_hp) or current_hp))
         if current_hp >= max_hp:
@@ -27459,7 +27410,7 @@ class FarmGame(
                 self.in_seed_shop(x, y)
                 or self.in_blacksmith(x, y)
                 or self.is_town_wayfinding_symbol(tile)
-                or tile in ["E", "D", "Q", "G", "C", "X", "L", "M", "I", "Y", "A", "H", "R", "P", "U", "F", "b", "B", TOWN_NOTICE_BOARD_SYMBOL, "m", "$", "!", "T", "W", "~", "h"]
+                or tile in ["E", "D", "Q", "G", "C", "X", "L", "M", "I", "Y", "A", "H", "R", "P", "U", "F", TOWN_NOTICE_BOARD_SYMBOL, "W", "h"]
             )
 
         if self.on_town_interior():
@@ -27476,8 +27427,8 @@ class FarmGame(
                 tile = self.town_map[source_y][source_x]
                 return self.is_town_wayfinding_symbol(tile) or tile in [
                     "E", "D", "Q", "G", "C", "X", "L", "M", "I", "Y",
-                    "A", "H", "R", "P", "U", "F", "b", "B", TOWN_NOTICE_BOARD_SYMBOL,
-                    "m", "$", "!", "T", "W", "~", "h",
+                    "A", "H", "R", "P", "U", "F", TOWN_NOTICE_BOARD_SYMBOL,
+                    "W", "h",
                 ]
             if home_kind == "farm":
                 crop = self.get_crop(x, y)
@@ -29406,6 +29357,7 @@ class FarmGame(
                     "- Contact with hostile actors transfers the selected party into turn-based tactical combat.",
                     "- Positioning, movement range, attack range, terrain, enemy roles, and turn order matter.",
                     "- HP and focus persist after battle; stamina remains a separate exploration resource.",
+                    "- Stamina and MP recover gradually as world time passes; HP begins recovering after a quiet delay.",
                     "- Your starting class, level, gear, learned skills, and party composition define available tactics.",
                     "- Victories grant experience. Levels raise combat statistics, award skill points, and add 5 maximum stamina.",
                     "- Spend skill points from Adventure > Skills; manage weapons, armor, and accessories in Loadout.",
@@ -35572,7 +35524,7 @@ class FarmGame(
             "park_beautification": {
                 "title": "Park Beautification",
                 "cost": 800,
-                "description": "Add more care, benches, and flowers to Central Park.",
+                "description": "Fund landscaping and regular care for Central Park without narrowing its open paths.",
                 "benefit": "Daily town grant improves and the town feels more established.",
             },
         }
@@ -36197,7 +36149,7 @@ class FarmGame(
                 MenuItem(label="Apply for small grant", value="grant", enabled=True, hint="once/day"),
                 MenuItem(label="Town Projects", value="projects", enabled=True, hint=f"{self.completed_town_project_count()} funded"),
                 MenuItem(label="Festival", value="festival", enabled=True, hint=self.festival_status_line()),
-                MenuItem(label="Town Lighting", value="lighting", enabled=True, hint=self.outdoor_lighting_label()),
+                MenuItem(label="Town visibility", value="lighting", enabled=True, hint=self.outdoor_lighting_label()),
                 MenuItem(label="Road Network", value="roads", enabled=True, hint="routes"),
                 MenuItem(label="Back", value=MENU_BACK, enabled=True),
             ]
@@ -36264,7 +36216,7 @@ class FarmGame(
                 self.festival_menu()
                 continue
             if choice.value == "lighting":
-                self.vertical_panel_view("Town Lighting", self.town_lighting_report_lines(), LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
+                self.vertical_panel_view("Town Visibility", self.town_lighting_report_lines(), LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
                 continue
             if choice.value == "roads":
                 self.road_network_menu()
@@ -37861,7 +37813,15 @@ class FarmGame(
             self.set_message(self.town_building_exterior_message(building_id) if building_id else self.describe_tile(x, y))
             return
         if tile == "F": self.set_message("The fountain burbles peacefully."); return
-        if tile == "b": self.rest_on_town_bench(x, y); return
+        if tile == "b":
+            # Older streamed home chunks may retain a bench after the authored
+            # town cleanup. Source-map coordinates are not current-chunk
+            # coordinates, so never pass them into furniture movement logic.
+            if seamless_source:
+                self.set_message("An old public bench awaiting removal. It isn't usable here.")
+            else:
+                self.rest_on_town_bench(x, y)
+            return
         if tile in ["!", "m", "$", ","]:
             self.set_message(self.town_landmark_message(tile))
             return
@@ -40941,6 +40901,7 @@ class FarmGame(
         family_sleep_bonus = self.family_sleep_bonus()
         s.stamina = self.max_stamina()
         s.natural_stamina_recovery_minutes = 0
+        s.natural_focus_recovery_minutes = 0
         s.natural_health_recovery_minutes = 0
         s.natural_health_recovery_delay_minutes = 0
         s.weather = forecast_weather_for_date(s.month, s.day, s.year)

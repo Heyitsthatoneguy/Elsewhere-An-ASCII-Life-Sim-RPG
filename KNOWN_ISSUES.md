@@ -1,7 +1,9 @@
 # Known issues
 
-- Elsewhere is a large public beta. Keep a manual save-slot copy of especially
-  important dynasties before updating between beta versions.
+- Elsewhere is a large, systems-heavy game. Keep a manual save-slot copy of
+  especially important dynasties before major updates. Players coming from an
+  early beta may prefer a new world so that all current world-generation and
+  infrastructure systems are present from the beginning.
 - The game is designed for a modern terminal. Very small terminal windows may
   make panels harder to read; enlarging the window restores the intended
   layout.

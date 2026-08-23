@@ -511,6 +511,7 @@ class GameState:
     wake_hour: int = 7
     stamina: int = 100
     natural_stamina_recovery_minutes: int = 0
+    natural_focus_recovery_minutes: int = 0
     natural_health_recovery_minutes: int = 0
     natural_health_recovery_delay_minutes: int = 0
     alchemy_regeneration_minutes: int = 0
@@ -561,6 +562,7 @@ class GameState:
     backpack_upgrades: int = 0
     world_containers: Dict[str, Dict[str, object]] = None
     container_storage_migrated: bool = False
+    starter_shipping_bin_layout_version: int = 0
     placed_objects: Dict[str, str] = None
     placed_object_rotations: Dict[str, int] = None
     placed_object_finishes: Dict[str, str] = None
@@ -932,6 +934,7 @@ class GameState:
             self.stamina = 100
         for attr, maximum in (
             ("natural_stamina_recovery_minutes", 4),
+            ("natural_focus_recovery_minutes", 9),
             ("natural_health_recovery_minutes", 19),
             ("natural_health_recovery_delay_minutes", 30),
             ("alchemy_regeneration_minutes", 9),
@@ -2479,6 +2482,12 @@ class GameState:
             self.seamless_home_world_version = max(0, min(2, int(self.seamless_home_world_version)))
         except Exception:
             self.seamless_home_world_version = 0
+        try:
+            self.starter_shipping_bin_layout_version = max(
+                0, min(1, int(self.starter_shipping_bin_layout_version))
+            )
+        except Exception:
+            self.starter_shipping_bin_layout_version = 0
         try:
             self.wilderness_chunk_x = int(self.wilderness_chunk_x)
         except Exception:

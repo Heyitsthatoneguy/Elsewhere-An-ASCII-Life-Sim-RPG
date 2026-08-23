@@ -258,13 +258,30 @@ _SPOKEN_CONTRACTIONS: Tuple[Tuple[str, str], ...] = (
     ("Let us", "Let's"), ("let us", "let's"),
 )
 
+# These subject/auxiliary contractions need a following thought. Forms such as
+# "It's." and "I've." are fragments when the expanded phrase was a complete
+# short answer. Negative contractions ("I don't.") remain natural on their own.
+_SPOKEN_CONTRACTIONS_REQUIRING_CONTINUATION = {
+    expanded
+    for expanded, _contracted in _SPOKEN_CONTRACTIONS
+    if expanded.split(" ", 1)[0].casefold() in {
+        "i", "you", "we", "they", "it", "that", "there",
+        "what", "who", "where",
+    }
+}
+
 
 def naturalize_spoken_dialogue(text: object) -> str:
     """Use ordinary contractions in game-authored spoken dialogue."""
     line = str(text or "")
     for expanded, contracted in _SPOKEN_CONTRACTIONS:
+        continuation_guard = (
+            r"(?!\s*(?:[.!?\u2026]|$))"
+            if expanded in _SPOKEN_CONTRACTIONS_REQUIRING_CONTINUATION
+            else ""
+        )
         line = re.sub(
-            rf"\b{re.escape(expanded)}\b(?!['â€™])",
+            rf"\b{re.escape(expanded)}\b(?!['â€™]){continuation_guard}",
             contracted,
             line,
         )
@@ -3837,7 +3854,7 @@ class DialogueFlowMixin:
             activity = self.dialogue_activity(actor, kind).replace("their ", "my ")
             return self.dialogue_say(
                 actor,
-                f"It has. The {weather} weather changes how I handle {activity}.",
+                f"It is. The {weather} weather changes how I handle {activity}.",
                 "response",
                 transcript,
             )

@@ -1,5 +1,73 @@
 # Changelog
 
+## 1.0.0
+
+- Expanded the seamless wilderness with substantial connected infrastructure:
+  working farms and ranches, family homesteads, route hamlets, roadside services,
+  industry corridors, leisure destinations, heritage structures, bridges,
+  harbors, roads that lead to real destinations, and NPCs who use those routes.
+- Rebuilt wilderness caves around eleven biome-sensitive families with distinct
+  topology, ecology, resources, water, wildlife, enemies, containers, discoveries,
+  map-native combat, and clearing rewards. Added broader biome identity, readable
+  terrain semantics, and stricter generation-quality checks.
+- Modernized generated and one-off NPCs so they participate in the persistent
+  character model, including identity, history, personality, schedules, family,
+  knowledge, dialogue, relationships, romance eligibility, plans, travel, and
+  return-to-schedule behavior.
+- Added persistent ancestry and extended-family generation, grounded household
+  growth, relationship-stage gating, a distinct dating tier, context-appropriate
+  romance options, expanded spouse/child conversation, and more believable family
+  discussion throughout the unified dialogue system.
+- Added player stealth and clearly marked crime interactions with directional NPC
+  sight cones, witnesses, private and restricted spaces, noise, distractions,
+  darkness and cover, lockpicking, guard response, confiscation, and concise
+  time-skipped penalties.
+- Added a property-driven alchemy system with ingredient traits, liquid matrices,
+  grades, stability, toxicity, generated formulas, potions, equipment oils,
+  thrown flasks, soil tonics, pigments, resistance, regeneration, exploration,
+  farming, combat, luck, and loot effects.
+- Added native household aquariums with individually simulated fish, multiple tank
+  ownership, freshwater/saltwater/underground compatibility, decorating, feeding,
+  cleaning, breeding variants, realistic lifespans, optional mortality, memorials,
+  family care, and a flicker-free aquarium view.
+- Expanded fishing to 48 habitat-aware species across ponds, lakes, rivers, oceans,
+  reefs, currents, and underground water, with aquarium art and behavior, museum
+  notes, quests, and hydrology-aware catch selection.
+- Reworked farming automation into a genuinely autonomous late-game system. The
+  logistics network can supply seeds, feed, fertilizer, and storage; prepare,
+  plant, water, fertilize, harvest, replant, clear debris, care for animals, collect
+  products, operate processing machines, rotate seasonal crops, and ship output.
+- Extended tools beyond farming with world interactions for repairs, clearing,
+  harvesting, excavation, locks, fishing, and utility work. New characters now
+  begin with the frequently required axe and pickaxe.
+- Added a player setting for choosing map-native turn-based enemy encounters or the
+  standard tactical combat presentation, while preserving progression, rewards,
+  skills, companions, loot, and encounter outcomes across both styles.
+- Modernized politics and town government with an in-world tutorial, readable civic
+  status, elections, offices, policies, edicts, zoning, public works, town editing,
+  generated-town councils, and visible municipal consequences.
+- Expanded custom content with modernized skill, class, enemy, encounter, building,
+  dungeon-room, equipment, quest, dialogue, and narration tools, including direct
+  preset editing, variable insertion, validation, previews, mouse support, and
+  clearer game-integration controls.
+- Added adaptive full-window display behavior, larger screen modes, key rebinding,
+  improved HUD modes, collapsible activity information, reliable menu exit paths,
+  safe fast travel, coordinate-correct teleport placement, soft NPC collision, and
+  clearer signs and interaction prompts.
+- Revised procedural text for natural contractions, quantity-aware singular/plural
+  grammar, location-aware mail, grounded relationship language, better directions,
+  less premature intimacy, and more coherent occupation and origin descriptions.
+- Simplified the starting-town exterior by removing ambiguous decorative clutter
+  and redundant signs. Fixed legacy bench interactions that could move the player
+  into a neighboring chunk, and relocated the starter shipping bin beside the
+  farmhouse utility area so it no longer obstructs the front-door approach.
+- Added natural MP recovery alongside stamina and delayed health recovery. Wounded
+  cave and dungeon enemies no longer regain health when their persistent records
+  are refreshed or normalized.
+- Completed broad stability and performance passes across seamless-world chunk
+  continuity, NPC movement, generated towns, outposts, dialogue, interiors,
+  aquariums, farming, combat, wilderness rendering, saves, and release packaging.
+
 ## 0.9.0-beta.6
 
 - Rebuilt NPC conversations around coherent, advancing exchanges instead of

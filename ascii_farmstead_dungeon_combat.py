@@ -899,7 +899,19 @@ class DungeonRoguelikeCombatMixin:
         enemy.setdefault("heard_y", None)
         enemy.setdefault("search_turns", 0)
         enemy["max_hp"] = max(1, int(enemy.get("max_hp", max_hp)))
-        enemy["hp"] = max(0, min(enemy["max_hp"], int(enemy.get("hp", enemy["max_hp"]))))
+        normalized_hp = max(
+            0,
+            min(enemy["max_hp"], int(enemy.get("hp", enemy["max_hp"]))),
+        )
+        # Hostile health is persistent and strictly non-increasing. Keeping the
+        # lowest observed value prevents map refreshes, repeated engagement, or
+        # legacy normalization from silently restoring a wounded enemy.
+        try:
+            lowest_hp = max(0, int(enemy.get("lowest_hp", normalized_hp)))
+        except (TypeError, ValueError):
+            lowest_hp = normalized_hp
+        enemy["hp"] = min(normalized_hp, lowest_hp)
+        enemy["lowest_hp"] = int(enemy["hp"])
         return enemy
 
     def dungeon_terrain_tile(self, x: int, y: int) -> str:
