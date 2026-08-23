@@ -6,7 +6,7 @@ import random
 from typing import Dict, List, Optional, Tuple
 
 from ascii_farmstead_data import FISH_DATA, MENU_BACK
-from ascii_farmstead_helpers import quantity_item_phrase
+from ascii_farmstead_helpers import quantity_agreement, quantity_item_phrase
 from ascii_farmstead_inventory import add_inventory_items, format_drops
 from ascii_farmstead_visuals import actor_style
 from ascii_farmstead_game_tables import GAME_TABLE_DATA, venue_game_ids
@@ -1263,7 +1263,7 @@ class WildernessRevampMixin:
         self.advance_time(minutes)
         record["activity_week"] = week
         record["activities_completed"] = int(record.get("activities_completed", 0)) + 1
-        map_note = f", charted {mapped} area(s)" if mapped else ""
+        map_note = f", charted {quantity_agreement(mapped, 'area')}" if mapped else ""
         self.autosave_with_message(
             f"{activity}: +{money}g, {format_drops(drops)}{map_note}."
         )
@@ -1329,7 +1329,8 @@ class WildernessRevampMixin:
             record["caretaker_bond"] = int(record.get("caretaker_bond", 0)) + 1
             self.advance_time(10)
             self.autosave_with_message(
-                f"Compared trail notes with the {role.lower()}; charted {mapped} area(s) and strengthened your working relationship."
+                f"Compared trail notes with the {role.lower()}; charted "
+                f"{quantity_agreement(mapped, 'area')} and strengthened your working relationship."
             )
 
     def open_wilderness_structure_activity_menu(self) -> None:
@@ -1794,9 +1795,9 @@ class WildernessRevampMixin:
                 f"landscape_specialty:{self.state.wilderness_chunk_x}:{self.state.wilderness_chunk_y}:{kind}:{week}",
                 activity,
                 [
-                    {"type": "narration", "text": f"You carry out the site's actual fieldwork across {record['name']}, following its terrain, facilities, and marked work area."},
+                    {"type": "narration", "text": f"You follow the marked work route across {record['name']}, checking the terrain and tending each prepared work area in turn."},
                     {"type": "narration", "text": f"The completed work earns {money}g and {format_drops(drops)}."},
-                    {"type": "narration", "text": f"This is specialty completion {record['specialty_completions']} at this landmark; returning in a later week can continue its practical history."},
+                    {"type": "narration", "text": "The paths and difficult sections are becoming familiar enough that future visits should be easier to plan."},
                 ],
                 f"{activity}: +{money}g and {format_drops(drops)}.",
             )
@@ -3261,7 +3262,9 @@ class WildernessRevampMixin:
         elif choice.value == "chart":
             added = self.map_nearby_wilderness_chunks(1)
             self.advance_time(20)
-            self.autosave_with_message(f"Charted {added} nearby area(s) from {profile['name']}.")
+            self.autosave_with_message(
+                f"Charted {quantity_agreement(added, 'nearby area')} from {profile['name']}."
+            )
 
     def wilderness_region_outpost_chunk(self, chunk_x: int, chunk_y: int) -> Tuple[int, int]:
         rx, ry = self.wilderness_region_coords(chunk_x, chunk_y)
@@ -3841,7 +3844,7 @@ class WildernessRevampMixin:
         return self.wilderness_region_project_level(chunk_x, chunk_y) >= 3
 
     def begin_wilderness_region_project_expansion(self, chunk_x: int, chunk_y: int) -> bool:
-        self.set_message("Region-wide wilderness projects have been retired.")
+        self.set_message("There isn't an active regional construction project here.")
         return False
 
         project = self.wilderness_region_project(chunk_x, chunk_y)
@@ -3884,7 +3887,7 @@ class WildernessRevampMixin:
         return rows
 
     def contribute_wilderness_region_project(self, chunk_x: int, chunk_y: int) -> bool:
-        self.set_message("Region-wide wilderness projects have been retired.")
+        self.set_message("There isn't an active regional construction project here.")
         return False
 
         project = self.wilderness_region_project(chunk_x, chunk_y)
@@ -3911,7 +3914,7 @@ class WildernessRevampMixin:
         return True
 
     def work_on_wilderness_region_project(self, chunk_x: int, chunk_y: int, fieldwork: bool = False) -> bool:
-        self.set_message("Region-wide wilderness projects have been retired.")
+        self.set_message("There isn't an active regional construction project here.")
         return False
 
         project = self.wilderness_region_project(chunk_x, chunk_y)
@@ -3969,7 +3972,7 @@ class WildernessRevampMixin:
         return True
 
     def maintain_wilderness_region_preserve(self, chunk_x: int, chunk_y: int) -> bool:
-        self.set_message("Region-wide preserve maintenance has been retired.")
+        self.set_message("No organized maintenance work is posted here.")
         return False
 
         if not self.wilderness_region_project_maxed(chunk_x, chunk_y):
@@ -4018,7 +4021,7 @@ class WildernessRevampMixin:
         return {"name": f"{season} {focus}", "action": seasonal_action, "drops": drops}
 
     def undertake_wilderness_seasonal_initiative(self, chunk_x: int, chunk_y: int) -> bool:
-        self.set_message("Region-wide seasonal initiatives have been retired.")
+        self.set_message("No seasonal work has been posted here.")
         return False
 
         if self.wilderness_region_project_level(chunk_x, chunk_y) < 2:
@@ -4130,10 +4133,10 @@ class WildernessRevampMixin:
         return ""
 
     def wilderness_vitality_consequence_lines(self, kind: str) -> List[str]:
-        return ["RETIRED ACTIVITY", "", "This former region-wide activity is no longer used."]
+        return ["QUIET SITE", "", "There isn't any organized work available here today."]
 
     def use_wilderness_vitality_consequence(self, kind: str) -> bool:
-        self.set_message("Region-wide vitality activities have been retired.")
+        self.set_message("There isn't any organized work available here today.")
         return False
 
         region = self.wilderness_region_record(self.state.wilderness_chunk_x, self.state.wilderness_chunk_y)
@@ -4165,7 +4168,7 @@ class WildernessRevampMixin:
         return True
 
     def perform_wilderness_fieldwork(self, x: int, y: int, method: str = "survey") -> bool:
-        self.set_message("Regional sampling and field-site work have been retired.")
+        self.set_message("The old field station is empty; no survey work is posted here.")
         return False
 
         cx, cy = int(self.state.wilderness_chunk_x), int(self.state.wilderness_chunk_y)
@@ -4250,7 +4253,7 @@ class WildernessRevampMixin:
         material_text = ", ".join(quantity_item_phrase(item, qty) for item, qty in profile["materials"].items())
         rows = [str(profile["name"]).upper(), "", str(profile["story"]), ""]
         if record.get("resolved"):
-            rows.extend([f"Resolved by: {record.get('resolution', 'field study')}", "Your decision has become part of this region's field record."])
+            rows.extend([f"What you did: {record.get('resolution', 'studied the site')}", "The signs of your earlier work are still visible here."])
         else:
             rows.extend(["Document: 3 stamina, 20 minutes; modest research reward.", f"Intervene: 7 stamina, 35 minutes, and {material_text}.", f"Intervention: {profile['action']}."])
         return rows
@@ -4370,7 +4373,7 @@ class WildernessRevampMixin:
         if record.get("last_event_week") == event["week"]:
             rows.extend(["The work at this local site is complete for the week.", f"Response: {record.get('last_event_response', 'local assistance')}"])
         else:
-            rows.extend(["Inspect: 3 stamina and 20 minutes.", f"Help: 6 stamina, 35 minutes, and 2 {event['material']}.", "This physical site changes next week."])
+            rows.extend(["Inspect: 3 stamina and 20 minutes.", f"Help: 6 stamina, 35 minutes, and 2 {event['material']}.", "Wind, water, and passing animals may leave this place different next week."])
         return rows
 
     def resolve_wilderness_weekly_event(self, chunk_x: int, chunk_y: int, method: str) -> bool:
@@ -6252,7 +6255,7 @@ class WildernessRevampMixin:
         record["talk_day"] = day
         record["bond"] = int(record["bond"]) + 1
         if not quiet:
-            self.autosave_with_message(f"Caught up with {record['name']}. Relationship: {self.recurring_wilderness_traveler_bond_label(record['bond'])} ({record['bond']}).")
+            self.autosave_with_message(f"Caught up with {record['name']}. You are now {self.recurring_wilderness_traveler_bond_label(record['bond']).lower()} to one another.")
         return True
 
     def wilderness_traveler_personality(self, record: Dict[str, object]) -> Dict[str, object]:
@@ -6534,7 +6537,7 @@ class WildernessRevampMixin:
         if not self.spend_stamina(2): return False
         self.advance_time(20)
         self.set_wilderness_climate_prepared(str(record["name"]))
-        self.autosave_with_message(f"{record['name']} helped prepare the local route: reduced expedition exertion here this week.")
+        self.autosave_with_message(f"{record['name']} helped prepare the local route. Expeditions through this area will be less tiring for the rest of the week.")
         return True
 
     def patrol_with_wilderness_traveler(self, traveler: Dict[str, object]) -> bool:
@@ -6581,7 +6584,7 @@ class WildernessRevampMixin:
         return rows
 
     def study_with_wilderness_specialist(self, traveler: Dict[str, object]) -> bool:
-        self.set_message("Regional field lessons have been retired.")
+        self.set_message(f"{traveler.get('name', 'The traveler')} doesn't have a field lesson planned today.")
         return False
 
         if not traveler.get("recurring"):
@@ -6605,12 +6608,14 @@ class WildernessRevampMixin:
         self.state.money += 25
         self.add_wilderness_region_vitality(cx, cy, 2, f"field lesson with {record['name']}")
         self.autosave_with_message(
-            f"Completed a field lesson with {record['name']}: +25g, +2 relationship, +2 vitality, and {mapped} nearby area(s) charted."
+            f"Completed a field lesson with {record['name']}: earned 25g and charted "
+            f"{quantity_agreement(mapped, 'nearby area')}. The work strengthened your bond "
+            "and improved the region's condition."
         )
         return True
 
     def share_wilderness_specialist_sample(self, traveler: Dict[str, object]) -> bool:
-        self.set_message("Regional specimen hand-ins have been retired.")
+        self.set_message(f"{traveler.get('name', 'The traveler')} isn't collecting specimens today.")
         return False
 
         if not traveler.get("recurring"):
@@ -7023,7 +7028,7 @@ class WildernessRevampMixin:
             self.complete_wilderness_expedition(x, y)
 
     def show_wilderness_field_site(self, x: int, y: int):
-        self.set_message("Generic regional field sites have been retired; this is now an ordinary trail camp.")
+        self.set_message("The old camp is empty, but its cleared ground still offers a safe place to rest.")
         return
         site = self.wilderness_field_site_type(self.state.wilderness_chunk_x, self.state.wilderness_chunk_y)
         items = [
@@ -7066,7 +7071,7 @@ class WildernessRevampMixin:
                 continue
 
     def show_wilderness_region_project(self, x: int, y: int):
-        self.set_message("The regional stewardship project system has been retired.")
+        self.set_message("No work project is posted at this site.")
         return
         cx, cy = int(self.state.wilderness_chunk_x), int(self.state.wilderness_chunk_y)
         profile = self.wilderness_region_project_profile(cx, cy)

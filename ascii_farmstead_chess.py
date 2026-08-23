@@ -7,6 +7,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from ascii_farmstead_board_visuals import board_tile
 from ascii_farmstead_data import LEFT_PANEL_HEIGHT, LEFT_PANEL_WIDTH, MENU_BACK, MENU_CONFIRM_KEYS
+from ascii_farmstead_helpers import quantity_agreement
 from ascii_farmstead_minigame_ui import minigame_controls, minigame_notice, minigame_section, minigame_title
 from ascii_farmstead_support import C, clear_screen, colorize, movement_delta_for_key, normalize_key, read_key
 from ascii_farmstead_ui import MenuItem
@@ -543,7 +544,7 @@ class ChessMixin:
         minigame_notice(
             f"{square_name} | "
             f"{chess_piece_glyph(piece) + ' ' + chess_piece_name(piece) if piece != CHESS_EMPTY else 'empty'} | "
-            f"{len(destinations)} destination(s)",
+            + quantity_agreement(len(destinations), "destination"),
             prefix="CURSOR",
         )
         minigame_notice(match.get("note", ""))

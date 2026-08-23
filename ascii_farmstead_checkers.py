@@ -14,6 +14,7 @@ from ascii_farmstead_game_tables import (
     normalized_game_ids,
     venue_game_ids,
 )
+from ascii_farmstead_helpers import quantity_agreement
 from ascii_farmstead_minigame_ui import minigame_controls, minigame_notice, minigame_section, minigame_title
 from ascii_farmstead_support import C, clear_screen, colorize, movement_delta_for_key, normalize_key, read_key
 from ascii_farmstead_ui import MenuItem
@@ -297,7 +298,7 @@ class CheckersMixin:
             "",
             (
                 f"Paused match: {match.get('difficulty')} at {match.get('venue')} "
-                f"after {match.get('move_count', 0)} move(s)."
+                f"after {quantity_agreement(int(match.get('move_count', 0)), 'move')}."
                 if match
                 else "Paused match: none."
             ),
@@ -375,7 +376,7 @@ class CheckersMixin:
                 f"{checkers_piece_glyph(cursor_piece)} {checkers_piece_name(cursor_piece)}"
                 if cursor_piece != CHECKERS_EMPTY else "Empty square"
             )
-            + f" | {len(destinations)} destination(s)"
+            + f" | {quantity_agreement(len(destinations), 'destination')}"
         )
         minigame_notice(square_detail, prefix="CURSOR")
         minigame_notice(match.get("note", ""))

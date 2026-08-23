@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Mapping, Optional, Set, Tuple
 
+from ascii_farmstead_helpers import quantity_agreement
 from ascii_farmstead_support import clear_screen, colorize, normalize_key, read_key
 from ascii_farmstead_ui import MenuItem, menu_select, strip_ansi
 
@@ -424,7 +425,7 @@ class CrimeStealthMixin:
             self.state.money -= fine
             removed = self.confiscate_stolen_property()
             self.state.crime_incident = {}
-            suffix = f" {removed} stolen item(s) were returned." if removed else ""
+            suffix = f" {quantity_agreement(removed, 'stolen item')} returned." if removed else ""
             self.autosave_with_message(f"Paid the fixed {fine}g fine.{suffix}")
             return
         self.serve_crime_sentence(hours, str(incident.get("label", "the offense")))
@@ -444,7 +445,7 @@ class CrimeStealthMixin:
             step = min(60, remaining)
             self.advance_time(step)
             remaining -= step
-        suffix = f" {removed} stolen item(s) were returned." if removed else ""
+        suffix = f" {quantity_agreement(removed, 'stolen item')} returned." if removed else ""
         self.autosave_with_message(f"Served a fixed {hours}-hour sentence for {label.lower()}; time advanced.{suffix}")
 
     def crime_absolute_minute(self) -> int:
@@ -1089,7 +1090,9 @@ class CrimeStealthMixin:
             self.state.money -= fine
             removed = self.confiscate_stolen_property()
             self.state.crime_incident = {}
-            self.autosave_with_message(f"Paid the posted {fine}g fine. {removed} stolen item(s) returned.")
+            self.autosave_with_message(
+                f"Paid the posted {fine}g fine. {quantity_agreement(removed, 'stolen item')} returned."
+            )
         elif choice.value == "surrender":
             self.serve_crime_sentence(int(incident.get("jail_hours", 1)), str(incident.get("label", "the offense")))
         return True

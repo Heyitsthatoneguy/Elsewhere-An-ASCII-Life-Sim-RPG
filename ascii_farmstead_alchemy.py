@@ -18,7 +18,7 @@ from ascii_farmstead_data import (
     MENU_BACK,
     WILDERNESS_FORAGE_DATA,
 )
-from ascii_farmstead_helpers import quantity_item_phrase
+from ascii_farmstead_helpers import quantity_agreement, quantity_item_phrase
 
 
 def MenuItem(*args, **kwargs):
@@ -1025,7 +1025,12 @@ class AlchemyMixin:
         break_alchemy_stealth(self.state)
         self.state.inventory[item_name] -= 1
         self.advance_time(1)
-        self.autosave_with_message(f"Threw {item_name}: {hits} hostile target(s) hit" + (f", {defeated} defeated" if defeated else "") + (f", {terrain_changed} terrain tile(s) changed" if terrain_changed else "") + "." + self.alchemy_apply_backlash(product))
+        result = f"Threw {item_name}: {quantity_agreement(hits, 'hostile target')} hit"
+        if defeated:
+            result += f", {defeated} defeated"
+        if terrain_changed:
+            result += f", {quantity_agreement(terrain_changed, 'terrain tile')} changed"
+        self.autosave_with_message(result + "." + self.alchemy_apply_backlash(product))
         return True
 
     def alchemy_use_fertilizer(self, item_name: str, product: Mapping[str, object]) -> bool:

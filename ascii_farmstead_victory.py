@@ -7,7 +7,7 @@ import random
 from typing import Dict, List, Optional, Tuple
 
 from ascii_farmstead_data import LEFT_PANEL_HEIGHT, LEFT_PANEL_WIDTH
-from ascii_farmstead_helpers import days_in_month, format_date
+from ascii_farmstead_helpers import days_in_month, format_date, quantity_agreement
 
 
 VICTORY_CONTRACT_SCHEMA = 1
@@ -550,7 +550,7 @@ class VictoryRunMixin:
             str(record.get("contract_title", "Finite Challenge")).upper(),
             f"{record.get('name', 'Farmer')} completed the run.",
             f"Finished: {format_date(record.get('end_month', 1), record.get('end_day', 1), record.get('end_year', 1))}",
-            f"Duration: {record.get('elapsed_days', 1)} in-game day(s)",
+            f"Duration: {quantity_agreement(int(record.get('elapsed_days', 1) or 1), 'in-game day')}",
             f"Generation: {record.get('generation', 1)}",
             f"Final score: {record.get('score', 0):,}",
             "",

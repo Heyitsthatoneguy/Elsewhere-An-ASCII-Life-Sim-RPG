@@ -5,7 +5,7 @@ from __future__ import annotations
 import random
 from typing import Dict, List, Mapping, Optional, Tuple
 
-from ascii_farmstead_helpers import quantity_item_phrase
+from ascii_farmstead_helpers import quantity_agreement, quantity_item_phrase
 from ascii_farmstead_inventory import add_inventory_items
 from ascii_farmstead_procedural_interiors import build_procedural_ground_floor
 
@@ -400,7 +400,11 @@ class RouteHeritageMixin:
             self.set_message(f"{feature.get('name')} is already complete."); return True
         remaining = max(0, self.route_heritage_total_hazards() - len(set(str(value) for value in record.get("cleared_hazards", ()))))
         if remaining:
-            self.set_message(f"Clear the {remaining} remaining interior hazard(s) before structural restoration."); return True
+            self.set_message(
+                f"Clear {remaining} "
+                f"{quantity_agreement(remaining, 'remaining interior hazard', 'remaining interior hazards')} "
+                "before structural restoration."
+            ); return True
         required = str(feature.get("tool", "Hammer"))
         if str(tool) != required:
             self.set_message(f"{feature.get('name')} requires the {required}."); return True
@@ -444,10 +448,10 @@ class RouteHeritageMixin:
         record["benefit_weeks"][benefit] = week; message = ""
         if benefit == "waystation": self.restore_stamina(40); message = "Rested and resupplied at the restored waystation."
         elif benefit == "hospitality": self.restore_stamina(30); self.state.money += 90; message = "Helped host travelers at the restored estate and earned 90g."
-        elif benefit == "lookout": added = self.map_nearby_wilderness_chunks(3); message = f"Surveyed from the restored lookout and mapped {added} nearby area(s)."
+        elif benefit == "lookout": added = self.map_nearby_wilderness_chunks(3); message = f"Surveyed from the restored lookout and mapped {quantity_agreement(added, 'nearby area')}."
         elif benefit == "produce": add_inventory_items(self.state.inventory, {"Field Snack": 3, "Mixed Seeds": 4}); message = "Collected the farmstead's weekly produce and seed allotment."
         elif benefit == "materials": add_inventory_items(self.state.inventory, {"Metal Fittings": 1, "Ruin Scrap": 2, "Coal": 2}); message = "Collected reusable materials prepared at the restored works."
-        else: added = self.map_nearby_wilderness_chunks(2); add_inventory_items(self.state.inventory, {"Old Town Ledger": 1}); message = f"Studied the restored archive, mapped {added} area(s), and copied an Old Town Ledger."
+        else: added = self.map_nearby_wilderness_chunks(2); add_inventory_items(self.state.inventory, {"Old Town Ledger": 1}); message = f"Studied the restored archive, mapped {quantity_agreement(added, 'area')}, and copied an Old Town Ledger."
         self.advance_time(45); self.autosave_with_message(message); return True
 
     def route_heritage_directory_lines(self) -> List[str]:

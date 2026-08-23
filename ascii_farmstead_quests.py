@@ -12,6 +12,7 @@ from ascii_farmstead_data import MENU_BACK, TOWN_DOORS
 from ascii_farmstead_helpers import (
     item_name_for_quantity,
     naturalize_item_quantity_text,
+    quantity_agreement,
     quantity_item_phrase,
 )
 from ascii_farmstead_support import C, colorize
@@ -1539,7 +1540,9 @@ class QuestSystemMixin:
             lines.extend(["", "Schedule conflict:"])
             lines.extend(f"- {row.get('title', 'Another appointment')}" for row in conflicts)
         if int(event.get("reschedule_count", 0) or 0):
-            lines.append(f"Rescheduled: {int(event.get('reschedule_count', 0))} time(s)")
+            lines.append(
+                f"Rescheduled: {quantity_agreement(int(event.get('reschedule_count', 0)), 'time')}"
+            )
         if int(event.get("weather_delays", 0) or 0):
             lines.append(f"Weather delays: {int(event.get('weather_delays', 0))}")
         reason = str(event.get("completion_reason", "") or "")

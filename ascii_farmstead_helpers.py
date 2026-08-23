@@ -131,12 +131,19 @@ def naturalize_item_quantity_text(text: object, item_name: object, quantity: obj
     return rendered.replace(f"{count} {name}", quantity_item_phrase(name, count))
 
 
-def quantity_agreement(quantity: object, singular: str, plural: str) -> str:
-    """Choose a verb, pronoun, or determiner that agrees with a stack count."""
+def quantity_agreement(quantity: object, singular: str, plural: Optional[str] = None) -> str:
+    """Choose count-aware wording, preserving the older word-only call form.
+
+    Two arguments produce a complete phrase such as ``1 day`` or ``2 days``.
+    Supplying an explicit plural retains the original behavior and returns only
+    the agreeing word, which existing callers use after rendering the count.
+    """
     try:
         count = int(quantity)
     except (TypeError, ValueError):
         count = 0
+    if plural is None:
+        return quantity_item_phrase(singular, count)
     return singular if count == 1 else plural
 
 

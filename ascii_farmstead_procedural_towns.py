@@ -30,7 +30,7 @@ from ascii_farmstead_custom_extended import (
     stamp_custom_building_template,
 )
 from ascii_farmstead_game_tables import GAME_TABLE_DATA, venue_game_ids
-from ascii_farmstead_helpers import quantity_item_phrase
+from ascii_farmstead_helpers import quantity_agreement, quantity_item_phrase
 from ascii_farmstead_containers import CONTAINER_PROFILES
 from ascii_farmstead_furniture_catalog import FURNITURE_CATALOG_DATA
 from ascii_farmstead_procedural_interiors import (
@@ -1546,7 +1546,8 @@ class ProceduralTownRuntimeMixin:
             community = self.ensure_procedural_town_community(plan)
             social_log = list(community.get("social_log", []) or [])
             social_log.append(
-                f"{resident.get('name', 'A resident')}'s {reason} reached {changed} close connection(s)."
+                f"{resident.get('name', 'A resident')}'s {reason} reached "
+                f"{quantity_agreement(changed, 'close connection')}."
             )
             community["social_log"] = social_log[-20:]
         return changed

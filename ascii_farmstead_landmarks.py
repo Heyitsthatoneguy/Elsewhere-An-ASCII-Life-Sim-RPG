@@ -9,6 +9,11 @@ from ascii_farmstead_data import MENU_BACK
 from ascii_farmstead_inventory import add_inventory_items, format_drops
 
 
+def _mapped_area_phrase(count: int, *, nearby: bool = True) -> str:
+    amount = max(0, int(count))
+    return f"{amount} {'nearby ' if nearby else ''}{'area' if amount == 1 else 'areas'}"
+
+
 class WildernessLandmarkMixin:
     """Multi-tile landmark construction and action-led interactions."""
 
@@ -378,7 +383,7 @@ class WildernessLandmarkMixin:
         else:
             if not self.spend_stamina(3): return False
             mapped, drops = self.map_nearby_wilderness_chunks(1), {}
-            minutes, message = 25, f"Repaired the route markers and charted {mapped} nearby area(s)"
+            minutes, message = 25, f"Repaired the route markers and charted {_mapped_area_phrase(mapped)}"
         if drops: add_inventory_items(self.state.inventory, drops)
         self.advance_time(minutes)
         record["work_week"] = week
@@ -391,7 +396,7 @@ class WildernessLandmarkMixin:
                 "waystone": "Repairing the Route Markers",
             }.get(kind, "Landmark Work")
             consequence = (
-                f"The useful material remains in your pack: {format_drops(drops)}. The landmark remains available for future visits."
+                f"You pack the usable material before leaving the work area: {format_drops(drops)}."
                 if drops else
                 "The repaired markers reveal nearby geography and make this crossroads useful to future travelers."
             )
@@ -399,8 +404,8 @@ class WildernessLandmarkMixin:
                 f"landmark_work:{self.state.wilderness_chunk_x}:{self.state.wilderness_chunk_y}:{x}:{y}:{kind}:{week}",
                 title,
                 [
-                    {"type": "narration", "text": f"You work directly within the {kind.replace('_', ' ')} while its paths, walls, and surrounding terrain remain visible."},
-                    {"type": "narration", "text": f"{message} over {minutes} minutes. Tool use and stamina determine the work instead of a flavor-text result."},
+                    {"type": "narration", "text": f"You spend {minutes} minutes working through the {kind.replace('_', ' ')} and its surrounding ground."},
+                    {"type": "narration", "text": f"{message}. The effort leaves you tired, but the work is finished."},
                     {"type": "narration", "text": consequence},
                 ],
                 f"{message}{reward}",
@@ -473,7 +478,7 @@ class WildernessLandmarkMixin:
                 "The Old Route Reopens",
                 [
                     {"type": "narration", "text": "Loose stone becomes a stable courtyard again. New timber braces the route marker without disguising the age of the ruin."},
-                    {"type": "narration", "text": "The blocked route glyphs physically change into a usable stone path, making the restoration visible after the scene ends."},
+                    {"type": "narration", "text": "You clear the fallen stones from the old approach and reset them as a usable path through the courtyard."},
                     {"type": "dialogue", "speaker": "Traveler's Inscription", "text": "A road survives when the next person can understand where it leads."},
                 ],
                 "Restored the ruin's courtyard and reopened its route marker.",
@@ -487,7 +492,7 @@ class WildernessLandmarkMixin:
         if record.get("restored"):
             items.append(self._wilderness_menu_item("route", "Use restored route marker", "Chart the surrounding wilderness."))
         else:
-            items.append(self._wilderness_menu_item("restore", "Restore with Hammer - 10 Stone, 4 Wood", "Face the route ruin and press F; this row remains as a fallback."))
+            items.append(self._wilderness_menu_item("restore", "Restore with Hammer - 10 Stone, 4 Wood", "Repair the courtyard and reopen the old route marker."))
         choice = self.vertical_panel_select(self.wilderness_minor_landmark_name("stone_ruin"), items, 48, 18, return_back=True)
         if not choice or choice.value == MENU_BACK: return
         if choice.value == "excavate": self.excavate_wilderness_ruin(x, y)
@@ -501,11 +506,11 @@ class WildernessLandmarkMixin:
                     "Reading the Restored Route",
                     [
                         {"type": "narration", "text": "From the reopened courtyard, the old marker's sight lines finally make sense. Worn arrows correspond to ridges, watercourses, and surviving trail cuts."},
-                        {"type": "narration", "text": f"You transfer the route into your own map and chart {added} nearby area(s). The restored ruin now functions as navigation infrastructure rather than a solitary relic."},
+                        {"type": "narration", "text": f"You copy the surviving route onto your own map and chart {_mapped_area_phrase(added)}. Other travelers have begun adding fresh notes beside the older markings."},
                     ],
-                    f"Charted {added} nearby area(s) from the restored route marker.",
+                    f"Charted {_mapped_area_phrase(added)} from the restored route marker.",
                 )
-            self.autosave_with_message(f"Used the restored route marker to chart {added} nearby area(s).")
+            self.autosave_with_message(f"Used the restored route marker to chart {_mapped_area_phrase(added)}.")
 
     def open_wilderness_overlook_site(self, x: int, y: int) -> None:
         record = self.wilderness_poi_record(x, y, "overlook")
@@ -533,11 +538,11 @@ class WildernessLandmarkMixin:
                     "Survey from the Overlook",
                     [
                         {"type": "narration", "text": "You climb the overlook platform and match distant ridgelines, waterways, roads, and settlement roofs to the terrain below."},
-                        {"type": "narration", "text": f"By the time the survey is complete, {added} nearby area(s) have been added to your map. The platform remains behind as a useful landmark for future travelers."},
+                        {"type": "narration", "text": f"By the time the survey is complete, you have added {_mapped_area_phrase(added)} to your map and left the platform ready for the next traveler."},
                     ],
-                    f"Surveyed the overlook and charted {added} nearby area(s).",
+                    f"Surveyed the overlook and charted {_mapped_area_phrase(added)}.",
                 )
-            self.autosave_with_message(f"Surveyed from the overlook and charted {added} nearby area(s).")
+            self.autosave_with_message(f"Surveyed from the overlook and charted {_mapped_area_phrase(added)}.")
         elif choice.value == "watch":
             day = self.errand_day_key()
             if record.get("watch_day") == day:
@@ -588,7 +593,7 @@ class WildernessLandmarkMixin:
         if hasattr(self, "play_world_event_scene"):
             completion = int(record["route_completions"])
             steps = [
-                {"type": "narration", "text": f"You follow the complete marked circuit through {record.get('name', 'the landmark')}, reading its terrain as a connected place instead of a single map symbol."},
+                {"type": "narration", "text": f"You follow the marked circuit through {record.get('name', 'the landmark')}, passing its ridges, low ground, water, and sheltered paths in turn."},
                 {"type": "narration", "text": f"The route takes 45 minutes and yields {format_drops(drops)}. This is your {completion}{'st' if completion == 1 else 'nd' if completion == 2 else 'rd' if completion == 3 else 'th'} completed circuit here."},
             ]
             if milestone:
@@ -628,11 +633,11 @@ class WildernessLandmarkMixin:
                     f"Charting from {record.get('name', 'the Landmark')}",
                     [
                         {"type": "narration", "text": f"The landmark station gives you a stable reference point for roads, water, elevation, and the boundaries of nearby terrain."},
-                        {"type": "narration", "text": f"You chart {added} nearby area(s), turning what you can physically see from the station into usable travel knowledge."},
+                        {"type": "narration", "text": f"You chart {_mapped_area_phrase(added)}, matching distant roads and waterways to your map."},
                     ],
-                    f"Charted {added} nearby area(s) from the landmark station.",
+                    f"Charted {_mapped_area_phrase(added)} from the landmark station.",
                 )
-            self.autosave_with_message(f"Charted {added} nearby area(s) from the landmark station.")
+            self.autosave_with_message(f"Charted {_mapped_area_phrase(added)} from the landmark station.")
 
     def update_ranger_camp_map(self, x: int, y: int) -> bool:
         record = self.wilderness_poi_record(x, y, "camp")
@@ -649,11 +654,11 @@ class WildernessLandmarkMixin:
                 "Updating the Ranger Route Map",
                 [
                     {"type": "narration", "text": "At the camp table, old pencil routes are checked against trail conditions, water access, and recent traveler reports."},
-                    {"type": "narration", "text": f"The corrected route map charts {added} nearby area(s) and remains posted for rangers and passing travelers."},
+                    {"type": "narration", "text": f"The corrected route map charts {_mapped_area_phrase(added)} and remains posted for rangers and passing travelers."},
                 ],
-                f"Updated the ranger route map and charted {added} nearby area(s).",
+                f"Updated the ranger route map and charted {_mapped_area_phrase(added)}.",
             )
-        self.autosave_with_message(f"Updated the ranger route map and charted {added} nearby area(s).")
+        self.autosave_with_message(f"Updated the ranger route map and charted {_mapped_area_phrase(added)}.")
         return True
 
     def maintain_wilderness_shelter(self, x: int, y: int) -> bool:

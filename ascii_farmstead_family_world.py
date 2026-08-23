@@ -17,7 +17,7 @@ from ascii_farmstead_data import (
 )
 from ascii_farmstead_furniture import furniture_component_at, furniture_walkable_kind
 from ascii_farmstead_furniture_actions import furniture_action_id
-from ascii_farmstead_helpers import date_reached, format_date
+from ascii_farmstead_helpers import date_reached, format_date, quantity_agreement
 from ascii_farmstead_ui import MenuItem
 
 
@@ -1195,10 +1195,13 @@ class FamilyWorldMixin:
                     },
                     {
                         "type": "narration",
-                        "text": f"{FAMILY_PRIORITIES[priority]['summary']} Household bond rises by {gain}, and your relationship with {spouse_name} rises by 3.",
+                        "text": (
+                            f"{FAMILY_PRIORITIES[priority]['summary']} The conversation leaves the household "
+                            f"closer and strengthens your marriage to {spouse_name}."
+                        ),
                     },
                 ],
-                f"Completed the weekly partnership check-in. Household bond +{gain}.",
+                "Completed the weekly partnership check-in; the household feels closer afterward.",
                 stage=self.family_relationship_stage_profile("partnership"),
             )
         else:
@@ -1211,12 +1214,14 @@ class FamilyWorldMixin:
                     str(FAMILY_PRIORITIES[priority]["summary"]),
                     "",
                     "You compare schedules, name one worry each, and decide what can wait.",
-                    f"Household bond +{gain}; spouse relationship +3.",
+                    "The conversation brings the household closer and strengthens your marriage.",
                 ],
                 LEFT_PANEL_WIDTH,
                 LEFT_PANEL_HEIGHT,
             )
-        self.autosave_with_message(f"Completed the weekly partnership check-in. Household bond +{gain}.")
+        self.autosave_with_message(
+            "Completed the weekly partnership check-in; the household feels closer afterward."
+        )
         return True
 
     def family_outing_eligible_children(self, outing_type: str) -> List[Dict[str, object]]:
@@ -1280,7 +1285,7 @@ class FamilyWorldMixin:
             f"Conditions: {season}, {weather.lower()}",
             f"Participants: {', '.join(names) if names else 'you and your spouse'}",
             "",
-            "The outing unfolds as shared time rather than another invisible household reward.",
+            "The outing gives everyone time together away from the household routine.",
         ]
         rows.extend(personality_notes or ["- You and your spouse have time to talk without a chore waiting in the next room."])
         rows.extend(["", "What everyone notices becomes part of the family record and the children's upbringing."])
@@ -1356,7 +1361,9 @@ class FamilyWorldMixin:
         state["outing_history"] = state["outing_history"][-20:]
         self.record_family_event(
             outing_type,
-            f"Visited {data['destination']} with {', '.join(record['participants']) if record['participants'] else 'your spouse'}. Household bond +{bond_gain}.",
+            f"Visited {data['destination']} with "
+            f"{', '.join(record['participants']) if record['participants'] else 'your spouse'}; "
+            "the shared day brought the household closer.",
         )
         if hasattr(self, "play_world_event_scene"):
             spouse_id = str(getattr(self.state, "spouse_npc_id", "") or "")
@@ -1369,7 +1376,7 @@ class FamilyWorldMixin:
                 *self.family_scene_participant_steps([spouse_id, *child_actor_ids]),
                 {
                 "type": "narration",
-                "text": f"The family travels to {data['destination']} in {str(self.state.season).lower()} {str(self.state.weather).lower()} conditions. The road, weather, and destination remain visible around the time you share.",
+                "text": f"The family travels to {data['destination']} through the {str(self.state.season).lower()} landscape in {str(self.state.weather).lower()} weather.",
                 },
             ]
             if spouse_id:
@@ -1396,15 +1403,15 @@ class FamilyWorldMixin:
                 })
             steps.append({
                 "type": "narration",
-                "text": f"The outing becomes part of the household record: bond +{bond_gain}, affection +5 for each participating child, and {topic} learning +{learning_gain}.",
+                "text": f"The shared day leaves the household closer, and each participating child carries home a little more curiosity about {topic.lower()}.",
             })
             self.play_world_event_scene(
                 f"family_outing:{outing_type}:{self.state.year}:{self.state.month}:{self.state.day}:{len(state['outing_history'])}",
-                outing_type, steps, f"Completed {outing_type}. Household bond +{bond_gain}.",
+                outing_type, steps, f"Completed {outing_type}; the household feels closer afterward.",
                 stage=self.family_outing_stage_profile(outing_type),
             )
         self.advance_time(int(data.get("minutes", 120)))
-        self.autosave_with_message(f"Completed {outing_type}. Household bond +{bond_gain}.")
+        self.autosave_with_message(f"Completed {outing_type}; the household feels closer afterward.")
         return True
 
     def family_outing_menu(self):
@@ -1428,7 +1435,10 @@ class FamilyWorldMixin:
         outing_items = []
         for name, data in FAMILY_OUTINGS.items():
             participants = len(self.family_outing_eligible_children(name)) + (1 if self.state.spouse_npc_id else 0)
-            outing_items.append(MenuItem(label=name, value=name, enabled=participants > 0, hint=f"{data['destination']} | {data['cost']}g | {participants} participant(s)"))
+            outing_items.append(MenuItem(
+                label=name, value=name, enabled=participants > 0,
+                hint=f"{data['destination']} | {data['cost']}g | {quantity_agreement(participants, 'participant')}",
+            ))
         outing_items.append(MenuItem(label="Back", value=MENU_BACK, enabled=True))
         choice = self.vertical_panel_select("Choose Family Outing", outing_items, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT, return_back=True)
         if not choice or choice.value == MENU_BACK:
@@ -1526,7 +1536,7 @@ class FamilyWorldMixin:
             "Lakeside": "The ceremony gathers at the lakeside, where moving water carries every pause in the vows.",
             "Wayside Pavilion": "A restored wayside pavilion becomes a quiet threshold between your separate lives and shared road.",
         }.get(venue, "The household gathers in a place chosen together.")
-        weather_line = f"The {weather.lower()} weather becomes part of the day rather than being ignored by an indoor script."
+        weather_line = f"The {weather.lower()} weather shapes the ceremony, from the guests' clothes to the sound beyond the gathering."
         return [
             f"Wedding of {self.state.player_name} and {name}",
             "",

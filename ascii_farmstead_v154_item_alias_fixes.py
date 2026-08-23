@@ -1753,7 +1753,7 @@ class FarmGame(
         self.ensure_bounty_state()
         bounty_id = str(bounty.get("id", "") or "")
         if not bounty_id:
-            self.set_message("That bounty record is unreadable.")
+            self.set_message("The writing on that bounty notice is too damaged to read.")
             return False
         if bounty_id in self.state.active_bounties:
             self.set_message("That bounty is already active.")
@@ -12988,7 +12988,7 @@ class FarmGame(
             wy = cy * 38 + 19
             terrain = "water" if self.wilderness_world_water_tile(wx, wy) else wilderness_biome_name(self.wilderness_world_biome_tile(wx, wy))
             details.append(f"Unvisited {terrain}")
-        cost = f"Travel: {distance} chunk(s), {stamina_cost} STA, {minutes_cost} min"
+        cost = f"Travel: {quantity_agreement(distance, 'area')}, {stamina_cost} STA, {minutes_cost} min"
         if waypoint_discount:
             cost += " (waypoint discount)"
         if road_discount:
@@ -14204,7 +14204,7 @@ class FarmGame(
             f"Farm: {self.automation_scope_label(scope)}",
             f"Network: {'running' if policy['enabled'] else 'paused'}",
             f"Connected advanced machines: {len(advanced)}",
-            f"Connected storage: {len(storage_records)} container(s), {storage_used}/{storage_capacity} used",
+            f"Connected storage: {quantity_agreement(len(storage_records), 'container')}, {storage_used}/{storage_capacity} used",
             "",
             f"Crop strategy: {policy['crop_strategy']}",
             f"Seasonal hopper rotation: {'on' if policy['auto_rotate'] else 'off'}",
@@ -14302,7 +14302,7 @@ class FarmGame(
         record["seed_qty"] = 0
         record["last_message"] = "Unloaded."
         if not quiet:
-            self.autosave_with_message(f"Unloaded {seed_qty} seed(s) from Seed Hopper.")
+            self.autosave_with_message(f"Unloaded {quantity_agreement(seed_qty, 'seed')} from Seed Hopper.")
         return seed_qty
 
     def seed_hopper_loaded_label(self, hopper_key: str) -> str:
@@ -14612,7 +14612,9 @@ class FarmGame(
                     continue
                 made = min(seeds_per_crop, target - current)
                 record["seed_qty"] = current + made
-                record["last_message"] = f"Seed Reclaimer recovered {made} seed(s) from harvested {crop_name}."
+                record["last_message"] = (
+                    f"Seed Reclaimer recovered {quantity_agreement(made, 'seed')} from harvested {crop_name}."
+                )
                 result["seed_reclaimed"] += made
                 result["diverted"] += 1
                 return True
@@ -14877,7 +14879,9 @@ class FarmGame(
     def run_daily_farm_automation(self, sprinkler_watered: int = 0) -> List[str]:
         report: List[str] = []
         if sprinkler_watered:
-            report.append(f"Sprinklers watered {sprinkler_watered} tile(s) across owned farms.")
+            report.append(
+                f"Sprinklers watered {quantity_agreement(sprinkler_watered, 'tile')} across owned farms."
+            )
 
         total_automation_objects = 0
         for scope, land_map in self.owned_farm_land_maps():
@@ -14902,14 +14906,20 @@ class FarmGame(
             if seed_logistics["rotated"] or seed_logistics["loaded"] or seed_logistics["purchased"]:
                 logistics_bits = []
                 if seed_logistics["rotated"]:
-                    logistics_bits.append(f"rotated {seed_logistics['rotated']} hopper(s) for {self.state.season}")
+                    logistics_bits.append(
+                        f"rotated {quantity_agreement(seed_logistics['rotated'], 'hopper')} for {self.state.season}"
+                    )
                 if seed_logistics["loaded"]:
-                    logistics_bits.append(f"loaded {seed_logistics['loaded']} stored seed(s)")
+                    logistics_bits.append(
+                        f"loaded {quantity_agreement(seed_logistics['loaded'], 'stored seed')}"
+                    )
                 if seed_logistics["purchased"]:
-                    logistics_bits.append(f"delivered {seed_logistics['purchased']} seed(s) for ${seed_logistics['spent']}")
+                    logistics_bits.append(
+                        f"delivered {quantity_agreement(seed_logistics['purchased'], 'seed')} for ${seed_logistics['spent']}"
+                    )
                 bits.append("logistics " + ", ".join(logistics_bits))
             if harvest["harvested"]:
-                harvest_bits = [f"harvest crates picked {harvest['harvested']} crop(s)"]
+                harvest_bits = [f"harvest crates picked {quantity_agreement(harvest['harvested'], 'crop')}"]
                 if harvest["stored"]:
                     harvest_bits.append(f"{harvest['stored']} stored")
                 if harvest["shipped"]:
@@ -14919,7 +14929,7 @@ class FarmGame(
                 bits.append(", ".join(harvest_bits))
                 supply_bits = []
                 if harvest["seed_reclaimed"]:
-                    supply_bits.append(f"reclaimed {harvest['seed_reclaimed']} seed(s)")
+                    supply_bits.append(f"reclaimed {quantity_agreement(harvest['seed_reclaimed'], 'seed')}")
                 if harvest["feed_made"]:
                     supply_bits.append(f"mixed {harvest['feed_made']} Animal Feed")
                 if harvest["fertilizer_made"]:
@@ -14927,23 +14937,30 @@ class FarmGame(
                 if supply_bits:
                     bits.append("closed-loop supplies " + ", ".join(supply_bits))
             if cultivation["tilled"]:
-                bits.append(f"cultivators prepared {cultivation['tilled']} soil tile(s)")
+                bits.append(f"cultivators prepared {quantity_agreement(cultivation['tilled'], 'soil tile')}")
             if grounds["cleared"]:
-                bits.append(f"groundskeepers cleared {grounds['cleared']} debris tile(s) and recovered {grounds['materials']} material(s)")
+                bits.append(
+                    f"groundskeepers cleared {quantity_agreement(grounds['cleared'], 'debris tile')} and "
+                    f"recovered {quantity_agreement(grounds['materials'], 'material')}"
+                )
             if fertilizing["fertilized"]:
-                bits.append(f"spreaders fertilized {fertilizing['fertilized']} tile(s)")
+                bits.append(f"spreaders fertilized {quantity_agreement(fertilizing['fertilized'], 'tile')}")
             elif fertilizing["needed"]:
                 bits.append("fertilizer spreaders need Basic Fertilizer")
             if seeding["planted"]:
-                bits.append(f"seed hoppers planted {seeding['planted']} seed(s)")
+                bits.append(f"seed hoppers planted {quantity_agreement(seeding['planted'], 'seed')}")
             elif seeding["empty"]:
-                bits.append(f"{seeding['empty']} seed hopper(s) need seeds")
+                bits.append(f"{quantity_agreement(seeding['empty'], 'seed hopper')} need seeds")
             elif seeding["out_of_season"]:
-                bits.append(f"{seeding['out_of_season']} seed hopper(s) held out-of-season seeds")
+                bits.append(
+                    f"{quantity_agreement(seeding['out_of_season'], 'seed hopper')} held out-of-season seeds"
+                )
             elif seeding["no_space"]:
-                bits.append(f"{seeding['no_space']} seed hopper(s) found no empty tilled soil")
+                bits.append(
+                    f"{quantity_agreement(seeding['no_space'], 'seed hopper')} found no empty tilled soil"
+                )
             if irrigation["watered"]:
-                bits.append(f"irrigation watered {irrigation['watered']} tile(s)")
+                bits.append(f"irrigation watered {quantity_agreement(irrigation['watered'], 'tile')}")
             elif irrigation["inactive_networks"]:
                 bits.append("irrigation needs a connected water source")
             if not bits:
@@ -15012,11 +15029,11 @@ class FarmGame(
             if fed or tended or collected or purchased:
                 bits = []
                 if fed:
-                    bits.append(f"fed {fed} animal(s)")
+                    bits.append(f"fed {fed} {quantity_agreement(fed, 'animal', 'animals')}")
                 if tended:
-                    bits.append(f"tended {tended} animal(s)")
+                    bits.append(f"tended {tended} {quantity_agreement(tended, 'animal', 'animals')}")
                 if collected:
-                    bits.append(f"collected {collected} product(s), {shipped} shipped")
+                    bits.append(f"collected {collected} {quantity_agreement(collected, 'product', 'products')}, {shipped} shipped")
                 if purchased:
                     bits.append(f"delivered {purchased} feed for ${spent}")
                 lines.append(f"{self.automation_scope_label(scope)} livestock: {', '.join(bits)}.")
@@ -15082,11 +15099,13 @@ class FarmGame(
             if pond_products or processor_outputs or processors_loaded:
                 bits = []
                 if pond_products:
-                    bits.append(f"collected {pond_products} pond product(s), {pond_shipped} shipped")
+                    bits.append(f"collected {pond_products} pond {quantity_agreement(pond_products, 'product', 'products')}, {pond_shipped} shipped")
                 if processor_outputs:
-                    bits.append(f"routed {processor_outputs} preserve(s), {processor_shipped} shipped")
+                    bits.append(
+                        f"routed {quantity_agreement(processor_outputs, 'preserve')}, {processor_shipped} shipped"
+                    )
                 if processors_loaded:
-                    bits.append(f"loaded {processors_loaded} Preserves Jar(s)")
+                    bits.append(f"loaded {quantity_agreement(processors_loaded, 'Preserves Jar')}")
                 lines.append(f"{self.automation_scope_label(scope)} production: {', '.join(bits)}.")
         return lines
 
@@ -15101,7 +15120,7 @@ class FarmGame(
         useful = [line for line in report if line and line != "No automation ran overnight."]
         if not useful:
             return ""
-        return f" Automation report ready ({len(useful)} update(s))."
+        return f" Automation report ready ({len(useful)} {quantity_agreement(len(useful), 'update', 'updates')})."
 
     def automation_status_lines(self, scope: Optional[str] = None) -> List[str]:
         rows: List[str] = ["FARM AUTOMATION", ""]
@@ -15134,7 +15153,7 @@ class FarmGame(
                         if obj.get("name") == "Seed Hopper"
                     ]
                     loaded = [label for label in loaded_labels if label != "empty"]
-                    rows.append(f"  Loaded: {len(loaded)}/{counts[name]} hopper(s)")
+                    rows.append(f"  Loaded: {len(loaded)}/{quantity_agreement(counts[name], 'hopper')}")
                     if loaded:
                         rows.append(f"  Seeds: {', '.join(loaded[:3])}")
             rows.append("")
@@ -15269,17 +15288,31 @@ class FarmGame(
                 for xx, tile in enumerate(row):
                     if tile in [",", "w"] or self.crop_for_scope(land_scope, xx, yy):
                         workable_tiles += 1
-            rows.append(f"- Irrigation reach: {len(irrigation['tiles'])}/{workable_tiles} worked tile(s)")
+            rows.append(
+                f"- Irrigation reach: {len(irrigation['tiles'])}/{quantity_agreement(workable_tiles, 'worked tile')}"
+            )
             rows.append(f"- Water networks: {irrigation['active_networks']} active, {irrigation['inactive_networks']} inactive")
-            rows.append(f"- Harvest crates: {harvest['crates']} crate(s), {harvest['mature']} mature crop(s) in range")
-            rows.append(f"- Loader routes: {harvest['loader_routes']} crate route(s), {harvest['loaders']} loader(s), {harvest['bins']} bin(s)")
-            rows.append(f"- Produce sorting: {harvest['sorted_routes']} premium route(s), {harvest['sorters']} sorter(s)")
-            rows.append(f"- Seed hoppers: {seeding['loaded']}/{seeding['hoppers']} loaded, {seeding['plantable']} empty tilled tile(s) in range")
+            rows.append(
+                f"- Harvest crates: {quantity_agreement(harvest['crates'], 'crate')}, "
+                f"{quantity_agreement(harvest['mature'], 'mature crop')} in range"
+            )
+            rows.append(
+                f"- Loader routes: {quantity_agreement(harvest['loader_routes'], 'crate route')}, "
+                f"{quantity_agreement(harvest['loaders'], 'loader')}, {quantity_agreement(harvest['bins'], 'bin')}"
+            )
+            rows.append(
+                f"- Produce sorting: {quantity_agreement(harvest['sorted_routes'], 'premium route')}, "
+                f"{quantity_agreement(harvest['sorters'], 'sorter')}"
+            )
+            rows.append(
+                f"- Seed hoppers: {seeding['loaded']}/{seeding['hoppers']} loaded, "
+                f"{quantity_agreement(seeding['plantable'], 'empty tilled tile')} in range"
+            )
             cultivators = [obj for obj in automation_objects if obj.get("kind") == "cultivator"]
             spreaders = [obj for obj in automation_objects if obj.get("kind") == "fertilizer_spreader"]
-            rows.append(f"- Soil preparation: {len(cultivators)} cultivator(s)")
+            rows.append(f"- Soil preparation: {quantity_agreement(len(cultivators), 'cultivator')}")
             rows.append(
-                f"- Fertilizing: {len(spreaders)} spreader(s), "
+                f"- Fertilizing: {quantity_agreement(len(spreaders), 'spreader')}, "
                 f"{int(self.state.inventory.get('Basic Fertilizer', 0) or 0)} Basic Fertilizer available"
             )
             if seeding["out_of_season"]:
@@ -15334,7 +15367,9 @@ class FarmGame(
 
         if kind in ["pipe", "pump", "water_source", "sprinkler"]:
             irrigation = self.irrigation_preview_for_scope(scope, land_map, [obj for obj in objects if isinstance(obj.get("automation"), dict) and obj.get("automation")])
-            rows.append(f"Irrigation reach on this land: {len(irrigation['tiles'])} tile(s)")
+            rows.append(
+                f"Irrigation reach on this land: {quantity_agreement(len(irrigation['tiles']), 'tile')}"
+            )
             rows.append(f"Networks: {irrigation['active_networks']} active, {irrigation['inactive_networks']} inactive")
             if kind == "pump" and current:
                 rows.append(f"Water source nearby: {'yes' if self.pump_has_water_source(scope, land_map, current) else 'no'}")
@@ -15370,12 +15405,14 @@ class FarmGame(
                     if land_map[yy][xx] == "." and not self.crop_for_scope(scope, xx, yy) and not self.scoped_object_at(scope, xx, yy):
                         candidates += 1
             rows.append(f"Clear soil awaiting preparation: {candidates}")
-            rows.append(f"Overnight capacity: {capacity} tile(s)")
+            rows.append(f"Overnight capacity: {quantity_agreement(capacity, 'tile')}")
             return rows
 
         if kind == "fertilizer_spreader" and current:
             rows.append(f"Basic Fertilizer available: {int(self.state.inventory.get('Basic Fertilizer', 0) or 0)}")
-            rows.append(f"Overnight capacity: {max(1, int(automation.get('daily_capacity', 8)))} tile(s)")
+            rows.append(
+                f"Overnight capacity: {quantity_agreement(max(1, int(automation.get('daily_capacity', 8))), 'tile')}"
+            )
             rows.append("Fertilized crops produce more valuable quality grades.")
             return rows
 
@@ -15413,7 +15450,9 @@ class FarmGame(
                 for xx in range(max(1, x - radius), min(len(land_map[yy]) - 1, x + radius + 1)):
                     debris += 1 if land_map[yy][xx] in {"^", "o", "*"} else 0
             rows.append(f"Routine debris in range: {debris}")
-            rows.append(f"Overnight capacity: {max(1, int(automation.get('daily_capacity', 6)))} tile(s)")
+            rows.append(
+                f"Overnight capacity: {quantity_agreement(max(1, int(automation.get('daily_capacity', 6))), 'tile')}"
+            )
             rows.append(f"Logistics Hub online: {'yes' if self.automation_logistics_enabled(scope, objects) else 'no'}")
             return rows
 
@@ -15458,9 +15497,9 @@ class FarmGame(
         while True:
             last_count = len([line for line in (getattr(self.state, "last_automation_report", []) or []) if line != "No automation ran overnight."])
             items = [
-                MenuItem(label="System status", value="status", enabled=True),
+                MenuItem(label="Equipment status", value="status", enabled=True),
                 MenuItem(label="Coverage overlay", value="overlay", enabled=True),
-                MenuItem(label="Last night", value="last", enabled=True, hint=f"{last_count} update(s)" if last_count else "none"),
+                MenuItem(label="Last night", value="last", enabled=True, hint=f"{last_count} {quantity_agreement(last_count, 'update', 'updates')}" if last_count else "none"),
                 MenuItem(label="Back", value=MENU_BACK, enabled=True),
             ]
             choice = self.vertical_panel_select("Automation", items, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT, return_back=True)
@@ -17647,7 +17686,7 @@ class FarmGame(
         if crop.fertilized:
             care_bits.append("fertilized")
         if crop.missed_water_days:
-            care_bits.append(f"{crop.missed_water_days} missed watering day(s)")
+            care_bits.append(f"{crop.missed_water_days} missed watering {quantity_agreement(crop.missed_water_days, 'day', 'days')}")
 
         return (
             f"{crop.name}: {growth_text}; {', '.join(care_bits)}; "
@@ -18652,7 +18691,10 @@ class FarmGame(
                 record = self.wilderness_stronghold_record(create=False)
                 name = str(record.get("name", "Enemy Stronghold"))
                 remaining = len(self.get_wilderness_stronghold_enemies(create=False))
-                return f"{name}: {'reclaimed safe landmark' if record.get('cleared') else f'hostile stronghold, {remaining} enemy patrol(s) remain'}"
+                return (
+                    f"{name}: reclaimed safe landmark" if record.get("cleared")
+                    else f"{name}: hostile stronghold, {quantity_agreement(remaining, 'enemy patrol')} remain"
+                )
             if tile == "J": return "Old route ruin: excavate it, restore its courtyard, and reopen its map marker"
             if tile == "P": return "Old route ruin marker: excavate, restore, or chart from this site"
             if tile == "Y": return "Berry thicket: use Z/Enter to gather berries"
@@ -19582,7 +19624,7 @@ class FarmGame(
                     "",
                     "Crop:",
                     f"{crop.name} - {crop.projected_quality()} quality estimate",
-                    f"Age: {crop.age} day(s)",
+                    f"Age: {crop.age} {quantity_agreement(crop.age, 'day', 'days')}",
                     "Ready to harvest" if crop.ready else ("Watered today" if crop.watered else "Needs water"),
                     "Fertilized" if crop.fertilized else "Not fertilized",
                 ])
@@ -22827,7 +22869,7 @@ class FarmGame(
                 self.vertical_panel_view(
                     "Municipal Road",
                     [
-                        f"Preview length: {length} tile(s)",
+                        f"Preview length: {quantity_agreement(length, 'tile')}",
                         f"Estimated maximum cost: {cost}g",
                         "",
                         "Roads use an L-shaped municipal route between the two endpoints.",
@@ -23163,7 +23205,7 @@ class FarmGame(
                     enabled=True,
                     hint=(
                         f"${self.founded_town_expansion_cost(record)} | "
-                        f"{len(self.founded_town_districts(record))} district(s)"
+                        + quantity_agreement(len(self.founded_town_districts(record)), "district")
                     ),
                 ),
             ]
@@ -23333,7 +23375,7 @@ class FarmGame(
             "",
             f"Name: {plan.get('name', 'Founded Town')}",
             f"Town center: {root_x},{root_y}",
-            f"Developed footprint: {len(sites)} chunk(s)",
+            f"Developed footprint: {quantity_agreement(len(sites), 'area')}",
             f"Expansion districts: {len(sites) - 1}",
             f"Style: {plan.get('style', 'Crossroads')}",
             f"Status: {plan.get('status', 'planning')}",
@@ -23341,8 +23383,10 @@ class FarmGame(
             f"Buildings complete: {summary['buildings_complete']}/{summary['buildings_planned']}",
             f"Housing capacity: {summary['housing_capacity']}",
             f"Construction queue: {summary['queued']}",
-            f"Placed at stronghold: {placed_buildings} building(s), {placed_roads} road/path tile(s), {placed_decor} decoration(s)",
-            f"Residents: {population_summary['population']} across {population_summary['households']} household(s)",
+            f"Placed at stronghold: {quantity_agreement(placed_buildings, 'building')}, "
+            f"{quantity_agreement(placed_roads, 'road/path tile')}, {quantity_agreement(placed_decor, 'decoration')}",
+            f"Residents: {population_summary['population']} across "
+            f"{quantity_agreement(population_summary['households'], 'household')}",
             f"Job vacancies: {population_summary['vacancies']}",
             f"Municipal maturity: {municipal_tier} ({municipality.get('development_points', 0)} points)",
             f"Town treasury: ${municipality.get('treasury', 0)}",
@@ -23597,7 +23641,7 @@ class FarmGame(
                     rows.extend([
                         f"- {plan.get('name', 'Founded Town')} is founded here.",
                         f"- Status: {plan.get('status', 'planning')}; {summary['buildings_complete']}/{summary['buildings_planned']} buildings complete.",
-                        f"- Build board placements: {len(features)} visible road/building/decoration item(s).",
+                        f"- Build board placements: {len(features)} visible road, building, or decoration {quantity_agreement(len(features), 'item', 'items')}.",
                         "- Use the nearby build board to place roads, buildings, and decorations with a cursor.",
                     ])
                 else:
@@ -24446,7 +24490,9 @@ class FarmGame(
             f"Handling: {'ready for an Animal Lead' if lead_ready else 'needs calm grooming on more than one day'}",
         ]
         if str(animal.get("herd_id", "")):
-            lines.append(f"Group: moving with {len(herd)} nearby {species.lower()} member(s), without blocking travel")
+            lines.append(
+                f"Group: moving with {quantity_agreement(len(herd), 'nearby ' + species.lower())}, without blocking travel"
+            )
         else:
             lines.append("Group: moving independently")
         if animal.get("tamed"):
@@ -26429,16 +26475,16 @@ class FarmGame(
             self.world_dialogue_record_player_event(msg, category)
 
     def safe_menu(self, menu_func, fallback_message: str = "Closed menu."):
-        """
-        Run a menu without letting menu/input bugs kill the whole game.
-        This is defensive while the prototype UI is evolving.
-        """
+        """Keep a menu failure from ending the current game session."""
         try:
             return menu_func()
         except Exception as exc:
             append_debug_log(f"Menu error: {type(exc).__name__}: {exc}")
             write_debug_report(self, exc, f"safe_menu {getattr(menu_func, '__name__', 'menu')}")
-            self.set_message(f"{fallback_message} Menu error: {exc}")
+            self.set_message(
+                f"{fallback_message} Something went wrong while opening that menu; details were written to the debug log.",
+                "warning",
+            )
             return None
 
     def autosave_with_message(self, msg: str):
@@ -28458,7 +28504,7 @@ class FarmGame(
                 MenuItem(label="House comfort", value="comfort", enabled=True, hint=self.house_comfort_rank()),
                 MenuItem(label="Household dashboard", value="household_dashboard", enabled=True, hint=self.family_weekly_priority()),
                 MenuItem(label="Today at home", value="today", enabled=True, hint=self.family_bond_rank()),
-                MenuItem(label="Family ledger", value="family", enabled=True, hint=f"{len(self.state.children)} child(ren)"),
+                MenuItem(label="Family ledger", value="family", enabled=True, hint=f"{len(self.state.children)} {quantity_agreement(len(self.state.children), 'child', 'children')}"),
                 MenuItem(
                     label="Dynasty & succession",
                     value="dynasty",
@@ -28468,7 +28514,7 @@ class FarmGame(
                         f"{'age ' + str(self.player_age()) if self.aging_and_death_active() else self.player_life_stage()}"
                     ),
                 ),
-                MenuItem(label="Child growth", value="growth", enabled=bool(self.state.children), hint=f"{len(self.state.children)} record(s)"),
+                MenuItem(label="Child growth", value="growth", enabled=bool(self.state.children), hint=f"{len(self.state.children)} {quantity_agreement(len(self.state.children), 'profile', 'profiles')}"),
                 MenuItem(label="Family meal", value="meal", enabled=True, hint=self.state.family_last_meal or "share food"),
                 MenuItem(label="Family memories", value="memories", enabled=True, hint=f"{len(self.state.family_event_log or [])} logged"),
                 MenuItem(label="Spouse support", value="spouse_support", enabled=self.spouse_lives_on_farm(), hint=self.spouse_support_mode()),
@@ -29829,7 +29875,7 @@ class FarmGame(
                 items.append(MenuItem(label="Maintain tools", value="collect", enabled=not self.farm_building_collected_today(key), hint="daily"))
             elif obj_name in ["Chicken Coop", "Animal Pen", "Fish Pond"]:
                 animal_count = len(self.farm_animals_in_building(key))
-                items.append(MenuItem(label="Animal care", value="animals", enabled=True, hint=f"{animal_count} animal(s)"))
+                items.append(MenuItem(label="Animal care", value="animals", enabled=True, hint=f"{animal_count} {quantity_agreement(animal_count, 'animal', 'animals')}"))
                 if obj_name == "Fish Pond":
                     items.append(MenuItem(label="Fish stocking", value="fish_pond", enabled=True, hint="stock, feed, harvest"))
             else:
@@ -31054,10 +31100,10 @@ class FarmGame(
                 MenuItem(label="Feed and observe", value="observe", enabled=True, hint="daily stamina and focus"),
                 MenuItem(label="Stock a fish", value="stock", enabled=bool(candidates) and sum(contents.values()) < capacity, hint=f"{sum(contents.values())}/{capacity}"),
                 MenuItem(label="Take a fish", value="take", enabled=bool(contents), hint=f"{sum(contents.values())} fish"),
-                MenuItem(label="Transfer a fish", value="transfer", enabled=bool(contents) and bool(other_tanks), hint=f"{len(other_tanks)} other tank(s)"),
+                MenuItem(label="Transfer a fish", value="transfer", enabled=bool(contents) and bool(other_tanks), hint=quantity_agreement(len(other_tanks), "other tank")),
                 MenuItem(label="Name aquarium", value="tank_name", enabled=True, hint=display_name),
                 MenuItem(label="Assign household care", value="caretaker", enabled=bool(household_members), hint=assigned_name or "unassigned"),
-                MenuItem(label="Aquarium collection", value="collection", enabled=True, hint=f"{len(self.player_aquarium_records())} owned tank(s)"),
+                MenuItem(label="Aquarium collection", value="collection", enabled=True, hint=quantity_agreement(len(self.player_aquarium_records()), "owned tank")),
                 MenuItem(label="View aquarium", value="status", enabled=True, hint=f"{len(contents)} species"),
                 MenuItem(label="Back", value=MENU_BACK, enabled=True),
             ],
@@ -31606,7 +31652,9 @@ class FarmGame(
             self.restore_stamina(2 + min(2, effect_bonus))
             self.furniture_mark_daily(state_record, "family_gather_day")
             self.advance_time(25)
-            self.autosave_with_message(f"Gathered together on the {name.lower()}. Household bond +{gain}.")
+            self.autosave_with_message(
+                f"Gathered together on the {name.lower()}; the household feels closer afterward."
+            )
             return
         if not self.furniture_daily_available(state_record, "quiet_time_day"):
             self.set_message("You have already taken quiet time here today.")
@@ -31729,7 +31777,7 @@ class FarmGame(
             self.furniture_mark_daily(state_record, "family_activity_day")
             self.advance_time(20)
             activity = "a bedtime story" if is_bed else "games and a small lesson"
-            self.autosave_with_message(f"Shared {activity}. Household bond +{gain}.")
+            self.autosave_with_message(f"Shared {activity}; the household feels closer afterward.")
 
     def furniture_keepsake_menu(
         self, name: str, x: int, y: int, state_record: Dict[str, object], effect_bonus: int,
@@ -31763,7 +31811,9 @@ class FarmGame(
             gain = self.adjust_family_bond(2 + min(1, effect_bonus // 3))
             self.furniture_mark_daily(state_record, "reflected_day")
             self.advance_time(20)
-            self.autosave_with_message(f"Revisited family keepsakes together. Household bond +{gain}.")
+            self.autosave_with_message(
+                "Revisited family keepsakes together; the household feels closer afterward."
+            )
 
     def furniture_hearth_menu(
         self, name: str, state_record: Dict[str, object], effect_bonus: int,
@@ -32102,7 +32152,7 @@ class FarmGame(
             self.set_message(f"The {placed.lower()} is ready for meals and conversation.")
             return
         if furniture_function == "display_storage":
-            self.set_message("The display counter offers enclosed storage from any visible section.")
+            self.set_message("The display counter's enclosed storage can be opened from either side of the case.")
             return
         if furniture_function == "storage":
             self.set_message(f"The {placed.lower()} provides organized household storage.")
@@ -32336,7 +32386,8 @@ class FarmGame(
             self.set_message("This Preserves Jar is empty.")
             return False
         if int(task.get("days_left", 0)) > 0:
-            self.set_message(f"Preserves Jar needs {task.get('days_left')} more day(s).")
+            days_left = int(task.get("days_left", 0) or 0)
+            self.set_message(f"Preserves Jar needs {days_left} more {quantity_agreement(days_left, 'day', 'days')}.")
             return False
         output = str(task.get("output"))
         qty = int(task.get("qty", 1))
@@ -32378,7 +32429,8 @@ class FarmGame(
             if not task:
                 lines.append(f"- {key}: empty")
             else:
-                status = "ready" if int(task.get("days_left", 0)) <= 0 else f"{task.get('days_left')} day(s)"
+                days_left = int(task.get("days_left", 0) or 0)
+                status = "ready" if days_left <= 0 else f"{days_left} {quantity_agreement(days_left, 'day', 'days')}"
                 lines.append(f"- {key}: {task.get('input')} -> {quantity_item_phrase(task.get('output'), task.get('qty'))} ({status})")
         return lines
 
@@ -32504,7 +32556,7 @@ class FarmGame(
         return [
             "Fish Pond use:",
             f"Can stock Fish Pond: yes",
-            f"Cycle: {self.fish_pond_cycle_days(fish_name)} day(s)",
+            f"Cycle: {self.fish_pond_cycle_days(fish_name)} {quantity_agreement(self.fish_pond_cycle_days(fish_name), 'day', 'days')}",
             f"Pond harvest: {quantity_item_phrase(reward_item, reward_qty)}",
         ]
 
@@ -32531,7 +32583,7 @@ class FarmGame(
             f"Pond key: {pond_key}",
             f"Fish: {fish}",
             f"Population: {count}/{self.fish_pond_capacity(fish)}",
-            f"Cycle: {int(pond.get('days', 0))}/{self.fish_pond_cycle_days(fish)} day(s)",
+            f"Cycle: {int(pond.get('days', 0))}/{self.fish_pond_cycle_days(fish)} {quantity_agreement(self.fish_pond_cycle_days(fish), 'day', 'days')}",
             f"Ready harvests: {ready}",
             "",
             f"Harvest per ready count: {quantity_item_phrase(reward_item, reward_qty)}",
@@ -32735,7 +32787,7 @@ class FarmGame(
             seed_choices = self.seed_hopper_seed_choices()
             items = [
                 MenuItem(label="Inspect hopper", value="inspect", enabled=True),
-                MenuItem(label="Load seeds", value="load", enabled=bool(seed_choices), hint=f"{len(seed_choices)} type(s)" if seed_choices else "no seeds"),
+                MenuItem(label="Load seeds", value="load", enabled=bool(seed_choices), hint=quantity_agreement(len(seed_choices), "type") if seed_choices else "no seeds"),
                 MenuItem(label="Unload seeds", value="unload", enabled=loaded_qty > 0, hint=self.seed_hopper_loaded_label(hopper_key)),
                 MenuItem(label="Coverage overlay", value="overlay", enabled=True),
                 MenuItem(label="Back", value=MENU_BACK, enabled=True),
@@ -33501,10 +33553,10 @@ class FarmGame(
         if tile == "D":
             self.transition_from_general_store_to_town(); return
         if tile == "&":
-            self.set_message("The shopkeeper greets you and opens the store menu.")
+            self.set_message("The shopkeeper greets you and shows you what is in stock.")
             self.safe_menu(lambda: self.buy_menu(auto_opened=False), "General Store closed."); return
         if tile in ["g", "$"]:
-            self.set_message("The shopkeeper meets you at the counter and opens the store menu.")
+            self.set_message("The shopkeeper meets you at the counter and shows you what is in stock.")
             self.safe_menu(lambda: self.buy_menu(auto_opened=False), "General Store closed."); return
         if tile == "P":
             rows = [
@@ -33682,7 +33734,7 @@ class FarmGame(
                     label=str(data["title"]),
                     value=key,
                     enabled=True,
-                    hint="read" if already else (f"${cost}" if self.state.money >= cost else f"${cost} no"),
+                    hint="read" if already else (f"{cost}g" if self.state.money >= cost else f"need {cost}g"),
                 ))
             items.append(MenuItem(label="Back", value=MENU_BACK, enabled=True))
             choice = self.vertical_panel_select("Library Research", items, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT, return_back=True)
@@ -33708,7 +33760,7 @@ class FarmGame(
             items: List[MenuItem] = []
             for recipe_name in self.unknown_recipe_names():
                 cost = self.recipe_research_cost(recipe_name)
-                items.append(MenuItem(label=f"Learn {recipe_name}", value=recipe_name, enabled=True, hint=f"${cost}" if self.state.money >= cost else f"${cost} no"))
+                items.append(MenuItem(label=f"Learn {recipe_name}", value=recipe_name, enabled=True, hint=f"{cost}g" if self.state.money >= cost else f"need {cost}g"))
             items.append(MenuItem(label="View recipe catalog", value="catalog", enabled=True))
             items.append(MenuItem(label="Back", value=MENU_BACK, enabled=True))
             choice = self.vertical_panel_select("Recipe Research", items, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT, return_back=True)
@@ -33893,7 +33945,8 @@ class FarmGame(
     def museum_donation_catalog(self) -> Dict[str, Dict[str, object]]:
         catalog: Dict[str, Dict[str, object]] = {}
         for crop_name, crop in CROP_DATA.items():
-            note = f"{crop.get('season', 'Any')} crop; grows in {crop.get('growth_days', '?')} day(s)."
+            growth_days = int(crop.get("growth_days", 0) or 0)
+            note = f"{crop.get('season', 'Any')} crop; grows in {growth_days} {quantity_agreement(growth_days, 'day', 'days')}."
             self.museum_add_catalog_record(catalog, "agriculture", crop_name, note=note)
         for fish_name, fish in FISH_DATA.items():
             if fish.get("junk"):
@@ -34026,7 +34079,7 @@ class FarmGame(
             ]
             if recovered:
                 best = max(int(row.get("condition", 0) or 0) for row in recovered)
-                lines.extend(["", f"Field journal: recovered {len(recovered)} time(s); best condition {best}%."])
+                lines.extend(["", f"Field journal: recovered {quantity_agreement(len(recovered), 'time')}; best condition {best}%."])
         lines.extend(["", "Museum donations consume one item and permanently update the exhibit hall."])
         return lines
 
@@ -34077,7 +34130,7 @@ class FarmGame(
         self.normalize_museum_state()
         record = self.museum_donation_record(record_id)
         if not record:
-            self.set_message("That museum record is not available.")
+            self.set_message("The museum isn't accepting that item as a donation.")
             return False
         record_id = str(record.get("id", record_id))
         if record_id in self.museum_donated_record_ids():
@@ -34328,8 +34381,8 @@ class FarmGame(
             "INN GOSSIP",
             "",
             f"Mae says {vendor} has the busiest stall at Market Row today.",
-            f"There are {ready_errands} errand(s) you could turn in right now.",
-            f"Your mailbox has {unread} unread letter(s).",
+            f"There are {quantity_agreement(ready_errands, 'errand')} you could turn in right now.",
+            f"Your mailbox has {quantity_agreement(unread, 'unread letter')}.",
             project_note,
             festival_note,
             f"Regional guests registered tonight: {guest_count}.",
@@ -34352,7 +34405,7 @@ class FarmGame(
                 MenuItem(label="Eat hearty meal", value="meal", enabled=self.state.money >= 80 and missing_stamina > 0, hint="$80 +35 stamina"),
                 MenuItem(label=f"Daily special: {special['item']}", value="special", enabled=self.state.money >= int(special["price"]) and missing_stamina > 0, hint=f"${special['price']} +{special['stamina']} stamina"),
                 MenuItem(label="Buy packed lunch", value="lunch", enabled=self.state.money >= lunch_cost, hint=f"${lunch_cost} x{lunch_max}"),
-                MenuItem(label="Read guest register", value="guest_register", enabled=True, hint=f"{len(self.regional_town_visitors())} regional guest(s)"),
+                MenuItem(label="Read guest register", value="guest_register", enabled=True, hint=f"{len(self.regional_town_visitors())} regional {quantity_agreement(len(self.regional_town_visitors()), 'guest', 'guests')}"),
                 MenuItem(label="Listen to gossip", value="gossip", enabled=True, hint="free"),
                 MenuItem(label="Back", value=MENU_BACK, enabled=True),
             ]
@@ -34395,7 +34448,9 @@ class FarmGame(
                 total = qty * lunch_cost
                 self.state.money -= total
                 self.state.inventory["Woodland Salad"] = self.state.inventory.get("Woodland Salad", 0) + qty
-                self.autosave_with_message(f"Bought {qty} packed lunch(es): Woodland Salad for ${total}.")
+                self.autosave_with_message(
+                    f"Bought {quantity_agreement(qty, 'packed lunch')}: Woodland Salad for ${total}."
+                )
                 return
             if choice.value == "gossip":
                 self.vertical_panel_view("Inn Gossip", self.inn_gossip_lines(), LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
@@ -34665,7 +34720,9 @@ class FarmGame(
         drops = roll_wood_drops(chopped, self.tool_level("Axe"))
         # Full trees give a little more wood than fallen logs on average.
         add_inventory_items(self.state.inventory, drops)
-        self.autosave_with_message(f"Chopped {chopped} wilderness wood tile(s) and found {format_drops(drops)}.")
+        self.autosave_with_message(
+            f"Chopped {quantity_agreement(chopped, 'wilderness wood tile')} and found {format_drops(drops)}."
+        )
 
     def break_wilderness_stone(self, x: int, y: int):
         if not self.owns_tool("Pickaxe"):
@@ -34685,7 +34742,9 @@ class FarmGame(
             return
         drops = roll_stone_drops(broken, self.tool_level("Pickaxe"))
         add_inventory_items(self.state.inventory, drops)
-        self.autosave_with_message(f"Broke {broken} wilderness rock(s) and found {format_drops(drops)}.")
+        self.autosave_with_message(
+            f"Broke {quantity_agreement(broken, 'wilderness rock')} and found {format_drops(drops)}."
+        )
 
     def use_wilderness_cave_action(self, x: int, y: int):
         enemy = self.expanded_cave_enemy_at(x, y)
@@ -35116,7 +35175,7 @@ class FarmGame(
         if treated <= 0:
             self.set_message(f"Need Animal Medicine or ${base_cost} per sick animal.")
             return False
-        self.autosave_with_message(f"Clinic treated {treated} sick animal(s). Used {medicine_used} medicine and paid ${cost_paid}.")
+        self.autosave_with_message(f"Clinic treated {treated} sick {quantity_agreement(treated, 'animal', 'animals')}. Used {medicine_used} medicine and paid ${cost_paid}.")
         return True
 
     def clinic_wellness_check(self) -> bool:
@@ -35134,7 +35193,7 @@ class FarmGame(
             animal["happiness"] = min(100, int(animal.get("happiness", 50)) + 4)
             if int(animal.get("health", 0)) >= 75 and animal.get("sick"):
                 animal["sick"] = False
-        self.autosave_with_message(f"Clinic wellness check helped {len(animals)} animal(s).")
+        self.autosave_with_message(f"Clinic wellness check helped {len(animals)} {quantity_agreement(len(animals), 'animal', 'animals')}.")
         return True
 
     def clinic_health_report_lines(self) -> List[str]:
@@ -35393,7 +35452,7 @@ class FarmGame(
         self.state.completed_errand_ids.append(errand_id)
         self.autosave_with_message(
             f"Completed {errand.get('npc_name')}'s errand: delivered {quantity_item_phrase(item, qty)}. "
-            f"Reward: ${reward_money} and relationship +{errand.get('relationship')}."
+            f"Reward: ${reward_money}. The favor leaves you on better terms."
         )
         return True
 
@@ -35923,7 +35982,7 @@ class FarmGame(
             participant = self.npc_record_by_id(participant_id) if participant_id and hasattr(self, "npc_record_by_id") else None
             steps: List[Dict[str, object]] = [{
                 "type": "narration",
-                "text": f"At {festival.get('location', 'the festival grounds')}, {activity.get('description', 'the activity begins')} The surrounding festival remains visible while people join and leave.",
+                "text": f"At {festival.get('location', 'the festival grounds')}, {activity.get('description', 'the activity begins')} Music, conversation, and passing visitors continue around the work.",
             }]
             if isinstance(participant, dict):
                 steps.append({
@@ -35933,7 +35992,7 @@ class FarmGame(
                 })
             steps.extend([
                 {"type": "narration", "text": f"You spend {int(activity.get('time', 30))} minutes contributing alongside residents and visitors."},
-                {"type": "narration", "text": "The result becomes visible in the gathering: supplies are organized, participants have something new to discuss, and the activity closes for this year."},
+                {"type": "narration", "text": "By the end, the supplies are organized, the participants are comparing notes, and this year's work is complete."},
             ])
             self.play_world_event_scene(
                 completion_id, str(activity.get("title", "Festival Activity")), steps,
@@ -36005,7 +36064,7 @@ class FarmGame(
             residents = [npc for npc in self.active_town_npcs() if isinstance(npc, dict)][:2]
             steps: List[Dict[str, object]] = [{
                 "type": "narration",
-                "text": f"{festival['name']} spreads through {festival['location']} instead of replacing it. {festival.get('description', '')} The {str(self.state.weather).lower()} conditions alter how people gather.",
+                "text": f"{festival['name']} fills {festival['location']} with banners, food, and gathering neighbors. {festival.get('description', '')} The {str(self.state.weather).lower()} conditions alter how people gather.",
             }]
             resident_lines = (
                 "You made it. Festivals are easier to remember when familiar people actually cross paths in the middle of them.",
@@ -36018,7 +36077,7 @@ class FarmGame(
                 })
             steps.append({
                 "type": "narration",
-                "text": f"After ninety minutes of food, conversation, and shared activity, town relationships improve by {friendship}. The attendance rewards enter your inventory as part of the day, not as a detached results screen.",
+                "text": f"After ninety minutes of food, conversation, and shared activity, you leave with a few gifts and a warmer welcome from the people you met.",
             })
             self.play_world_event_scene(
                 attendance_id, str(festival["name"]), steps,
@@ -36144,7 +36203,7 @@ class FarmGame(
                 MenuItem(label="View NPC directory", value="npcs", enabled=True, hint=str(len(active_npcs))),
                 MenuItem(label="Find NPC", value="find_npc", enabled=True, hint="whereabouts"),
                 MenuItem(label="Errand Board", value="errand_board", enabled=True, hint="daily tasks"),
-                MenuItem(label="Land Records", value="claims", enabled=True, hint=f"{claim_count} claim(s)"),
+                MenuItem(label="Land Records", value="claims", enabled=True, hint=quantity_agreement(claim_count, "claim")),
                 MenuItem(label="Farm Automation", value="automation", enabled=True, hint="systems"),
                 MenuItem(label="Apply for small grant", value="grant", enabled=True, hint="once/day"),
                 MenuItem(label="Town Projects", value="projects", enabled=True, hint=f"{self.completed_town_project_count()} funded"),
@@ -37108,7 +37167,7 @@ class FarmGame(
             animal["fed"] = True
             animal["happiness"] = min(100, int(animal.get("happiness", 50)) + gain)
             animal["health"] = min(100, int(animal.get("health", 100)) + 2)
-        self.autosave_with_message(f"Filled the troughs for {len(hungry)} animal(s).")
+        self.autosave_with_message(f"Filled the troughs for {len(hungry)} {quantity_agreement(len(hungry), 'animal', 'animals')}.")
         return True
 
 
@@ -37131,7 +37190,7 @@ class FarmGame(
         if not petted:
             self.set_message("Every animal here has already been petted today.")
             return False
-        self.autosave_with_message(f"Pet {petted} animal(s).")
+        self.autosave_with_message(f"Pet {petted} {quantity_agreement(petted, 'animal', 'animals')}.")
         return True
 
     def brush_animals_in_building(self, building_key: str) -> bool:
@@ -37150,7 +37209,7 @@ class FarmGame(
             animal["affection"] = min(100, int(animal.get("affection", 0)) + 3)
             animal["health"] = min(100, int(animal.get("health", 100)) + 1)
             animal["activity"] = "freshly groomed"
-        self.autosave_with_message(f"Brushed {len(animals)} animal(s).")
+        self.autosave_with_message(f"Brushed {len(animals)} {quantity_agreement(len(animals), 'animal', 'animals')}.")
         return True
 
     def clean_animal_shelter(self, building_key: str) -> bool:
@@ -37198,7 +37257,7 @@ class FarmGame(
         if not eligible:
             self.set_message("Weather, health, or a blocked doorway keeps the animals inside.")
             return False
-        self.autosave_with_message(f"You ring the pasture bell and let {eligible} animal(s) outside.")
+        self.autosave_with_message(f"You ring the pasture bell and let {eligible} {quantity_agreement(eligible, 'animal', 'animals')} outside.")
         return True
 
 
@@ -37219,7 +37278,7 @@ class FarmGame(
                 drops[item] = drops.get(item, 0) + quantity
         if drops:
             add_inventory_items(self.state.inventory, drops)
-            extra = f" {skipped_sick} sick/weak animal(s) produced nothing." if skipped_sick else ""
+            extra = f" {skipped_sick} sick or weak {quantity_agreement(skipped_sick, 'animal', 'animals')} produced nothing." if skipped_sick else ""
             self.autosave_with_message(f"Collected animal products: {format_drops(drops)}.{extra}")
             return True
         if skipped_sick:
@@ -37291,13 +37350,14 @@ class FarmGame(
             f"Mood: {self.animal_mood(animal)} | Health: {animal.get('health', 0)} ({self.animal_health_label(animal)})",
             f"Happiness: {animal.get('happiness', 0)}/100",
             f"Affection: {animal.get('affection', 0)}/100 ({self.farm_animal_affection_hearts(animal)}/10 hearts)",
-            f"Care streak: {animal.get('care_streak', 0)} day(s) | Neglect: {animal.get('neglect_days', 0)} day(s)", "",
+            f"Care streak: {quantity_agreement(int(animal.get('care_streak', 0)), 'day')} | "
+            f"Neglect: {quantity_agreement(int(animal.get('neglect_days', 0)), 'day')}", "",
             "Today:",
             f"- Fed: {'yes' if animal.get('fed') else 'no'} | Hand-fed: {'yes' if animal.get('hand_fed_today') else 'no'}",
             f"- Petted: {'yes' if animal.get('petted_today') else 'no'} | Brushed: {'yes' if animal.get('brushed_today') else 'no'}",
             f"- Treat: {'yes' if animal.get('treat_today') else 'no'} | Clean shelter: {'yes' if animal.get('shelter_cleaned_today') else 'no'}",
             f"- Grazed: {'yes' if animal.get('last_grazed_day') == self.farm_animal_day_key() else 'no'}", "",
-            f"Product cycle: {animal.get('product_progress', 0)}/{cycle} cared day(s)",
+            f"Product cycle: {animal.get('product_progress', 0)}/{quantity_agreement(cycle, 'cared day')}",
             f"Products waiting: {animal.get('product_ready_count', 0)}/3",
             "Production begins at adulthood." if stage != "Adult" else "Three excellent-care days unlock premium products.",
         ]
@@ -37485,7 +37545,7 @@ class FarmGame(
             for npc in active_npcs
         )
         if inactive_count:
-            lines.extend(["", f"{inactive_count} resident(s) are away until their service buildings are restored."])
+            lines.extend(["", f"{inactive_count} {quantity_agreement(inactive_count, 'resident is', 'residents are')} away until their service buildings are restored."])
         return lines
 
 
@@ -38654,8 +38714,8 @@ class FarmGame(
         for tx, ty in tillable_tiles:
             self.set_farm_work_tile(tx, ty, ",")
 
-        extra = f" Skipped {blocked} blocked tile(s)." if blocked else ""
-        self.set_message(f"Tilled {tilled} tile(s).{extra}")
+        extra = f" Skipped {quantity_agreement(blocked, 'blocked tile')}." if blocked else ""
+        self.set_message(f"Tilled {quantity_agreement(tilled, 'tile')}.{extra}")
 
 
     def use_seeds(self, x: int, y: int):
@@ -38726,8 +38786,8 @@ class FarmGame(
             if crop:
                 crop.watered = True
 
-        extra = f" Skipped {skipped} tile(s)." if skipped else ""
-        self.set_message(f"Watered {watered} tile(s).{extra}")
+        extra = f" Skipped {quantity_agreement(skipped, 'tile')}." if skipped else ""
+        self.set_message(f"Watered {quantity_agreement(watered, 'tile')}.{extra}")
 
 
     def use_harvest(self, x: int, y: int):
@@ -38828,7 +38888,7 @@ class FarmGame(
                 self.set_farm_work_tile(tx, ty, ".")
             drops = roll_stone_drops(broken, self.tool_level("Pickaxe"))
             add_inventory_items(self.state.inventory, drops)
-            self.set_message(f"Broke {broken} stone(s) and found {format_drops(drops)}.")
+            self.set_message(f"Broke {quantity_agreement(broken, 'stone')} and found {format_drops(drops)}.")
             return
 
         if tile == "*":
@@ -38848,7 +38908,9 @@ class FarmGame(
                 self.set_farm_work_tile(tx, ty, ".")
             drops = roll_wood_drops(chopped, self.tool_level("Axe"))
             add_inventory_items(self.state.inventory, drops)
-            self.set_message(f"Chopped {chopped} wood/stump tile(s) and found {format_drops(drops)}.")
+            self.set_message(
+                f"Chopped {quantity_agreement(chopped, 'wood/stump tile')} and found {format_drops(drops)}."
+            )
             return
 
         self.set_message("Nothing clearable there. Stones need Pickaxe; wood/stumps need Axe.")
@@ -38931,19 +38993,19 @@ class FarmGame(
                     label="Ship all safe goods",
                     value="__all__",
                     enabled=bool(shippable),
-                    hint=f"{total_available_items} item(s), ${total_available_value}",
+                    hint=f"{total_available_items} {quantity_agreement(total_available_items, 'item', 'items')}, ${total_available_value}",
                 ),
                 MenuItem(
                     label="Ship item by quantity",
                     value="__select__",
                     enabled=bool(shippable),
-                    hint=f"{len(shippable)} stack(s)",
+                    hint=quantity_agreement(len(shippable), "stack"),
                 ),
                 MenuItem(
                     label="Reclaim pending items",
                     value="__reclaim__",
                     enabled=bool(pending_item_count),
-                    hint=f"{pending_item_count} item(s)",
+                    hint=f"{pending_item_count} {quantity_agreement(pending_item_count, 'item', 'items')}",
                 ),
                 MenuItem(
                     label="View pending shipment",
@@ -38961,7 +39023,7 @@ class FarmGame(
                 extra_lines=[
                     f"Money now: ${s.money}",
                     f"Pending payout tomorrow: ${s.shipped_today}",
-                    f"Available to ship now: {total_available_items} item(s), ${total_available_value}",
+                    f"Available to ship now: {total_available_items} {quantity_agreement(total_available_items, 'item', 'items')}, ${total_available_value}",
                     "Crafting and unlock materials are protected from shipping.",
                     "Payment arrives when you sleep.",
                 ],
@@ -38997,7 +39059,7 @@ class FarmGame(
 
                 if auto_opened:
                     s.bin_menu_suppressed_until_exit = True
-                self.autosave_with_message(f"Shipped {total_items} item(s) for ${total_money}. Payment arrives tomorrow.")
+                self.autosave_with_message(f"Shipped {total_items} {quantity_agreement(total_items, 'item', 'items')} for ${total_money}. Payment arrives tomorrow.")
                 return
 
             if selected.value == "__select__":
@@ -39865,7 +39927,7 @@ class FarmGame(
                     MenuItem(label="Buy tools", value="buy_tools", enabled=bool(unowned_tools), hint=f"{len(unowned_tools)} available" if unowned_tools else "owned"),
                     MenuItem(label="Upgrade tools", value="upgrade_tools", enabled=bool(upgradeable_tools), hint=f"{len(upgradeable_tools)} available" if upgradeable_tools else "max/none"),
                     MenuItem(label="Buy ore", value="ore", enabled=True, hint="materials"),
-                    MenuItem(label="Farm Automation", value="automation", enabled=True, hint=f"{len(self.automation_shop_item_names('blacksmith'))} item(s)"),
+                    MenuItem(label="Farm Automation", value="automation", enabled=True, hint=f"{len(self.automation_shop_item_names('blacksmith'))} {quantity_agreement(len(self.automation_shop_item_names('blacksmith')), 'item', 'items')}"),
                     MenuItem(label="Combat Gear", value="combat_gear", enabled=True, hint=f"{self.available_blacksmith_combat_gear_count()} available"),
                     MenuItem(label="Gear Workshop", value="gear_workshop", enabled=True, hint="enhance, reforge, salvage"),
                     MenuItem(label="Party Loadout", value="party_loadout", enabled=True, hint="tactical gear, supplies, drills"),
@@ -40975,7 +41037,7 @@ class FarmGame(
         dynasty_msg = self.process_player_lifespan_overnight()
 
         if dead:
-            season_msg = f" {len(dead)} out-of-season crop(s) died."
+            season_msg = f" {quantity_agreement(len(dead), 'out-of-season crop')} died."
         else:
             season_msg = ""
 
@@ -40984,26 +41046,29 @@ class FarmGame(
             season_msg += freeze_thaw_msg
 
         if sprinkler_watered:
-            season_msg += f" Sprinklers watered {sprinkler_watered} tile(s)."
+            season_msg += f" Sprinklers watered {quantity_agreement(sprinkler_watered, 'tile')}."
 
         automation_summary = self.automation_morning_summary(automation_report)
         if automation_summary:
             season_msg += automation_summary
 
         if mine_rocks or mine_ore or mine_crystals:
-            season_msg += f" Mine refreshed: {mine_rocks} rock(s), {mine_ore} ore seam(s), {mine_crystals} crystal(s)."
+            season_msg += (
+                f" Mine refreshed: {quantity_agreement(mine_rocks, 'rock')}, "
+                f"{quantity_agreement(mine_ore, 'ore seam')}, {quantity_agreement(mine_crystals, 'crystal')}."
+            )
 
         if wilderness_regrown:
-            season_msg += f" Wilderness regrew {wilderness_regrown} forage item(s)."
+            season_msg += f" Wilderness regrew {wilderness_regrown} forage {quantity_agreement(wilderness_regrown, 'item', 'items')}."
 
         if cave_refreshed:
-            season_msg += f" Caves refreshed {cave_refreshed} deposit(s)."
+            season_msg += f" Caves refreshed {quantity_agreement(cave_refreshed, 'deposit')}."
 
         if pond_produced:
-            season_msg += f" Fish ponds prepared {pond_produced} harvest(s)."
+            season_msg += f" Fish ponds prepared {pond_produced} {quantity_agreement(pond_produced, 'harvest', 'harvests')}."
 
         if artisan_finished:
-            season_msg += f" Artisan processors finished {artisan_finished} batch(es)."
+            season_msg += f" Artisan processors finished {quantity_agreement(artisan_finished, 'batch')}."
 
         if residence_cap_bonus:
             season_msg += (
@@ -41473,7 +41538,7 @@ class FarmGame(
             if remaining <= 0:
                 extra = " No seeds left."
             elif skipped:
-                extra = f" Skipped {skipped} blocked/non-tilled tile(s)."
+                extra = f" Skipped {quantity_agreement(skipped, 'blocked or untilled tile')}."
             else:
                 extra = ""
             self.autosave_with_message(f"Area sowed {quantity_item_phrase(f'{name} seed', planted)}.{extra}")
@@ -42895,7 +42960,7 @@ class FarmGame(
         charges = int(buff["charges"])
         discount = int(buff["discount"])
         self.state.active_food_buffs[name] = {"charges": charges, "discount": discount}
-        return f" Buff gained: {name} ({charges} action(s), -{discount} stamina)."
+        return f" Buff gained: {name} ({quantity_agreement(charges, 'action')}, -{discount} stamina)."
 
     def active_food_buff_summary(self) -> str:
         parts = []
@@ -43045,7 +43110,10 @@ class FarmGame(
                 return False
             self.state.inventory[item_name] = qty_owned - 1
             region = self.wilderness_region_profile(self.state.wilderness_chunk_x, self.state.wilderness_chunk_y)
-            self.autosave_with_message(f"Studied a Regional Chart of {region['name']}: {revealed} chunk(s) added to the overworld map.")
+            self.autosave_with_message(
+                f"Studied a Regional Chart of {region['name']}: "
+                f"{quantity_agreement(revealed, 'area')} added to the world map."
+            )
             return True
 
         if self.container_item_is_usable(item_name):
@@ -47756,34 +47824,39 @@ class FarmGame(
                 f"{int(getattr(self.state, 'paleontology_finds', 0) or 0)} fossils recovered"
             ),
             (
-                f"- Blackjack: {blackjack_stats['wins']} win(s) from "
-                f"{blackjack_stats['hands_played']} hand(s), "
+                f"- Blackjack: {quantity_agreement(blackjack_stats['wins'], 'win')} from "
+                f"{quantity_agreement(blackjack_stats['hands_played'], 'hand')}, "
                 f"{int(blackjack_stats['net_winnings']):+d}g net"
             ),
             (
-                f"- Checkers: {checkers_stats['wins']} win(s), "
-                f"{checkers_stats['losses']} loss(es), {checkers_stats['draws']} draw(s)"
+                f"- Checkers: {quantity_agreement(checkers_stats['wins'], 'win')}, "
+                f"{checkers_stats['losses']} {quantity_agreement(checkers_stats['losses'], 'loss', 'losses')}, "
+                f"{quantity_agreement(checkers_stats['draws'], 'draw')}"
             ),
             (
-                f"- Chess: {chess_stats['wins']} win(s), "
-                f"{chess_stats['losses']} loss(es), {chess_stats['draws']} draw(s)"
+                f"- Chess: {quantity_agreement(chess_stats['wins'], 'win')}, "
+                f"{chess_stats['losses']} {quantity_agreement(chess_stats['losses'], 'loss', 'losses')}, "
+                f"{quantity_agreement(chess_stats['draws'], 'draw')}"
             ),
             (
-                f"- Mancala: {mancala_stats['wins']} win(s), "
-                f"{mancala_stats['losses']} loss(es), {mancala_stats['draws']} draw(s), "
+                f"- Mancala: {quantity_agreement(mancala_stats['wins'], 'win')}, "
+                f"{mancala_stats['losses']} {quantity_agreement(mancala_stats['losses'], 'loss', 'losses')}, "
+                f"{quantity_agreement(mancala_stats['draws'], 'draw')}, "
                 f"{int(mancala_stats['net_winnings']):+d}g net"
             ),
             (
-                f"- Hold'em: {holdem_stats['wins']} win(s) from "
-                f"{holdem_stats['hands_played']} hand(s), {int(holdem_stats['net_winnings']):+d}g net"
+                f"- Hold'em: {quantity_agreement(holdem_stats['wins'], 'win')} from "
+                f"{quantity_agreement(holdem_stats['hands_played'], 'hand')}, "
+                f"{int(holdem_stats['net_winnings']):+d}g net"
             ),
             (
-                f"- Hearts: {hearts_stats['wins']} match win(s) | "
-                f"Solitaire: {solitaire_stats['wins']} solved deal(s)"
+                f"- Hearts: {quantity_agreement(hearts_stats['wins'], 'match win')} | "
+                f"Solitaire: {quantity_agreement(solitaire_stats['wins'], 'solved deal')}"
             ),
             (
-                f"- Royal Game of Ur: {ur_stats['wins']} win(s), "
-                f"{ur_stats['losses']} loss(es), {int(ur_stats['net_winnings']):+d}g net"
+                f"- Royal Game of Ur: {quantity_agreement(ur_stats['wins'], 'win')}, "
+                f"{ur_stats['losses']} {quantity_agreement(ur_stats['losses'], 'loss', 'losses')}, "
+                f"{int(ur_stats['net_winnings']):+d}g net"
             ),
             f"- Game tables discovered: {len(getattr(self.state, 'tavern_game_discoveries', []) or [])}/8",
             f"- Party: {self.party_menu_hint()}",
@@ -48199,7 +48272,7 @@ class FarmGame(
         entries.sort(key=lambda row: (row[0], row[2], row[1]))
         lines = ["BIRTHDAYS", "", "Upcoming:"]
         for distance, name, label in entries[:24]:
-            when = "today" if distance == 0 else f"in {distance} day(s)"
+            when = "today" if distance == 0 else f"in {distance} {quantity_agreement(distance, 'day', 'days')}"
             lines.append(f"- {label}: {name} ({when})")
         lines.extend(["", "Birthdays also appear on the wall calendar and town calendar notices."])
         return lines
@@ -48792,7 +48865,7 @@ class FarmGame(
                 MenuItem(label="Build Mode", value="build", enabled=build_enabled, hint=build_hint),
                 MenuItem(label="Edit Farmhouse Layout", value="edit_house", enabled=self.on_house(), hint="paint floors, walls, and door"),
                 MenuItem(label="Tools", value="tools", enabled=True, hint=self.state.selected_tool),
-                MenuItem(label="Automation", value="automation", enabled=True, hint=f"{automation_updates} update(s)" if automation_updates else "status"),
+                MenuItem(label="Automation", value="automation", enabled=True, hint=f"{automation_updates} {quantity_agreement(automation_updates, 'update', 'updates')}" if automation_updates else "status"),
                 MenuItem(label="Crafting", value="crafting", enabled=True, hint="recipes and construction"),
                 MenuItem(label="Cooking", value="cooking", enabled=True, hint="kitchen ready" if self.has_kitchen_access() else "field snack only"),
                 MenuItem(label="Land Claims", value="claims", enabled=True, hint=f"x{claim_count}" if claim_count else "none owned"),
@@ -48821,7 +48894,7 @@ class FarmGame(
             items = [
                 MenuItem(label="Relationships", value="relationships", enabled=True, hint="friendship overview"),
                 MenuItem(label="Town Families", value="town_families", enabled=True, hint="marriages, children, household news"),
-                MenuItem(label="Family", value="family", enabled=True, hint=f"{len(self.state.children)} child(ren)"),
+                MenuItem(label="Family", value="family", enabled=True, hint=f"{len(self.state.children)} {quantity_agreement(len(self.state.children), 'child', 'children')}"),
                 MenuItem(
                     label="Dynasty",
                     value="dynasty",
@@ -49770,7 +49843,10 @@ class FarmGame(
                 append_debug_log(f"Runtime error: {type(exc).__name__}: {exc}")
                 write_debug_report(self, exc, f"runtime_loop location={getattr(self.state, 'location', '?')}")
                 try:
-                    self.set_message(f"Runtime error logged to {CRASH_REPORT_PATH.name}: {exc}")
+                    self.set_message(
+                        f"Something went wrong, but the game recovered. Details were written to {CRASH_REPORT_PATH.name}.",
+                        "warning",
+                    )
                     self.draw()
                     print()
                     print(f"Runtime error logged to: {CRASH_REPORT_PATH}")
@@ -49781,7 +49857,7 @@ class FarmGame(
                         self.running = False
                     last_frame_time = time.monotonic()
                 except Exception:
-                    print(f"Fatal runtime error: {exc}")
+                    print("A fatal error ended the current session. Technical details were written to the crash report.")
                     print(f"Crash report: {CRASH_REPORT_PATH}")
                     self.running = False
 

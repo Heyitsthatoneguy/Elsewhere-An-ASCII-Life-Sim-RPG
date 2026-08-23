@@ -12,6 +12,7 @@ import random
 from typing import Dict, List, Mapping, Optional, Tuple
 
 from ascii_farmstead_data import CROP_DATA, LEFT_PANEL_HEIGHT, LEFT_PANEL_WIDTH
+from ascii_farmstead_helpers import quantity_agreement
 from ascii_farmstead_inventory import add_inventory_items
 from ascii_farmstead_procedural_interiors import build_procedural_ground_floor
 
@@ -371,7 +372,9 @@ class RoadsideInfrastructureMixin:
                 set(self.roadside_work_target_keys())
                 - set(record.get("physical_work_done", ()))
             )
-            self.set_message(f"This assignment is already underway; {remaining} station(s) remain outside.")
+            self.set_message(
+                f"This assignment is already underway; {quantity_agreement(remaining, 'station')} remain outside."
+            )
             return False
         targets = self.roadside_work_target_keys()
         if not targets:
@@ -383,7 +386,8 @@ class RoadsideInfrastructureMixin:
         remaining = len(set(targets) - set(record.get("physical_work_done", ())))
         record["physical_work_active"] = True
         self.set_message(
-            f"Work started at {record.get('name')}. Use the marked yard fixtures and repair bench; {remaining} station(s) remain."
+            f"Work started at {record.get('name')}. Use the marked yard fixtures and repair bench; "
+            f"{quantity_agreement(remaining, 'station')} remain."
         )
         return True
 
@@ -406,7 +410,9 @@ class RoadsideInfrastructureMixin:
         record["physical_work_done"] = sorted(done)
         remaining = len(targets - done)
         if remaining:
-            self.set_message(f"Completed this work station. {remaining} station(s) remain around the compound.")
+            self.set_message(
+                f"Completed this work station. {quantity_agreement(remaining, 'station')} remain around the compound."
+            )
             return True
         rewards = {
             "abandoned_cabin": ({"Fiber": 2, "Wood": 2}, 55),
@@ -547,7 +553,9 @@ class RoadsideInfrastructureMixin:
             self.set_message("You practice distance and timing across the full marked range."); return True
         if kind == "survey_marker":
             mapped = self.map_nearby_wilderness_chunks(1); self.advance_time(8)
-            self.set_message(f"Used the survey instrument to chart {mapped} nearby area(s)."); return True
+            self.set_message(
+                f"Used the survey instrument to chart {quantity_agreement(mapped, 'nearby area')}."
+            ); return True
         if kind == "bench":
             restored = self.restore_stamina(6); self.advance_time(10)
             self.set_message(f"Rested beside the road. Stamina +{restored}."); return True

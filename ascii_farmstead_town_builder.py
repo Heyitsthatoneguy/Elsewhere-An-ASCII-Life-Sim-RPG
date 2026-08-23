@@ -12,6 +12,8 @@ import copy
 import random
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
+from ascii_farmstead_helpers import quantity_agreement
+
 
 Position = Tuple[int, int]
 SETTLEMENT_PLAN_VERSION = 3
@@ -1019,7 +1021,9 @@ class WildernessTownBuilder:
         if entrance not in roads:
             errors.append("The settlement entrance is not connected to a road.")
         if roads and connected != roads:
-            errors.append(f"{len(roads - connected)} road tile(s) are disconnected from the entrance.")
+            errors.append(
+                f"{quantity_agreement(len(roads - connected), 'road tile')} are disconnected from the entrance."
+            )
         lots = list(plan.get("lots", {}).values())
         for index, lot in enumerate(lots):
             if (
@@ -1055,7 +1059,9 @@ class WildernessTownBuilder:
             warnings.append("Fewer than two homes are planned.")
         conflicts = self.terrain_conflicts(plan, base_grid)
         if conflicts:
-            warnings.append(f"Blueprint intersects {len(conflicts)} blocking wilderness tile(s).")
+            warnings.append(
+                f"Blueprint intersects {quantity_agreement(len(conflicts), 'blocking wilderness tile')}."
+            )
         return {"errors": errors, "warnings": warnings}
 
     def summary(self, plan: Dict[str, object]) -> Dict[str, object]:

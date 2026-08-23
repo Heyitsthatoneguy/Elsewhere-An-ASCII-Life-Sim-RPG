@@ -13,7 +13,7 @@ import random
 from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 from ascii_farmstead_data import CROP_DATA
-from ascii_farmstead_helpers import quantity_item_phrase
+from ascii_farmstead_helpers import quantity_agreement, quantity_item_phrase
 from ascii_farmstead_state import Crop, quality_item_name
 from ascii_farmstead_support import C, colorize
 from ascii_farmstead_visuals import actor_style
@@ -2009,7 +2009,8 @@ class ActorNavigationMixin:
                 job = self.travel_follower_job_profile(follower_id, task)
                 self.record_travel_follower_memory(
                     follower_id,
-                    f"Job milestone - {job['title']}: completed {int(work_totals[task])} {job['output']} task(s).",
+                    f"Job milestone - {job['title']}: completed "
+                    f"{quantity_agreement(int(work_totals[task]), job['output'] + ' task')}.",
                     flag=f"job:{task}:{int(work_totals[task])}",
                 )
             kind, _source_id = self.travel_follower_identity_kind(follower_id)

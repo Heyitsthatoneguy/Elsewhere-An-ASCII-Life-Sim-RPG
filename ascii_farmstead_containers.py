@@ -14,7 +14,7 @@ from ascii_farmstead_data import (
 )
 from ascii_farmstead_custom_extended import BUILDING_TEMPLATE_FURNISHING_DATA
 from ascii_farmstead_excavation import EXCAVATION_FIND_DATA
-from ascii_farmstead_helpers import quantity_item_phrase
+from ascii_farmstead_helpers import quantity_agreement, quantity_item_phrase
 from ascii_farmstead_inventory import CapacityInventory, capacity_inventory
 from ascii_farmstead_random_loot import (
     add_random_reward_items,
@@ -1644,7 +1644,7 @@ class ContainerSystemMixin:
             if money:
                 bits.append(f"{money}g")
             if taken:
-                bits.append(f"{taken} item(s)")
+                bits.append(quantity_agreement(taken, "item"))
             suffix = " Your backpack is full." if self.backpack_free() <= 0 else ""
             verb = "Stole" if self.container_take_is_crime(policy) else "Took"
             crime_result = str(getattr(self, "_crime_last_result_text", "") or "")
@@ -1707,7 +1707,7 @@ class ContainerSystemMixin:
         if stored:
             suffix = " The container is full." if free <= 0 else ""
             self.autosave_with_message(
-                f"Stored {stored} carried item(s) in {record.get('name', 'the container')}.{suffix}"
+                f"Stored {quantity_agreement(stored, 'carried item')} in {record.get('name', 'the container')}.{suffix}"
             )
         else:
             self.set_message("There is nothing that can be stored here.")
@@ -1888,9 +1888,9 @@ class ContainerSystemMixin:
                     value="__take__",
                     enabled=available > 0,
                     hint=(
-                        f"{available} stack(s) | owner: {record.get('owner') or 'unknown'} | confirmation required"
+                        f"{quantity_agreement(available, 'stack')} | owner: {record.get('owner') or 'unknown'} | confirmation required"
                         if is_crime_take
-                        else f"{available} stack(s) | select to take full stacks"
+                        else f"{quantity_agreement(available, 'stack')} | select to take full stacks"
                     ),
                 )
             )
@@ -1899,7 +1899,7 @@ class ContainerSystemMixin:
                     label="Inspect contents",
                     value="__inspect__",
                     enabled=available > 0,
-                    hint=f"{available} stack(s)" if available else "empty",
+                    hint=quantity_agreement(available, "stack") if available else "empty",
                 )
             )
             if bool(record.get("allow_deposit", False)):

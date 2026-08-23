@@ -7,6 +7,7 @@ import random
 from typing import Dict, List, Optional, Tuple
 
 from ascii_farmstead_data import MENU_CONFIRM_KEYS
+from ascii_farmstead_helpers import quantity_agreement
 from ascii_farmstead_inventory import add_inventory_items
 from ascii_farmstead_minigame_ui import (
     minigame_controls,
@@ -244,7 +245,10 @@ class ExcavationMixin:
                     nearby += 1
                     nearest_depth = min(nearest_depth, int(other.get("layers", 0)))
         if nearby:
-            depth_text = f"; shallowest response is {nearest_depth} layer(s) down" if self.excavation_level() >= 3 else ""
+            depth_text = (
+                f"; shallowest response is {quantity_agreement(nearest_depth, 'layer')} down"
+                if self.excavation_level() >= 3 else ""
+            )
             return f"The probe detects {nearby} nearby response{'s' if nearby != 1 else ''}{depth_text}."
         return "No significant response in this square or its immediate neighbors."
 
@@ -620,7 +624,7 @@ class ExcavationMixin:
                 else " You can resume this trench later in the week."
             )
             self.autosave_with_message(
-                f"Fieldwork recovered {site.get('recovered_count', 0)} find(s).{complete_text}"
+                f"Fieldwork recovered {quantity_agreement(int(site.get('recovered_count', 0)), 'find')}.{complete_text}"
             )
         else:
             self.set_message("Left the excavation site without disturbing it.")

@@ -11,6 +11,7 @@ from ascii_farmstead_data import (
     MENU_BACK,
     MENU_CONFIRM_KEYS,
 )
+from ascii_farmstead_helpers import quantity_agreement
 from ascii_farmstead_support import C, clear_screen, colorize, normalize_key, read_key
 from ascii_farmstead_ui import MenuItem
 from ascii_farmstead_cards import card_color, card_suit_glyph, print_card_rows
@@ -624,7 +625,8 @@ class TavernGamesMixin:
             self._show_blackjack_result(game_round, venue, results)
         total_profit = sum(int(result["profit"]) for result in results)
         self.autosave_with_message(
-            f"Finished blackjack at {venue}: {total_profit:+d}g across {len(results)} hand(s)."
+            f"Finished blackjack at {venue}: {total_profit:+d}g across "
+            f"{quantity_agreement(len(results), 'hand')}."
         )
         return results
 

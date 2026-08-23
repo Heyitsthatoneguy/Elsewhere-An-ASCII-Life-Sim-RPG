@@ -11,7 +11,7 @@ from ascii_farmstead_civic_state import (
     sanitize_player_trade_routes,
 )
 from ascii_farmstead_data import LEFT_PANEL_HEIGHT, LEFT_PANEL_WIDTH, MENU_BACK
-from ascii_farmstead_helpers import days_in_month, quantity_item_phrase
+from ascii_farmstead_helpers import days_in_month, quantity_agreement, quantity_item_phrase
 from ascii_farmstead_npc_builder import stable_text_seed
 from ascii_farmstead_procedural_interiors import (
     build_procedural_ground_floor,
@@ -4637,7 +4637,9 @@ class CivicEconomyMixin:
         today = self.civic_date_ordinal()
         cooldown = int(politics.get("edict_cooldowns", {}).get(str(edict_id), 0) or 0)
         if today < cooldown:
-            self.set_message(f"That edict cannot be renewed for another {cooldown - today} day(s).")
+            self.set_message(
+                f"That edict cannot be renewed for another {quantity_agreement(cooldown - today, 'day')}."
+            )
             return False
         cost = int(record["cost"])
         if int(politics.get("treasury", 0)) < cost:
@@ -4718,7 +4720,7 @@ class CivicEconomyMixin:
     ) -> List[str]:
         plan = plan or self.current_procedural_town_plan()
         if not plan:
-            return ["No town zoning record is available."]
+            return ["There is no town here to zone."]
         politics = self.ensure_procedural_town_politics(plan)
         lines = [
             f"{str(plan.get('name', 'Town')).upper()} ZONING",
@@ -4983,12 +4985,12 @@ class CivicEconomyMixin:
         politics["treasury"] = int(politics.get("treasury", 0)) - cost
         politics["municipal_build_log"] = (
             list(politics.get("municipal_build_log", []) or [])
-            + [f"{getattr(self.state, 'date_label', '')}: built {added} road tile(s) ({cost}g)"]
+            + [f"{getattr(self.state, 'date_label', '')}: built {quantity_agreement(added, 'road tile')} ({cost}g)"]
         )[-30:]
         community = self.ensure_procedural_town_community(plan)
         community["development_points"] = int(community.get("development_points", 0)) + max(1, added // 4)
         self.mark_procedural_town_civic_plan_dirty(plan)
-        self.autosave_with_message(f"Built {added} municipal road tile(s) for {cost}g.")
+        self.autosave_with_message(f"Built {quantity_agreement(added, 'municipal road tile')} for {cost}g.")
         return True
 
     def procedural_election_phase(
@@ -5253,7 +5255,7 @@ class CivicEconomyMixin:
                 f"election_debate:{self.civic_town_key(plan)}:{self.state.year}",
                 f"Election Debate in {plan.get('name')}",
                 [
-                    {"type": "narration", "text": f"Residents gather in a public room while the debate focuses on {issue.get('name')}. Candidates and voters occupy the same civic space rather than becoming a detached score screen."},
+                    {"type": "narration", "text": f"Residents crowd into a public room as the debate turns to {issue.get('name')}. Candidates answer from the front while voters question them from the floor."},
                     {"type": "dialogue", "speaker": str(getattr(self.state, "player_name", "The candidate")) if "player" in scores else "Debate Moderator", "text": "Measure every promise against what this town can actually build, repair, and sustain."},
                     {"type": "dialogue", "speaker": "Debate Moderator", "text": f"The strongest case tonight came from {winner_name}. The vote remains open; a debate changes public support, not the final result by itself."},
                 ],
@@ -5753,7 +5755,7 @@ class CivicEconomyMixin:
     ) -> List[str]:
         plan = plan or self.current_procedural_town_plan()
         if not plan:
-            return ["No civic record is available."]
+            return ["There is no town government here."]
         politics = self.ensure_procedural_town_politics(plan)
         incumbent = self.procedural_candidate_name(
             str(politics.get("incumbent_id", "")),
@@ -5784,7 +5786,7 @@ class CivicEconomyMixin:
             )
             lines.extend([
                 "",
-                f"Temporary edict: {active_edict.get('name')} ({remaining} day(s) left)",
+                f"Temporary edict: {active_edict.get('name')} ({quantity_agreement(remaining, 'day')} left)",
             ])
         step, description = self.civic_orientation_current_step(plan)
         lines.extend([
@@ -5917,7 +5919,7 @@ class CivicEconomyMixin:
             if active:
                 hint = f"Active: {active.get('name')}"
             elif cooldown:
-                hint = f"Cooldown {cooldown} day(s)"
+                hint = f"Cooldown: {quantity_agreement(cooldown, 'day')}"
             else:
                 hint = (
                     f"{record['cost']}g | {record['duration']} days | "

@@ -22,7 +22,7 @@ from ascii_farmstead_data import (
     TOWN_BUILDING_DATA,
 )
 from ascii_farmstead_dialogue_library import contextual_dialogue_line
-from ascii_farmstead_helpers import quantity_item_phrase
+from ascii_farmstead_helpers import quantity_agreement, quantity_item_phrase
 from ascii_farmstead_npc_builder import FEMALE_GIVEN_NAMES, MALE_GIVEN_NAMES, SURNAMES
 from ascii_farmstead_relationship_dialogue import (
     child_household_line,
@@ -1141,6 +1141,28 @@ class DialogueFlowMixin:
                 continue
             source_kind = str(knowledge.get("source_kind", "hearsay"))
             source_name = str(knowledge.get("source_name", "someone on my route"))
+            knowledge_text = str(knowledge.get("text", ""))
+            if source_kind == "firsthand" and source_name == "personal observation":
+                related_event = next(
+                    (
+                        row for row in social_slot.get("witnessed_events", []) or []
+                        if isinstance(row, dict)
+                        and str(row.get("id", "")) == str(knowledge.get("id", ""))
+                    ),
+                    None,
+                )
+                if related_event:
+                    knowledge_text = self.world_dialogue_event_knowledge_summary(related_event)
+                else:
+                    legacy_event = {
+                        "text": knowledge_text,
+                        "action": self.world_dialogue_event_action(knowledge_text),
+                        "category": str(knowledge.get("subject", "general")),
+                        "location": knowledge.get("location", "nearby"),
+                    }
+                    knowledge_text = self.world_dialogue_event_knowledge_summary(legacy_event)
+                if not knowledge_text:
+                    continue
             source = (
                 "something they personally witnessed"
                 if source_kind == "firsthand"
@@ -1148,7 +1170,7 @@ class DialogueFlowMixin:
                 else source_name
             )
             packet = {
-                "text": str(knowledge.get("text", "")),
+                "text": knowledge_text,
                 "source": source,
                 "day": str(knowledge.get("day", self.dialogue_day_key())),
                 "confidence": str(knowledge.get("confidence", 50)),
@@ -3034,7 +3056,26 @@ class DialogueFlowMixin:
         slot = self.dialogue_social_slot(actor, kind)
         current = slot.get("initiation", {})
         if isinstance(current, dict) and current and not current.get("acknowledged"):
-            return current
+            if str(current.get("reason", "")) != "witnessed_event":
+                return current
+            source_event = next(
+                (
+                    row for row in reversed(slot.get("witnessed_events", []) or [])
+                    if isinstance(row, dict)
+                    and str(row.get("id", "")) == str(current.get("source_event_id", ""))
+                ),
+                None,
+            )
+            action = self.world_dialogue_safe_event_action(source_event or {})
+            if action:
+                place = self.world_dialogue_event_place_clause(source_event or {})
+                current["text"] = (
+                    f"I saw you {action}{place}. Is everyone safe now?"
+                    if action.startswith(("rescue", "extinguish"))
+                    else f"I saw you {action}{place}. Are you hurt?"
+                )
+                return current
+            current["acknowledged"] = True
         reason = ""
         text = ""
         unseen = next(
@@ -3042,6 +3083,7 @@ class DialogueFlowMixin:
                 row for row in reversed(slot["witnessed_events"])
                 if not bool(row.get("conversation_acknowledged", False))
                 and str(row.get("category", "")) == "combat"
+                and bool(self.world_dialogue_safe_event_action(row))
             ),
             None,
         )
@@ -3059,11 +3101,12 @@ class DialogueFlowMixin:
             text = "We planned to continue this today. I kept room in my schedule, so let us pick up where we left off."
         elif unseen:
             reason = "witnessed_event"
-            action = str(unseen.get("action", "") or "")
+            action = self.world_dialogue_safe_event_action(unseen)
+            place = self.world_dialogue_event_place_clause(unseen)
             if action.startswith("defeat"):
-                text = f"I saw you {action} nearby. Are you hurt?"
+                text = f"I saw you {action}{place}. Are you hurt?"
             elif action.startswith(("rescue", "extinguish")):
-                text = f"I saw you {action} nearby. Is everyone safe now?"
+                text = f"I saw you {action}{place}. Is everyone safe now?"
             else:
                 text = "I saw the fight nearby. Are you all right?"
         elif thread and int(thread.get("updated_day", 0) or 0) < self.dialogue_absolute_day():
@@ -3290,7 +3333,69 @@ class DialogueFlowMixin:
                 if plan:
                     return str(plan.get("name", "this settlement"))
             return "this stretch of wilderness"
-        return str(getattr(self.state, "location", "this place") or "this place")
+        raw_location = str(getattr(self.state, "location", "this place") or "this place")
+        if hasattr(self, "location_label"):
+            try:
+                display_location = str(self.location_label() or raw_location)
+            except (AttributeError, TypeError, ValueError):
+                display_location = raw_location
+        else:
+            display_location = raw_location
+        return self.world_dialogue_safe_location_label(display_location, raw_location)
+
+    def world_dialogue_safe_location_label(
+        self, value: object, raw_location: object = ""
+    ) -> str:
+        """Turn runtime location keys into language an NPC can plausibly use."""
+        text = " ".join(strip_ansi(str(value or "")).split()).strip(" .")
+        raw = str(raw_location or text).strip()
+        labels = {
+            "Farm": "the farm",
+            "Town": "Elsewhere",
+            "Mine": "the mine",
+            "Wilderness": "the wilderness",
+            "WildernessOverworld": "the wilderness map",
+            "WildernessCave": "a wilderness cave",
+            "WildernessDungeon": "the dungeon",
+            "WildernessOutpost": "the outpost",
+            "WildernessStructure": "a wilderness building",
+            "RuralInfrastructureInterior": "a roadside building",
+            "RoadsideAuxInterior": "a roadside stop",
+            "CorridorInfrastructureInterior": "a roadside building",
+            "RouteHamletInterior": "a hamlet building",
+            "RouteLeisureInterior": "a roadside gathering place",
+            "RouteHeritageInterior": "an old roadside building",
+            "ProceduralSettlementInterior": "a settlement building",
+            "HouseInterior": "the farmhouse",
+            "GeneralStoreInterior": "the general store",
+            "BlacksmithInterior": "the blacksmith",
+            "LibraryInterior": "the library",
+            "MayorHouseInterior": "the mayor's house",
+            "InnInterior": "the inn",
+            "FurnitureStoreInterior": "the furniture store",
+            "CarpenterStoreInterior": "the carpenter's shop",
+            "AnimalStoreInterior": "the animal store",
+            "ClinicInterior": "the clinic",
+            "TownHallInterior": "Town Hall",
+            "MarketRowInterior": "Market Row",
+            "MuseumInterior": "the museum",
+            "TownResidenceInterior": "a town residence",
+        }
+        if raw in labels:
+            return labels[raw]
+        if text in labels:
+            return labels[text]
+        if raw.startswith("TownResidence:"):
+            return "a town residence"
+        if re.search(r"(?i)dungeon[ _-]*room\d*", raw) or re.search(
+            r"(?i)dungeon[ _-]*room\d*", text
+        ):
+            return "the dungeon"
+        if re.fullmatch(r"[A-Za-z]+(?:Interior|Location|Room)\d*", text):
+            return "a nearby building"
+        if re.fullmatch(r"Wilderness\s*\([^)]*\)", text):
+            return "the wilderness"
+        return text or "this place"
 
     def world_dialogue_event_action(self, message: object) -> str:
         """Turn a gameplay result into a clause an eyewitness can say naturally."""
@@ -3299,6 +3404,8 @@ class DialogueFlowMixin:
             return ""
         if text.lower().startswith("you "):
             text = text[4:5].upper() + text[5:]
+        text = re.sub(r"\s*\([^)]*\)\s*", " ", text).strip()
+        text = text.split(" | ", 1)[0].strip()
         verb_forms = (
             ("Picked up", "pick up"), ("Harvested", "harvest"),
             ("Collected", "collect"), ("Recovered", "recover"),
@@ -3310,7 +3417,7 @@ class DialogueFlowMixin:
             ("Found", "find"), ("Rescued", "rescue"),
             ("Extinguished", "extinguish"), ("Froze", "freeze"),
             ("Completed", "complete"), ("Opened", "open"),
-            ("Took", "take"), ("Cast", "cast"),
+            ("Took", "take"), ("Cast", "cast"), ("Helped", "help"),
         )
         folded = text.casefold()
         for past, present in verb_forms:
@@ -3320,6 +3427,54 @@ class DialogueFlowMixin:
             if folded.startswith(prefix):
                 return f"{present} {text[len(past):].lstrip()}"[:180]
         return ""
+
+    def world_dialogue_safe_event_action(self, event: Dict[str, object]) -> str:
+        """Keep only substantial actions that sound natural when repeated aloud."""
+        category = str(event.get("category", "general") or "general").casefold()
+        raw_action = " ".join(strip_ansi(str(event.get("action", "") or "")).split()).strip(" .")
+        action = raw_action or self.world_dialogue_event_action(event.get("text", ""))
+        if action and not any(action.casefold().startswith(prefix + " ") or action.casefold() == prefix for prefix in (
+            "defeat", "rescue", "extinguish", "clear", "repair", "build", "craft",
+            "complete", "discover", "help",
+        )):
+            reparsed = self.world_dialogue_event_action(action)
+            action = reparsed
+        folded = action.casefold()
+        allowed = {
+            "combat": ("defeat", "rescue", "extinguish", "clear"),
+            "gain": ("repair", "build", "craft", "complete", "discover", "rescue", "help"),
+            "travel": ("discover",),
+            "social": ("rescue", "help"),
+            "general": ("repair", "build", "craft", "complete", "discover", "rescue", "extinguish", "help"),
+        }.get(category, ())
+        if not action or not any(folded == prefix or folded.startswith(prefix + " ") for prefix in allowed):
+            return ""
+        if re.search(r"(?i)DungeonRoom\d*|[A-Za-z]+Interior\d*", action):
+            return ""
+        if any(token in action for token in ("(", ")", "[", "]", " +", " =")):
+            return ""
+        return action[:140]
+
+    def world_dialogue_event_place_clause(self, event: Dict[str, object]) -> str:
+        place = self.world_dialogue_safe_location_label(event.get("location", "nearby"))
+        return "" if place in {"", "nearby", "this place"} else f" at {place}"
+
+    def world_dialogue_event_knowledge_summary(self, event: Dict[str, object]) -> str:
+        action = self.world_dialogue_safe_event_action(event)
+        if not action:
+            return ""
+        past_forms = {
+            "defeat": "defeated", "rescue": "rescued", "extinguish": "extinguished",
+            "clear": "cleared", "repair": "repaired", "build": "built",
+            "craft": "crafted", "complete": "completed", "discover": "discovered",
+            "help": "helped",
+        }
+        verb, _, rest = action.partition(" ")
+        past = past_forms.get(verb.casefold(), "")
+        if not past:
+            return ""
+        detail = f" {rest}" if rest else ""
+        return f"You {past}{detail}{self.world_dialogue_event_place_clause(event)}."
 
     def world_dialogue_event_is_worth_witnessing(
         self, message: object, category: str = ""
@@ -3332,18 +3487,12 @@ class DialogueFlowMixin:
             resolved = str(self.hud_activity_category(text))
         if resolved in {"dialogue", "warning"}:
             return False
-        folded = text.casefold()
-        if resolved == "combat":
-            return any(word in folded for word in ("defeat", "attack", "cast", "combat", "rescued", "cleared"))
-        if resolved == "money":
-            return any(word in folded for word in ("bought", "sold", "paid", "earned", "reward", "income"))
-        if resolved == "gain":
-            return bool(self.world_dialogue_event_action(text))
-        if resolved == "social":
-            return any(word in folded for word in ("relationship", "reputation", "affection", "bond", "helped"))
-        if resolved == "travel":
-            return "discovered" in folded
-        return bool(self.world_dialogue_event_action(text))
+        event = {
+            "text": text,
+            "action": self.world_dialogue_event_action(text),
+            "category": resolved or "general",
+        }
+        return bool(self.world_dialogue_safe_event_action(event))
 
     def world_dialogue_record_player_event(
         self, message: object, category: str = ""
@@ -3383,10 +3532,11 @@ class DialogueFlowMixin:
                 continue
             events.append(dict(event))
             slot["witnessed_events"] = events[-8:]
+            knowledge_text = self.world_dialogue_event_knowledge_summary(event)
             self.dialogue_add_knowledge(
                 actor,
                 kind,
-                text,
+                knowledge_text,
                 subject=resolved or "local event",
                 source_name="personal observation",
                 source_kind="firsthand",
@@ -3415,31 +3565,30 @@ class DialogueFlowMixin:
     ) -> str:
         slot = self.dialogue_social_slot(actor, kind)
         flag = "ambient_acknowledged" if channel == "ambient" else "conversation_acknowledged"
-        event = next(
-            (
-                row for row in reversed(slot.get("witnessed_events", []) or [])
-                if isinstance(row, dict) and not bool(row.get(flag, False))
-            ),
-            None,
-        )
+        event = None
+        for row in reversed(slot.get("witnessed_events", []) or []):
+            if not isinstance(row, dict) or bool(row.get(flag, False)):
+                continue
+            if not self.world_dialogue_safe_event_action(row):
+                row["ambient_acknowledged"] = True
+                row["conversation_acknowledged"] = True
+                continue
+            event = row
+            break
         if not event:
             return ""
         event[flag] = True
-        action = str(event.get("action", "") or "")
-        place = str(event.get("location", "nearby") or "nearby")
-        if action:
-            core = f"I saw you {action} near {place}."
-        else:
-            core = f"I was nearby when that happened at {place}: {event.get('text', '')}"
+        action = self.world_dialogue_safe_event_action(event)
+        core = f"I saw you {action}{self.world_dialogue_event_place_clause(event)}."
         demeanor = self.dialogue_demeanor(actor, kind)
         reactions = {
             "warm": " You handled yourself well.",
-            "professional": " It may affect the work people are doing here.",
-            "skeptical": " I am still deciding what to make of it.",
+            "professional": " That may matter to people working nearby.",
+            "skeptical": " I'm still deciding what to make of it.",
             "blunt": " I prefer seeing what someone does to hearing what they claim.",
-            "reserved": " I thought you should know that someone noticed.",
-            "wary": " Do not assume that means I trust you yet.",
-            "hostile": " It did not improve my opinion of you.",
+            "reserved": " I didn't want to make a fuss about it.",
+            "wary": " Don't assume that means I trust you yet.",
+            "hostile": " It didn't improve my opinion of you.",
             "neutral": " People tend to remember things like that.",
         }
         return core + reactions.get(demeanor, reactions["neutral"])
@@ -3744,7 +3893,11 @@ class DialogueFlowMixin:
         generation = int(getattr(self.state, "player_generation", 1) or 1)
         history = list(getattr(self.state, "dynasty_history", []) or [])
         heirlooms = list(getattr(self.state, "dynasty_heirlooms", []) or [])
-        return f"I am generation {generation} of the {dynasty}. Our records preserve {len(history)} earlier household head(s) and {len(heirlooms)} family heirloom(s)."
+        return (
+            f"I'm generation {generation} of the {dynasty}. Our records preserve "
+            f"{quantity_agreement(len(history), 'earlier household head')} and "
+            f"{quantity_agreement(len(heirlooms), 'family heirloom')}."
+        )
 
     def dialogue_disclosure_reaction(
         self, actor: Dict[str, object], kind: str, subject: str, repeated: bool
@@ -4169,7 +4322,10 @@ class DialogueFlowMixin:
                 for person in remaining
             ]
             if invited:
-                invite_options.append(("done", "Finish the guest list", f"Invite {len(invited)} additional guest(s)."))
+                invite_options.append((
+                    "done", "Finish the guest list",
+                    f"Invite {quantity_agreement(len(invited), 'additional guest')}.",
+                ))
             else:
                 invite_options.append(("back", "Decide later", "Do not schedule a gathering."))
             selected = self.dialogue_choose(

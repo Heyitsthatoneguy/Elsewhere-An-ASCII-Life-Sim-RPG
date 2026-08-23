@@ -421,7 +421,8 @@ class HoldemMixin:
             print(f"{game.names[seat]}: {label}")
             print_card_rows(game.holes[seat], max_per_row=2, indent="  ")
         winners = ", ".join(game.names[seat] for seat in result["winners"])
-        print(f"\nPot: {result['pot']}g | Winner(s): {winners}")
+        winner_label = "Winner" if len(result["winners"]) == 1 else "Winners"
+        print(f"\nPot: {result['pot']}g | {winner_label}: {winners}")
         print(f"Returned chips and winnings: {payout}g | Hand result: {payout - buy_in:+d}g")
         print("Press any key to leave the table.")
         read_key()

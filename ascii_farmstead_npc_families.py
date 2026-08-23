@@ -11,6 +11,7 @@ from ascii_farmstead_data import (
     AUTHORED_TOWN_RESIDENCE_DATA,
     AUTHORED_TOWN_RESIDENCE_ID_BY_NPC,
 )
+from ascii_farmstead_helpers import quantity_agreement
 from ascii_farmstead_npc_builder import (
     FEMALE_GIVEN_NAMES,
     MALE_GIVEN_NAMES,
@@ -1348,7 +1349,12 @@ class NpcFamilyLifeMixin:
                 married = sum(1 for resident in residents if resident.get("marital_status") == "Married") // 2
                 courting = sum(1 for resident in residents if resident.get("marital_status") in {"Courting", "Engaged"}) // 2
                 children = sum(1 for resident in residents if resident.get("age_group") in {"Child", "Teen"})
-                lines.append(f"- {population.get('settlement_name', 'Settlement')}: {married} married household(s), {courting} developing relationship(s), {children} young resident(s)")
+                lines.append(
+                    f"- {population.get('settlement_name', 'Settlement')}: "
+                    f"{quantity_agreement(married, 'married household')}, "
+                    f"{quantity_agreement(courting, 'developing relationship')}, "
+                    f"{quantity_agreement(children, 'young resident')}"
+                )
         events = list(family.get("events", []))[-8:]
         lines.extend(["", "Recent family news:"])
         lines.extend(f"- {event.get('text', '')}" for event in reversed(events))

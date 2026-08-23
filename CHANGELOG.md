@@ -1,5 +1,33 @@
 # Changelog
 
+## 1.0.1
+
+- Fixed follower and bystander dialogue that could expose raw event fragments,
+  item-pickup syntax, or internal location names such as dungeon room IDs.
+  Trivial pickups and routine notices no longer become eyewitness stories, while
+  meaningful combat, repairs, rescues, and discoveries remain discussable.
+- Added display-time cleanup for affected older saves. Malformed witnessed events
+  and rumors are removed safely, and valid older memories use natural place names
+  without requiring a new game.
+- Rewrote wilderness landmark, route-work, field-lesson, family-outing, household,
+  generated-resident, civic, and legacy-site text that described implementation
+  details, hidden scoring, or design intent instead of what happened in the world.
+- Replaced exposed relationship, household-bond, vitality, skill, and morale
+  arithmetic with natural outcome language where the exact hidden value wasn't
+  useful to the player.
+- Completed a broader menu and status-text grammar pass. Containers, automation,
+  settlements, exploration, aquariums, crime notices, family screens, tools,
+  world magic, victory summaries, and minigames now use proper singular and plural
+  forms instead of placeholders such as `item(s)`, `day(s)`, and `loss(es)`.
+- Improved generated NPC work and household conversation so residents describe
+  their experience, energy, duties, and place in the home naturally rather than
+  speaking in numeric stats or internal role labels.
+- Prevented ordinary recoverable-error messages from exposing raw exception text
+  in the HUD; diagnostic details remain available in crash reports.
+- Added permanent regressions for legacy follower memories, safe location labels,
+  meaningful witnessed events, landmark narration, natural relationship outcomes,
+  generated-resident dialogue, and count-aware authored text.
+
 ## 1.0.0
 
 - Expanded the seamless wilderness with substantial connected infrastructure:

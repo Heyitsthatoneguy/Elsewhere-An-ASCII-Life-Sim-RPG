@@ -6,7 +6,7 @@ import random
 from typing import Dict, List, Mapping, Optional, Tuple
 
 from ascii_farmstead_data import LEFT_PANEL_HEIGHT, LEFT_PANEL_WIDTH, MENU_BACK
-from ascii_farmstead_helpers import quantity_item_phrase
+from ascii_farmstead_helpers import quantity_agreement, quantity_item_phrase
 from ascii_farmstead_inventory import add_inventory_items
 from ascii_farmstead_procedural_interiors import build_procedural_ground_floor
 from ascii_farmstead_ui import MenuItem
@@ -434,7 +434,9 @@ class RouteHamletMixin:
         record["study_day"] = day; self.advance_time(35)
         if choice.value == "history":
             mapped = self.map_nearby_wilderness_chunks(1)
-            self.autosave_with_message(f"Studied regional histories and mapped {mapped} nearby area(s).")
+            self.autosave_with_message(
+                f"Studied regional histories and mapped {quantity_agreement(mapped, 'nearby area')}."
+            )
         else:
             item = {"coastal": "Marsh Reed", "mining": "Coal", "highland": "Fiber", "woodland": "Wood"}.get(str(record["type_id"]), "Field Snack")
             add_inventory_items(self.state.inventory, {item: 1})

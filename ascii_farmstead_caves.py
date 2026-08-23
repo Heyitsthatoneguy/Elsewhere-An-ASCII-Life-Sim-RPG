@@ -7,7 +7,7 @@ import random
 from collections import deque
 from typing import Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
-from ascii_farmstead_helpers import quantity_item_phrase
+from ascii_farmstead_helpers import quantity_agreement, quantity_item_phrase
 from ascii_farmstead_support import C, colorize
 from ascii_farmstead_visuals import actor_style
 
@@ -830,7 +830,9 @@ class ExpandedCaveMixin:
                     mapped.append(map_key)
                     revealed += 1
             feature["last_week"] = week_key
-            self.autosave_with_message(f"Charted {revealed} nearby surface chunk(s) from the survey station.{discovery}")
+            self.autosave_with_message(
+                f"Charted {quantity_agreement(revealed, 'nearby surface area')} from the survey station.{discovery}"
+            )
             return True
         if kind == "assay_bench":
             if feature.get("last_week") == week_key:

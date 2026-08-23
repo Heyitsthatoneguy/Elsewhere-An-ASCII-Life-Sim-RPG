@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Dict, Iterable, List, Optional, Tuple
 
+from ascii_farmstead_helpers import quantity_agreement
+
 
 NPC_ADVENTURE_ROLES = {
     "Sheriff", "Deputy", "Miner", "Blacksmith", "Mechanic", "Carpenter",
@@ -172,7 +174,11 @@ class NpcAdventureMixin:
             f"Equipment: {record.get('weapon')} / {record.get('armor')}",
             f"Journeys: {record.get('journeys', 0)}  |  Victories: {record.get('victories', 0)}",
             f"Disposition: courage {record.get('courage', 25)}/100; "
-            + (f"recovering for {recovery - today} more day(s)" if recovery > today else "fit for ordinary duties"),
+            + (
+                f"recovering for {recovery - today} "
+                f"{quantity_agreement(recovery - today, 'more day', 'more days')}"
+                if recovery > today else "fit for ordinary duties"
+            ),
         ]
         if record.get("last_outcome"):
             lines.append(f"Latest journey: {record['last_outcome']}")
@@ -233,7 +239,7 @@ class NpcAdventureMixin:
         if recovering:
             lines.append("Recovering residents:")
             lines.extend(
-                f"- {npc_id}: {int(record['recovery_until_day']) - self.absolute_game_day()} day(s)"
+                f"- {npc_id}: {quantity_agreement(int(record['recovery_until_day']) - self.absolute_game_day(), 'day')}"
                 for npc_id, record in recovering[:6]
             )
         return lines

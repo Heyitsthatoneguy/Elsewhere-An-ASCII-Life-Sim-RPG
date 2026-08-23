@@ -17,7 +17,7 @@ from ascii_farmstead_combat import (
     DEFAULT_COMBAT_WEAPON,
 )
 from ascii_farmstead_data import LEFT_PANEL_HEIGHT, LEFT_PANEL_WIDTH, MENU_BACK
-from ascii_farmstead_helpers import add_months_to_date, format_birthday, format_date
+from ascii_farmstead_helpers import add_months_to_date, format_birthday, format_date, quantity_agreement
 from ascii_farmstead_npc_builder import stable_text_seed
 from ascii_farmstead_ui import MenuItem, menu_select
 
@@ -2171,9 +2171,9 @@ class DynastyMixin:
                         f"{relative.get('name')} remembers growing up during "
                         f"{history.get('name', 'the previous head')}'s chapter.",
                         "",
-                        f"The family then held {history.get('claims', 0)} claim(s), "
-                        f"{history.get('businesses', 0)} business(es), and "
-                        f"{history.get('routes', 0)} trade route(s).",
+                        f"The family then held {quantity_agreement(int(history.get('claims', 0)), 'claim')}, "
+                        f"{quantity_agreement(int(history.get('businesses', 0)), 'business')}, and "
+                        f"{quantity_agreement(int(history.get('routes', 0)), 'trade route')}.",
                         "",
                         "The memory is ordinary in its details—and therefore worth keeping.",
                     ],

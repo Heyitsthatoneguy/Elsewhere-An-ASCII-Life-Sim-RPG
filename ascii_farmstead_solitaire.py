@@ -13,6 +13,7 @@ from ascii_farmstead_cards import (
     rendered_card_lines,
 )
 from ascii_farmstead_data import LEFT_PANEL_HEIGHT, LEFT_PANEL_WIDTH, MENU_BACK, MENU_CONFIRM_KEYS
+from ascii_farmstead_helpers import quantity_agreement
 from ascii_farmstead_minigame_ui import minigame_controls, minigame_notice, minigame_section, minigame_title
 from ascii_farmstead_support import C, clear_screen, colorize, movement_delta_for_key, normalize_key, read_key
 from ascii_farmstead_ui import MenuItem
@@ -170,7 +171,7 @@ def solitaire_move_tableau_to_tableau(
     flipped = solitaire_flip_exposed(match, source)
     match["moves"] += 1
     match["note"] = (
-        f"Moved {len(moving)} card(s) to column {destination + 1}"
+        f"Moved {quantity_agreement(len(moving), 'card')} to column {destination + 1}"
         + (" and revealed a card." if flipped else ".")
     )
     return True

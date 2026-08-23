@@ -11,6 +11,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from collections import deque
+import ast
 import contextlib
 import io
 import json
@@ -116,7 +117,7 @@ def visible_terminal_len(text: object) -> int:
 def main() -> int:
     assert support.GAME_TITLE == "Elsewhere: an ASCII Life-Sim RPG"
     assert support.GAME_SHORT_TITLE == "Elsewhere"
-    assert support.GAME_VERSION == "1.0.0"
+    assert support.GAME_VERSION == "1.0.1"
     assert support.movement_delta_for_key("NUM7") == (-1, -1)
     assert support.movement_delta_for_key("NUM8") == (0, -1)
     assert support.movement_delta_for_key("NUM3") == (1, 1)
@@ -3500,7 +3501,8 @@ def main() -> int:
         },
         "work",
     )
-    assert any("skill" in line and "morale" in line for line in work_dialogue)
+    assert any("current pace" in line.lower() for line in work_dialogue)
+    assert not any("/5" in line or "/100" in line for line in work_dialogue)
     sanitized_population = npc_builder.sanitize_procedural_settlement_populations({
         "11,-7": generated_population
     })["11,-7"]
@@ -3675,13 +3677,15 @@ def main() -> int:
     assert population_game.state.money == money_before_request + procedural_request["reward_money"]
     assert procedural_request["id"] in persistent_resident["completed_request_ids"]
     assert persistent_resident["active_request"]["status"] == "completed"
-    assert population_game.procedural_settlement_conversation_lines(
+    procedural_request_lines = population_game.procedural_settlement_conversation_lines(
         11,
         -7,
         persistent_resident_id,
         topic="request",
         remember=False,
     )
+    assert procedural_request_lines
+    assert "relationship +" not in " ".join(procedural_request_lines).lower()
     persistent_resident["relationship"] = 42
     persistent_resident["met"] = True
     persistent_resident["memories"] = ["First hello"]
@@ -8980,6 +8984,18 @@ def main() -> int:
     assert helpers.quantity_item_phrase("Carp", 3) == "3 Carp"
     assert helpers.quantity_item_phrase("Old Boot", 2) == "2 Old Boots"
     assert helpers.quantity_item_phrase("Clockwork Berry", 2) == "2 Clockwork Berries"
+    assert helpers.quantity_agreement(1, "day") == "1 day"
+    assert helpers.quantity_agreement(2, "day") == "2 days"
+    assert helpers.quantity_agreement(2, "loss") == "2 losses"
+    assert helpers.quantity_agreement(2, "loss", "losses") == "losses"
+    for source_path in Path(__file__).parent.glob("ascii_farmstead_*.py"):
+        source_tree = ast.parse(source_path.read_text(encoding="utf-8-sig"), filename=str(source_path))
+        authored_strings = [
+            node.value
+            for node in ast.walk(source_tree)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        ]
+        assert not any("(s)" in value or "(es)" in value for value in authored_strings), source_path.name
     assert helpers.naturalize_item_quantity_text(
         "Bring 3 Copper Bar before sunset.", "Copper Bar", 3
     ) == "Bring 3 Copper Bars before sunset."
@@ -11166,6 +11182,10 @@ def main() -> int:
         assert game.world_dialogue_event_action(
             "You step back out into the wilderness."
         ) == ""
+        assert not game.world_dialogue_event_is_worth_witnessing(
+            "Picked up 1 Feather.", "gain"
+        )
+        assert game.world_dialogue_safe_location_label("DungeonRoom1") == "the dungeon"
         assert game.world_dialogue_record_player_event(
             "Repaired the old trail marker.", "gain"
         ) == 1
@@ -11181,7 +11201,54 @@ def main() -> int:
         witness_actor, "procedural", "conversation"
     )
     assert "saw you repair" in witness_callback.lower()
+    assert "dungeonroom" not in witness_callback.lower()
     assert witness_slot["witnessed_events"][-1]["conversation_acknowledged"]
+    legacy_witness = {
+        "id": "legacy_raw_pickup", "name": "Vale", "role": "Traveler",
+        "personality": "Reserved", "relationship": 0,
+    }
+    legacy_slot = game.dialogue_social_slot(legacy_witness, "procedural")
+    legacy_slot["witnessed_events"].append({
+        "id": "legacy_raw_pickup_event",
+        "text": "Grabbed (1 Feather) at DungeonRoom1.",
+        "action": "did (grabbed 1 feather)",
+        "category": "gain",
+        "location": "DungeonRoom1",
+        "ambient_acknowledged": False,
+        "conversation_acknowledged": False,
+    })
+    legacy_slot["knowledge"].append({
+        "id": "legacy_raw_pickup_event",
+        "subject": "gain",
+        "text": "Grabbed (1 Feather) at DungeonRoom1.",
+        "source_name": "personal observation",
+        "source_kind": "firsthand",
+        "confidence": 100,
+        "day": game.dialogue_day_key(),
+        "location": "DungeonRoom1",
+    })
+    assert game.dialogue_witness_callback(legacy_witness, "procedural") == ""
+    assert not legacy_slot["witnessed_events"]
+    legacy_rumors = game.dialogue_refresh_routine_rumors(legacy_witness, "procedural")
+    assert not any(
+        "grabbed" in str(row.get("text", "")).lower()
+        or "dungeonroom" in str(row.get("text", "")).lower()
+        for row in legacy_rumors
+    )
+    legacy_slot["witnessed_events"].append({
+        "id": "legacy_combat_event",
+        "text": "Defeated a cave prowler.",
+        "action": "defeat a cave prowler",
+        "category": "combat",
+        "location": "DungeonRoom1",
+        "ambient_acknowledged": False,
+        "conversation_acknowledged": False,
+    })
+    legacy_combat_callback = game.dialogue_witness_callback(
+        legacy_witness, "procedural"
+    )
+    assert "at the dungeon" in legacy_combat_callback.lower()
+    assert "dungeonroom" not in legacy_combat_callback.lower()
     game.world_dialogue_nearby_actors = lambda radius=7: [{
         "actor": witness_actor, "kind": "procedural",
         "x": int(game.state.player_x) + 1, "y": int(game.state.player_y),
@@ -14507,6 +14574,14 @@ def main() -> int:
         event_id.startswith("partnership_checkin:")
         for event_id, _title, _steps in family_special_events
     )
+    partnership_text = " ".join(
+        str(step.get("text", ""))
+        for event_id, _title, steps in family_special_events
+        if event_id.startswith("partnership_checkin:")
+        for step in steps
+    ).lower()
+    assert "bond +" not in partnership_text
+    assert "rises by" not in partnership_text
     assert "household" in str(family_special_event_stages[-1].get("activity", ""))
     assert family_game.schedule_family_outing("Library Visit", 1)
     planned_outing = dict(family_game.state.family_world_state["planned_outing"])
@@ -14525,6 +14600,11 @@ def main() -> int:
     assert family_game.state.family_world_state["outing_history"]
     assert not family_game.state.family_world_state["planned_outing"]
     assert family_special_events and family_special_events[-1][0].startswith("family_outing:")
+    outing_text = " ".join(
+        str(step.get("text", "")) for step in family_special_events[-1][2]
+    ).lower()
+    assert "bond +" not in outing_text
+    assert "learning +" not in outing_text
     assert family_special_event_stages[-1].get("fixture_symbols")
     assert any(
         str(step.get("type", "")) == "participant"
@@ -14808,7 +14888,7 @@ def main() -> int:
     assert autonomous_crop_game.crop_for_scope("Farm", 17, 11) is not None
     assert autonomous_crop_game.base_map[15][22] == "."
     assert autonomous_crop_game.state.inventory["Fiber"] >= 1
-    assert any("reclaimed 2 seed(s)" in line for line in autonomous_crop_report)
+    assert any("reclaimed 2 seeds" in line for line in autonomous_crop_report)
     assert any("groundskeepers cleared" in line for line in autonomous_crop_report)
 
     supply_loop_game = FarmGame()
@@ -16628,7 +16708,7 @@ def main() -> int:
     expanded_overview = "\n".join(
         stronghold_game.reclaimed_stronghold_town_overview_lines(*expansion_chunk)
     )
-    assert "Developed footprint: 2 chunk(s)" in expanded_overview
+    assert "Developed footprint: 2 areas" in expanded_overview
     assert "Town treasury: $" in expanded_overview
     assert "Market / Established" in expanded_overview or "Market / Thriving" in expanded_overview
     stronghold_game.set_wilderness_chunk(scx, scy)
@@ -18196,6 +18276,13 @@ def main() -> int:
     wilderness_poi_game.state.stamina = 100
     assert wilderness_poi_game.explore_wilderness_landscape_route()
     assert any(event_id.startswith("landscape_route:") for event_id, _title, _steps in landmark_special_events)
+    route_steps = next(
+        steps for event_id, _title, steps in reversed(landmark_special_events)
+        if event_id.startswith("landscape_route:")
+    )
+    route_text = " ".join(str(step.get("text", "")) for step in route_steps).lower()
+    assert "single map symbol" not in route_text
+    assert "flavor-text" not in route_text
     assert wilderness_poi_game.interact_with_wilderness_landscape()
     assert any(
         event_id.startswith("landscape_specialty:")

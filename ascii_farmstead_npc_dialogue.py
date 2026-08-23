@@ -360,6 +360,8 @@ class ProceduralNpcDialogueBuilder:
             resident.get("job_profile", {}),
             role,
         )
+        skill = int(job_profile.get("skill", 0) or 0)
+        morale = int(job_profile.get("morale", 0) or 0)
 
         if topic == "first_meeting":
             return [
@@ -381,7 +383,20 @@ class ProceduralNpcDialogueBuilder:
                 )
             lines.append(
                 f"I'd call my current pace {str(job_profile.get('quality', 'Capable')).lower()}: "
-                f"skill {job_profile.get('skill', 0)}/5, morale {job_profile.get('morale', 0)}/100."
+                + (
+                    "I'm still learning the difficult parts of the work"
+                    if skill <= 1 else
+                    "I know the routine, though experience still catches me by surprise"
+                    if skill <= 3 else
+                    "I know the work well enough to notice trouble early"
+                )
+                + (
+                    ", and lately I've had energy to spare."
+                    if morale >= 70 else
+                    ", and I'm managing the pace well enough."
+                    if morale >= 40 else
+                    ", though lately the work has been wearing me down."
+                )
             )
             lines.append(
                 f"Right now I am {activity}"
@@ -392,9 +407,18 @@ class ProceduralNpcDialogueBuilder:
             household_role = str(resident.get("household_role", "Resident"))
             if member_names:
                 names = ", ".join(member_names[:2])
+                household_line = {
+                    "Head": "I'm usually the one who keeps the household organized, though everyone has a say.",
+                    "Spouse": "I share responsibility for the household, even when we divide the chores differently.",
+                    "Child": "The adults handle most of the household work, but I still have chores of my own.",
+                    "Teen": "I do my share at home, even if we don't always agree on what that should mean.",
+                    "Elder Relative": "I've lived long enough to know which household problems need advice and which need patience.",
+                    "Adult Relative": "I share the home and take responsibility for my part of it.",
+                    "Housemate": "We share the home and divide the work as fairly as we can.",
+                }.get(household_role, "I do my share of the household work without worrying much about titles.")
                 return [
                     f"I share home with {names}. A household develops its own weather, regardless of the sky.",
-                    f"My place in the household is '{household_role}', though daily chores are less formal than the record.",
+                    household_line,
                     f"Home is where everyone notices which task you hoped somebody else would do.",
                 ]
             return [
@@ -883,20 +907,20 @@ class ProceduralNpcDialogueMixin:
         lines = [
             f"{result.get('speaker')}",
             f"Topic: {str(result.get('topic', 'chat')).title()}",
-            f"Relationship: {result.get('relationship_tier')} ({result.get('relationship')})",
+            f"How they know you: {result.get('relationship_tier')}",
             "",
             f'"{result.get("text")}"',
         ]
         if result.get("follow_up"):
             lines.extend(["", f'"{result.get("follow_up")}"'])
         if int(result.get("relationship_gain", 0) or 0):
-            lines.extend(["", f"Relationship +{result.get('relationship_gain')}"])
+            lines.extend(["", "The conversation leaves you on warmer terms."])
         request = result.get("request", {})
         if isinstance(request, dict) and request and str(result.get("topic")) == "request":
             lines.extend([
                 "",
                 f"Needs: {quantity_item_phrase(request.get('item'), request.get('quantity'))}",
-                f"Reward: {request.get('reward_money')}g, relationship +{request.get('reward_relationship')}",
+                f"Reward: {request.get('reward_money')}g and improved relations",
                 f"Status: {self.procedural_settlement_request_status(chunk_x, chunk_y, resident_id)}",
             ])
         lines.extend([

@@ -7,6 +7,7 @@ from ascii_battle_prototype.combat.models import Skill
 from ascii_farmstead_combat import farmstead_combat_profile
 from ascii_farmstead_custom_content import custom_ability_records
 from ascii_farmstead_data import CROP_DATA, MENU_BACK, MENU_CONFIRM_KEYS
+from ascii_farmstead_helpers import quantity_agreement
 from ascii_farmstead_support import C, colorize, movement_delta_for_key, normalize_key, read_key
 from ascii_farmstead_ui import MenuItem
 
@@ -307,11 +308,11 @@ class WorldMagicMixin:
             return ""
         remaining = max(1, int(record.get("expires_at", 0)) - self.world_magic_clock())
         if remaining >= 1440:
-            time_text = f"about {math.ceil(remaining / 1440)} day(s)"
+            time_text = f"about {quantity_agreement(math.ceil(remaining / 1440), 'day')}"
         elif remaining >= 60:
-            time_text = f"about {math.ceil(remaining / 60)} hour(s)"
+            time_text = f"about {quantity_agreement(math.ceil(remaining / 60), 'hour')}"
         else:
-            time_text = f"about {remaining} minute(s)"
+            time_text = f"about {quantity_agreement(remaining, 'minute')}"
         return f"{description} It should last {time_text}."
 
     def world_magic_custom_affinities(self) -> Dict[str, str]:
@@ -754,7 +755,8 @@ class WorldMagicMixin:
             self.world_magic_set_preview(affected, affinity)
             self.set_message(
                 f"{skill.name} [{affinity.title()}]: {cost} MP, {self.dungeon_skill_shape_label(skill)}, "
-                f"range {skill.range_max}, {len(affected)} tile(s). Move cursor; Z/Enter cast; B/V/X/Esc/Q/Tab cancel."
+                f"range {skill.range_max}, {quantity_agreement(len(affected), 'tile')}. "
+                "Move cursor; Z/Enter cast; B/V/X/Esc/Q/Tab cancel."
             )
             self.draw_with_look_cursor(cursor_x, cursor_y)
             key = normalize_key(read_key())

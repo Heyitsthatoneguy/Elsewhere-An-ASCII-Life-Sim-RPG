@@ -1595,7 +1595,7 @@ class NpcMixin:
                 f"Wedding of {self.state.player_name} and {name}",
                 [
                     *participant_steps,
-                    {"type": "narration", "text": f"At {venue}, {venue_line} The {weather.lower()} weather and {style.lower()} preparations remain visible around the gathering."},
+                    {"type": "narration", "text": f"At {venue}, {venue_line} The {weather.lower()} weather shapes the {style.lower()} preparations."},
                     {"type": "narration", "text": f"{guests} take their places without blocking the aisle, doors, or route to the household ledger."},
                     {"type": "dialogue", "speaker": "Town Clerk", "text": "You are here to choose a household, not merely sign one into a ledger. Speak plainly, and let everyone present remember what you mean."},
                     {"type": "dialogue", "speaker": name, "npc_id": npc_id, "text": vow},
@@ -1918,7 +1918,7 @@ class NpcMixin:
             next_stage_line = "fully grown"
             for next_stage, month_mark in self.child_stage_months().items():
                 if age_months < month_mark:
-                    next_stage_line = f"{next_stage} in {month_mark - age_months} month(s)"
+                    next_stage_line = f"{next_stage} in {quantity_agreement(month_mark - age_months, 'month')}"
                     break
             top_topic, top_points = self.child_top_learning_topic(child)
             lines.extend([
@@ -2047,16 +2047,18 @@ class NpcMixin:
                 })
             steps.append({
                 "type": "action",
-                "text": f"The meal restores {recovered} stamina and strengthens the household bond by {bond_gain}.",
+                "text": f"The meal restores {recovered} stamina and gives everyone time to reconnect.",
             })
             self.play_world_event_scene(
                 f"family_meal:{self.state.year}:{self.state.month}:{self.state.day}",
                 f"A Shared Meal: {item_name}",
                 steps,
-                f"Shared {item_name} at home. Household bond +{bond_gain}.",
+                f"Shared {item_name} at home and spent meaningful time together.",
                 stage=self.family_relationship_stage_profile("family_meal"),
             )
-        self.autosave_with_message(f"Shared {item_name} at home. Household bond +{bond_gain}. Stamina +{recovered}.")
+        self.autosave_with_message(
+            f"Shared {item_name} at home and spent meaningful time together. Restored {recovered} stamina."
+        )
         return True
 
     def family_meal_lines(self) -> List[str]:
@@ -2064,7 +2066,7 @@ class NpcMixin:
         lines = [
             "FAMILY MEAL",
             "",
-            f"Household: {self.family_member_count()} member(s)",
+            f"Household: {quantity_agreement(self.family_member_count(), 'member')}",
             f"Status: {'ready' if ok else reason}",
             f"Last meal: {self.state.family_last_meal or 'none'}",
             "",
@@ -2728,7 +2730,7 @@ class NpcMixin:
             return False
         key = self.pregnancy_checkup_key()
         if not key:
-            self.set_message("Pregnancy record is incomplete.")
+            self.set_message("The clinic can't schedule this checkup because the expected due date is missing.")
             return False
         if not isinstance(self.state.pregnancy_checkup_months_seen, list):
             self.state.pregnancy_checkup_months_seen = []
@@ -3347,7 +3349,7 @@ class NpcMixin:
             and age_months >= 216
         ):
             return f"Life stage: {self.household_child_stage(child)}"
-        return f"Age: {age_months} month(s)"
+        return f"Age: {quantity_agreement(age_months, 'month')}"
 
     def household_child_stage(self, child: Dict[str, object]) -> str:
         age_months = self.household_child_age_months(child)
@@ -3408,8 +3410,10 @@ class NpcMixin:
         next_lines = []
         for next_stage, month_mark in self.child_stage_months().items():
             if age_months < month_mark:
-                next_lines.append(f"Next stage: {next_stage} at {month_mark} month(s)")
-                next_lines.append(f"Time until next stage: {month_mark - age_months} month(s)")
+                next_lines.append(f"Next stage: {next_stage} at {quantity_agreement(month_mark, 'month')}")
+                next_lines.append(
+                    f"Time until next stage: {quantity_agreement(month_mark - age_months, 'month')}"
+                )
                 break
         if not next_lines:
             next_lines.append("Next stage: fully grown")
@@ -3493,7 +3497,7 @@ class NpcMixin:
                 )
                 and child_age >= 216
             )
-            age_detail = "" if adult_age_hidden else f", {child_age} month(s)"
+            age_detail = "" if adult_age_hidden else f", {quantity_agreement(child_age, 'month')}"
             lines.append(
                 f"- {child.get('name', 'Child')}: {stage}{age_detail}, "
                 f"{child.get('personality_trait')} "
@@ -3720,12 +3724,12 @@ class NpcMixin:
                     {"type": "narration", "text": f"Morning reaches {home} differently. The household's routes, sleep, meals, and plans now bend around a newborn child."},
                     parent_step,
                     {"type": "narration", "text": f"{child_name}'s birthday is {format_birthday(self.state.month, self.state.day)}. Their {profile_fields['personality_trait'].lower()} temperament is only a first hint, not a finished destiny."},
-                    {"type": "narration", "text": f"The family record notes a starting class of {profile_fields.get('starting_class', 'Vanguard')}, which can still be reshaped by learning, chores, affection, and future outings."},
+                    {"type": "narration", "text": "No path has been chosen for this child. Learning, chores, affection, and the places you visit together will shape who they become."},
                 ],
                 f"{child_name} was born and joined the household.",
                 stage=self.family_relationship_stage_profile("pregnancy"),
             )
-        return f" {child_name} was born and now lives at {home}. Starting class: {profile_fields.get('starting_class', 'Vanguard')}."
+        return f" {child_name} was born and now lives at {home}."
 
     def household_help_candidate_children(self) -> List[Dict[str, object]]:
         helpers: List[Dict[str, object]] = []
@@ -4647,7 +4651,8 @@ class NpcMixin:
             reward_parts.append(f"{money}g")
         reward_text = ", ".join(reward_parts) or "local progress"
         self.autosave_with_message(
-            f"Helped {npc.get('name', 'the resident')} with local work: {reward_text}, relationship +{relationship}."
+            f"Helped {npc.get('name', 'the resident')} with local work and earned {reward_text}. "
+            "Working together brought you closer."
         )
         return True
 
@@ -6576,7 +6581,7 @@ class NpcMixin:
     def household_child_menu(self, npc: Dict[str, object]):
         child = self.child_record_from_npc(npc)
         if not child:
-            self.set_message("The household record for this child is missing.")
+            self.set_message("You can't find this child in the current household.")
             return
         while True:
             items = [
@@ -10302,7 +10307,10 @@ class NpcMixin:
                 mapped.append(key)
                 added += 1
         self.state.money -= price
-        self.autosave_with_message(f"Bought a chart of {visitor.get('origin', 'the origin region')} for {price}g; mapped {added} chunk(s).")
+        self.autosave_with_message(
+            f"Bought a chart of {visitor.get('origin', 'the surrounding region')} for {price}g; "
+            f"mapped {quantity_agreement(added, 'area')}."
+        )
         return True
 
     def talk_to_regional_circulation_traveler(self, traveler: Dict[str, object]) -> bool:
@@ -10355,17 +10363,17 @@ class NpcMixin:
                 trip["danger"] = max(0, int(trip.get("danger", 0) or 0) - 12)
             if traveler.get("authored_resident_trip"):
                 gain = self.adjust_town_npc_relationship(traveler_id, 2)
-                connection_text = f"relationship +{gain}; journey risk reduced"
+                connection_text = "you grew closer and their journey became safer"
             else:
                 bonds = life.setdefault("visitor_bonds", {})
                 bonds[traveler_id] = min(250, int(bonds.get(traveler_id, 0) or 0) + 2)
-                connection_text = "regional connection +2; journey risk reduced"
+                connection_text = "you earned their trust and their journey became safer"
         elif traveler.get("authored_resident_trip"):
             gain = self.adjust_town_npc_relationship(traveler_id, 2)
             trip = life.setdefault("resident_trips", {}).get(traveler_id, {})
             if isinstance(trip, dict):
                 trip["route_condition"] = "Traveler Assisted"
-            connection_text = f"relationship +{gain}"
+            connection_text = "you grew closer"
         else:
             bonds = life.setdefault("visitor_bonds", {})
             bonds[traveler_id] = min(250, int(bonds.get(traveler_id, 0) or 0) + 2)
@@ -10377,12 +10385,11 @@ class NpcMixin:
             memories = life.setdefault("visitor_memories", {}).setdefault(traveler_id, [])
             memories.append(f"{self.town_npc_day_key()}: Escorted safely along the road toward {traveler.get('route_destination_name', 'the next stop')}.")
             life["visitor_memories"][traveler_id] = memories[-8:]
-            connection_text = "route connection +2"
+            connection_text = "you earned their trust"
         self.state.money += reward
         action = "Walked the local route with" if local_commute else "Escorted"
         self.autosave_with_message(
-            f"{action} {traveler.get('name', 'the traveler')}: "
-            f"+{reward}g, {connection_text}."
+            f"{action} {traveler.get('name', 'the traveler')} and earned {reward}g; {connection_text}."
         )
         return True
 

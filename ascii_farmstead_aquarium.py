@@ -18,6 +18,7 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
+from ascii_farmstead_helpers import quantity_agreement
 from ascii_farmstead_support import C, colorize, get_color_enabled, normalize_key, read_key_timeout
 
 
@@ -1165,11 +1166,17 @@ class AquariumViewer:
                     if self.food_left <= 0:
                         self._finish_feeding()
                     else:
-                        self.message = f"Drop {self.food_left} more food portion(s)."
+                        self.message = (
+                            f"Drop {self.food_left} "
+                            f"{quantity_agreement(self.food_left, 'more food portion', 'more food portions')}."
+                        )
                 elif self.mode == "clean":
                     removed = [spot for spot in self.algae if abs(spot[0] - self.cursor_x) <= 1 and abs(spot[1] - self.cursor_y) <= 1]
                     self.algae = [spot for spot in self.algae if spot not in removed]
-                    self.message = "Scrub closer to an algae patch." if not removed else f"Cleaned {len(removed)} patch(es)."
+                    self.message = (
+                        "Scrub closer to an algae patch."
+                        if not removed else f"Cleaned {quantity_agreement(len(removed), 'patch')}."
+                    )
                     if not self.algae:
                         self.state["condition"] = 2
                         self.state["last_cleaned_day"] = self.day_key
