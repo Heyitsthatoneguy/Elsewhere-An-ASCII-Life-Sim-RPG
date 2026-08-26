@@ -57,6 +57,27 @@ AQUARIUM_LIFESPAN_YEARS: Dict[str, Tuple[int, int]] = {
     "Longnose Gar": (15, 30), "Steelhead": (4, 8), "Anchovy": (2, 4),
     "Red Snapper": (10, 20), "Halibut": (20, 40), "Pufferfish": (8, 15),
     "Swordfish": (12, 20), "Blue Marlin": (15, 25),
+    "Meadow Darter": (2, 4), "Golden Tench": (10, 20),
+    "Birchstream Trout": (4, 8), "Silver Burbot": (12, 22),
+    "Pinewater Char": (6, 12), "Deepwater Cisco": (4, 8),
+    "Fern Perch": (6, 12), "Timber Catfish": (15, 28),
+    "Prairie Shiner": (3, 6), "Plains Paddlefish": (25, 45),
+    "Heather Grayling": (5, 10), "Mist Eel": (12, 24),
+    "Bog Lamprey": (6, 12), "Peat Pike": (10, 20),
+    "Reed Killifish": (2, 4), "River Buffalo": (15, 30),
+    "Snowmelt Dace": (3, 6), "Alpine Char": (8, 16),
+    "Stonefin Sculpin": (4, 8), "Canyon Trout": (5, 10),
+    "Arroyo Pupfish": (2, 5), "Desert Sucker": (10, 20),
+    "Dune Tilapia": (6, 12), "Sand Basin Gar": (15, 28),
+    "Red Mesa Catfish": (12, 24), "Canyon Chub": (4, 8),
+    "Oasis Cichlid": (7, 14), "Datefin Barb": (6, 12),
+    "Spruce Trout": (4, 8), "Boreal Pike": (12, 24),
+    "Icewater Smelt": (3, 6), "Glacier Char": (10, 20),
+    "Mudflat Goby": (3, 6), "Shelf Skate": (15, 30),
+    "Archerfish": (5, 10), "Mangrove Snapper": (12, 24),
+    "Reef Butterflyfish": (6, 12), "Cobalt Jack": (12, 22),
+    "Grotto Tetra": (3, 7), "Limestone Loach": (7, 14),
+    "Abyssal Cavefish": (18, 35),
 }
 
 
@@ -110,7 +131,105 @@ FISH_SPRITES: Dict[str, Tuple[str, str]] = {
     "Pufferfish": ("<(●)>", "<(●)>"),
     "Swordfish": ("──╼<°>>", "<<°>╾──"),
     "Blue Marlin": ("───<★>>", "<<★>───"),
+    "Meadow Darter": ("><✿>", "<✿><"),
+    "Golden Tench": ("><((●>", "<●))><"),
+    "Birchstream Trout": ("--<○}>", "<{○>--"),
+    "Silver Burbot": ("~~<□>>", "<<□>~~"),
+    "Pinewater Char": ("--<▲}>", "<{▲>--"),
+    "Deepwater Cisco": ("=><◇>", "<◇><="),
+    "Fern Perch": ("-<❧|>", "<|❧>-"),
+    "Timber Catfish": ("=><[●]>", "<[●]><="),
+    "Prairie Shiner": ("><✦>", "<✦><"),
+    "Plains Paddlefish": ("──<◉}>", "<{◉>──"),
+    "Heather Grayling": ("--<◆}>", "<{◆>--"),
+    "Mist Eel": ("~~<·>>", "<<·>~~"),
+    "Bog Lamprey": ("~~~<○>", "<○>~~~"),
+    "Peat Pike": ("---<■>>", "<<■>---"),
+    "Reed Killifish": ("><│·>", "<·│><"),
+    "River Buffalo": ("=><{{●>", "<●}}><="),
+    "Snowmelt Dace": ("><❄>", "<❄><"),
+    "Alpine Char": ("--<✧}>", "<{✧>--"),
+    "Stonefin Sculpin": ("_<◆}>", "<{◆>_"),
+    "Canyon Trout": ("--<▴>>", "<<▴>--"),
+    "Arroyo Pupfish": (">{·}>", "<{·}<"),
+    "Desert Sucker": ("==<○}>", "<{○>=="),
+    "Dune Tilapia": ("><{☀}>", "<{☀}><"),
+    "Sand Basin Gar": ("───<◇>", "<◇>───"),
+    "Red Mesa Catfish": ("=><{♦}>", "<{♦}><="),
+    "Canyon Chub": ("><▲>>", "<<▲><"),
+    "Oasis Cichlid": ("><{◈}>", "<{◈}><"),
+    "Datefin Barb": ("><♢>>", "<<♢><"),
+    "Spruce Trout": ("--<♠}>", "<{♠>--"),
+    "Boreal Pike": ("---<❄>>", "<<❄>---"),
+    "Icewater Smelt": ("><✧>", "<✧><"),
+    "Glacier Char": ("--<❆}>", "<{❆>--"),
+    "Mudflat Goby": ("_<•}>", "<{•>_"),
+    "Shelf Skate": ("__<◇}>>", "<<{◇>__"),
+    "Archerfish": ("-<↟}>", "<{↟>-"),
+    "Mangrove Snapper": ("><{♣}>", "<{♣}><"),
+    "Reef Butterflyfish": ("<(☼)>", "<(☼)>"),
+    "Cobalt Jack": ("--<●}>>", "<<{●>--"),
+    "Grotto Tetra": ("><·◇>", "<◇·><"),
+    "Limestone Loach": ("~~<□}>", "<{□>~~"),
+    "Abyssal Cavefish": ("===<○>>", "<<○>==="),
 }
+
+# The standalone aquarium prototype used a broad color cycle. Keep that lively
+# look in the integrated game with a stable color per species, then apply a few
+# name-based art-direction overrides so recognizable fish retain the colors
+# their names and markings imply. These bright foregrounds remain legible over
+# all three water-depth colors.
+FISH_COLOR_PALETTE: Tuple[str, ...] = (
+    "\033[38;5;208;1m",  # orange
+    "\033[38;5;220;1m",  # gold
+    "\033[38;5;44;1m",   # teal
+    "\033[38;5;141;1m",  # violet
+    "\033[38;5;213;1m",  # pink
+    "\033[38;5;118;1m",  # lime
+    "\033[38;5;250;1m",  # silver
+    "\033[38;5;203;1m",  # coral red
+    "\033[38;5;75;1m",   # bright blue
+    "\033[38;5;51;1m",   # cyan
+)
+FISH_SPECIES_COLORS: Dict[str, str] = {
+    species: FISH_COLOR_PALETTE[index % len(FISH_COLOR_PALETTE)]
+    for index, species in enumerate(FISH_SPRITES)
+}
+
+for _fish_name in FISH_SPRITES:
+    _lower_name = _fish_name.lower()
+    if any(word in _lower_name for word in ("gold", "sun", "yellow", "datefin")):
+        FISH_SPECIES_COLORS[_fish_name] = FISH_COLOR_PALETTE[1]
+    elif any(word in _lower_name for word in ("red", "coral", "snapper")):
+        FISH_SPECIES_COLORS[_fish_name] = FISH_COLOR_PALETTE[7]
+    elif any(word in _lower_name for word in ("cobalt", "blue", "deepwater", "storm")):
+        FISH_SPECIES_COLORS[_fish_name] = FISH_COLOR_PALETTE[8]
+    elif any(word in _lower_name for word in ("ice", "snow", "glacier", "silver", "pale", "blind")):
+        FISH_SPECIES_COLORS[_fish_name] = FISH_COLOR_PALETTE[6]
+    elif any(word in _lower_name for word in ("moon", "mist", "crystal", "grotto", "abyssal")):
+        FISH_SPECIES_COLORS[_fish_name] = FISH_COLOR_PALETTE[3]
+    elif any(word in _lower_name for word in ("fern", "reed", "bog", "meadow", "prairie")):
+        FISH_SPECIES_COLORS[_fish_name] = FISH_COLOR_PALETTE[5]
+    elif any(word in _lower_name for word in ("desert", "dune", "sand", "arroyo", "oasis")):
+        FISH_SPECIES_COLORS[_fish_name] = FISH_COLOR_PALETTE[0]
+
+
+def fish_species_color(species: str, variant: str = "Normal", lights_on: bool = True) -> str:
+    """Return the shared vivid display color for a species and aquarium variant."""
+    if not lights_on:
+        return C.UI_MUTED
+    variant = str(variant or "Normal")
+    if variant == "Golden":
+        return FISH_COLOR_PALETTE[1]
+    if variant == "Pale":
+        return FISH_COLOR_PALETTE[6]
+    return FISH_SPECIES_COLORS.get(str(species), C.ACTOR_WILDLIFE)
+
+
+def fish_species_sprite(species: str, direction: int = 1) -> str:
+    """Return the shared right- or left-facing art for a fish species."""
+    right, left = FISH_SPRITES.get(str(species), ("><>", "<><"))
+    return right if int(direction) >= 0 else left
 
 
 DECORATION_SPRITES: Dict[str, Sequence[str]] = {
@@ -175,19 +294,29 @@ PERSONALITIES = (
 SCHOOLING_SPECIES = {
     "Pond Minnow", "Blind Minnow", "Tide Sardine", "Mackerel", "Coral Dart",
     "Mosquitofish", "Golden Shiner", "Rainbow Smelt", "Dace", "Anchovy",
+    "Meadow Darter", "Deepwater Cisco", "Prairie Shiner", "Reed Killifish",
+    "Snowmelt Dace", "Icewater Smelt", "Grotto Tetra",
 }
 BOTTOM_SPECIES = {
     "Catfish", "Carp", "Cave Carp", "River Chub", "Reef Grouper",
     "Mud Loach", "Lake Sturgeon", "Halibut",
+    "Golden Tench", "Silver Burbot", "Timber Catfish", "Plains Paddlefish",
+    "Bog Lamprey", "River Buffalo", "Stonefin Sculpin", "Desert Sucker",
+    "Red Mesa Catfish", "Mudflat Goby", "Shelf Skate", "Limestone Loach",
+    "Abyssal Cavefish",
 }
 HIDING_SPECIES = {
     "Night Eel", "Crystal Eel", "Moon Eel", "Lantern Angelfish",
     "Walleye",
+    "Mist Eel", "Bog Lamprey",
 }
 FAST_SPECIES = {
     "Trout", "Brook Trout", "Rain Pike", "Silver Salmon", "Sunfin Tuna",
     "Muskellunge", "Smallmouth Bass", "Rainbow Trout", "Longnose Gar",
     "Steelhead", "Swordfish", "Blue Marlin",
+    "Birchstream Trout", "Pinewater Char", "Heather Grayling", "Peat Pike",
+    "Alpine Char", "Canyon Trout", "Sand Basin Gar", "Spruce Trout",
+    "Boreal Pike", "Glacier Char", "Mangrove Snapper", "Cobalt Jack",
 }
 
 
@@ -838,8 +967,9 @@ class AquariumViewer:
         return ("Dirty", "Cloudy", "Clean")[max(0, min(2, int(self.state.get("condition", 2))))]
 
     def _fish_sprite(self, fish: Dict[str, object]) -> str:
-        right, left = FISH_SPRITES.get(str(fish.get("species", "")), ("><>", "<><"))
-        sprite = right if int(fish.get("direction", 1)) > 0 else left
+        sprite = fish_species_sprite(
+            str(fish.get("species", "")), int(fish.get("direction", 1)),
+        )
         variant = str(fish.get("variant", "Normal"))
         if variant == "Speckled" and len(sprite) > 3:
             middle = len(sprite) // 2
@@ -851,13 +981,11 @@ class AquariumViewer:
         return sprite
 
     def _fish_color(self, fish: Dict[str, object]) -> str:
-        if not bool(self.state.get("lights_on", True)):
-            return C.UI_MUTED
-        variant = str(fish.get("variant", "Normal"))
-        if variant == "Golden":
-            return C.UI_SELECTED
-        habitat = species_habitat(str(fish.get("species", "")), self.fish_data)
-        return C.CRYSTAL if habitat == "Underground" else C.COAST if habitat == "Saltwater" else C.ACTOR_WILDLIFE
+        return fish_species_color(
+            str(fish.get("species", "")),
+            str(fish.get("variant", "Normal")),
+            bool(self.state.get("lights_on", True)),
+        )
 
     @staticmethod
     def _put(grid, colors, x: int, y: int, text: str, role: str) -> None:
@@ -1094,19 +1222,46 @@ class AquariumViewer:
                 shelters = decorations_with_effect(self.state, "shelter")
                 if shelters:
                     shelter = min(shelters, key=lambda d: abs(int(fish.get("x", 3)) - int(d.get("x", 3))))
-                    target = {"x": int(shelter.get("x", 3)) + 1, "y": int(shelter.get("y", height - 4)) + 1}
+                    shelter_target = {
+                        "x": int(shelter.get("x", 3)) + 1,
+                        "y": int(shelter.get("y", height - 4)) + 1,
+                    }
+                    # Shelter is a home range, not a permanent parking spot.
+                    # Once a hiding fish is safely nearby it should resume a
+                    # short patrol instead of targeting the exact same cell on
+                    # every update and becoming motionless forever.
+                    if (
+                        abs(int(fish.get("x", 3)) - shelter_target["x"])
+                        + abs(int(fish.get("y", 3)) - shelter_target["y"])
+                    ) > 2:
+                        target = shelter_target
             elif personality == "shy":
                 covers = decorations_with_effect(self.state, "cover")
                 if covers:
                     cover = min(covers, key=lambda d: abs(int(fish.get("x", 3)) - int(d.get("x", 3))))
-                    target = {"x": int(cover.get("x", 3)) + 1, "y": int(cover.get("y", height - 4))}
+                    cover_target = {
+                        "x": int(cover.get("x", 3)) + 1,
+                        "y": int(cover.get("y", height - 4)),
+                    }
+                    if (
+                        abs(int(fish.get("x", 3)) - cover_target["x"])
+                        + abs(int(fish.get("y", 3)) - cover_target["y"])
+                    ) > 2:
+                        target = cover_target
             if species in BOTTOM_SPECIES and target is None:
                 # Bottom dwellers settle beside cover when any is available
                 # instead of only patrolling the floor.
                 covers = decorations_with_effect(self.state, "cover")
                 if covers:
                     cover = min(covers, key=lambda d: abs(int(fish.get("x", 3)) - int(d.get("x", 3))))
-                    target = {"x": int(cover.get("x", 3)) + 1, "y": height - 3}
+                    cover_target = {"x": int(cover.get("x", 3)) + 1, "y": height - 3}
+                    if abs(int(fish.get("x", 3)) - cover_target["x"]) > 2:
+                        target = cover_target
+                    else:
+                        target = {
+                            "x": int(fish.get("x", 3)) + int(fish.get("direction", 1)) * 4,
+                            "y": height - 3,
+                        }
                 else:
                     target = {"x": int(fish.get("x", 3)) + int(fish.get("direction", 1)) * 4, "y": height - 3}
             if target:
@@ -1140,7 +1295,18 @@ class AquariumViewer:
                 fish["direction"] = -direction
                 fish["x"] = max(2, min(width - sprite_len - 2, int(fish["x"])))
             if (self.tick + phase) % 11 == 0 and personality != "sleepy":
-                fish["y"] = max(2, min(height - 3, int(fish.get("y", 4)) + (1 if (phase + self.tick) % 2 else -1)))
+                # Do not derive vertical direction from the same tick modulus
+                # that schedules movement. For three- and five-tick swimmers,
+                # those congruences repeatedly selected the same direction,
+                # so a fish drawn down by food could remain pinned to the tank
+                # floor. Alternating by completed vertical cycles guarantees a
+                # gentle rise-and-fall patrol for every movement period.
+                vertical_cycle = (self.tick + phase) // 11
+                vertical_step = -1 if (vertical_cycle + phase + index) % 2 == 0 else 1
+                fish["y"] = max(
+                    2,
+                    min(height - 3, int(fish.get("y", 4)) + vertical_step),
+                )
 
     def _handle_key(self, key: str) -> Optional[AquariumResult]:
         key = normalize_key(key)
@@ -1290,6 +1456,10 @@ __all__ = [
     "aquarium_day_number",
     "breed_aquarium_fish",
     "can_stock_species",
+    "FISH_COLOR_PALETTE",
+    "FISH_SPECIES_COLORS",
+    "fish_species_color",
+    "fish_species_sprite",
     "normalize_aquarium_state",
     "remove_aquarium_fish",
     "rename_aquarium_fish",

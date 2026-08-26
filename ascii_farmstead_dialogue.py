@@ -1473,12 +1473,23 @@ class DialogueFlowMixin:
                     cx = actor.get("chunk_x", getattr(self.state, "wilderness_chunk_x", 0))
                     cy = actor.get("chunk_y", getattr(self.state, "wilderness_chunk_y", 0))
                 try:
-                    route_places.append({
+                    route_place = {
                         "id": f"wilderness:{int(cx)},{int(cy)}:{prefix}",
                         "name": name,
                         "x": int(cx), "y": int(cy), "kind": "wilderness",
                         "route_known": True,
-                    })
+                    }
+                    world_x = actor.get(f"{prefix}_world_x")
+                    world_y = actor.get(f"{prefix}_world_y")
+                    if prefix == "local_site":
+                        local_x, local_y = actor.get("local_site_x"), actor.get("local_site_y")
+                        if local_x is not None and local_y is not None and hasattr(self, "wilderness_world_coords"):
+                            world_x, world_y = self.wilderness_world_coords(
+                                int(cx), int(cy), int(local_x), int(local_y)
+                            )
+                    if world_x is not None and world_y is not None:
+                        route_place.update({"world_x": int(world_x), "world_y": int(world_y)})
+                    route_places.append(route_place)
                 except (TypeError, ValueError):
                     continue
             places.extend(route_places)
@@ -1489,13 +1500,19 @@ class DialogueFlowMixin:
                     for destination in self.wilderness_road_destinations_for_chunk(cx, cy):
                         if not isinstance(destination, dict) or not destination.get("name"):
                             continue
-                        places.append({
+                        road_place = {
                             "id": f"wilderness:{int(destination.get('chunk_x', cx))},{int(destination.get('chunk_y', cy))}:{destination.get('id', 'road')}",
                             "name": str(destination["name"]),
                             "x": int(destination.get("chunk_x", cx)),
                             "y": int(destination.get("chunk_y", cy)),
                             "kind": "wilderness", "route_known": True,
-                        })
+                        }
+                        if "world_x" in destination and "world_y" in destination:
+                            road_place.update({
+                                "world_x": int(destination["world_x"]),
+                                "world_y": int(destination["world_y"]),
+                            })
+                        places.append(road_place)
                 except Exception:
                     pass
             state = getattr(self.state, "wilderness_poi_state", {})
@@ -1505,14 +1522,32 @@ class DialogueFlowMixin:
                         continue
                     if not any(record.get(flag) for flag in ("discovered", "repaired", "restored", "visited")):
                         continue
-                    coords = str(key).split(":")[-1].split(",")
-                    if len(coords) != 2:
-                        continue
+                    chunk_x, chunk_y = record.get("chunk_x"), record.get("chunk_y")
+                    local_x, local_y = record.get("x"), record.get("y")
+                    key_parts = str(key).split(":")
                     try:
-                        cx, cy = int(coords[0]), int(coords[1])
-                    except ValueError:
+                        # Current POI keys are ``chunk_x,chunk_y:kind:x,y``.
+                        # The old code parsed the final pair as chunk coordinates,
+                        # sending guides toward unrelated regions. Legacy records
+                        # may instead use ``kind:chunk_x,chunk_y``.
+                        if chunk_x is None or chunk_y is None:
+                            chunk_pair = key_parts[0] if "," in key_parts[0] else key_parts[-1]
+                            chunk_x, chunk_y = (int(value) for value in chunk_pair.split(",", 1))
+                        cx, cy = int(chunk_x), int(chunk_y)
+                        place = {
+                            "id": f"wilderness:{cx},{cy}:{record.get('kind', 'poi')}:{key}",
+                            "name": str(record["name"]), "x": cx, "y": cy,
+                            "kind": "wilderness",
+                        }
+                        if local_x is not None and local_y is not None and hasattr(self, "wilderness_world_coords"):
+                            world_x, world_y = self.wilderness_world_coords(cx, cy, int(local_x), int(local_y))
+                            place.update({
+                                "local_x": int(local_x), "local_y": int(local_y),
+                                "world_x": int(world_x), "world_y": int(world_y),
+                            })
+                        places.append(place)
+                    except (TypeError, ValueError):
                         continue
-                    places.append({"id": f"wilderness:{cx},{cy}", "name": str(record["name"]), "x": cx, "y": cy, "kind": "wilderness"})
         unique: Dict[str, Dict[str, object]] = {}
         for place in places:
             unique.setdefault(str(place.get("id", place.get("name"))), place)
@@ -1767,7 +1802,7 @@ class DialogueFlowMixin:
         fulfilled = False
         if promise_type == "authored_errand":
             fulfilled = target_id in set(getattr(self.state, "completed_errand_ids", []) or [])
-        elif promise_type == "procedural_request":
+        elif promise_type in {"procedural_request", "procedural_quest"}:
             request = actor.get("active_request", {})
             fulfilled = bool(
                 isinstance(request, dict)
@@ -1796,6 +1831,10 @@ class DialogueFlowMixin:
     def dialogue_work_situation(
         self, actor: Dict[str, object], kind: str
     ) -> Optional[Dict[str, object]]:
+        if hasattr(self, "world_opportunity_situation_for_actor"):
+            opportunity = self.world_opportunity_situation_for_actor(actor, kind)
+            if opportunity:
+                return opportunity
         if kind == "authored" and hasattr(self, "errand_for_npc"):
             errand = self.errand_for_npc(actor)
             if isinstance(errand, dict) and not errand.get("completed"):
@@ -1812,15 +1851,20 @@ class DialogueFlowMixin:
             request = self.ensure_procedural_resident_request(
                 int(plan.get("chunk_x", 0)), int(plan.get("chunk_y", 0)), str(actor.get("id", ""))
             )
-            if isinstance(request, dict) and str(request.get("status", "")) == "active":
-                item = str(request.get("item", "supplies"))
-                qty = int(request.get("quantity", 1))
+            if isinstance(request, dict) and str(request.get("status", "")) in {"offered", "active", "ready"}:
+                quest_id = str(request.get("quest_id", ""))
+                quest = self.quest_record(quest_id) if quest_id and hasattr(self, "quest_record") else {}
+                status = str(quest.get("status", request.get("status", "offered")))
+                objective = self.quest_current_objective(quest) if quest and hasattr(self, "quest_current_objective") else {}
+                summary = str(objective.get("description", request.get("objective_summary", "help with the request")))
                 return {
-                    "type": "procedural_request", "id": str(request.get("id", "")),
-                    "summary": f"bring me {quantity_item_phrase(item, qty)}", "record": request,
-                    "prompt": f"I need {quantity_item_phrase(item, qty)}. I can pay {int(request.get('reward_money', 0))}g for the delivery.",
-                    "promise": True, "deadline": "until the request is completed",
-                    "ready": int(self.state.inventory.get(item, 0) or 0) >= qty,
+                    "type": "procedural_quest", "id": str(request.get("id", "")),
+                    "quest_id": quest_id, "quest_record": quest,
+                    "title": str(request.get("title", "Resident Request")),
+                    "summary": summary.rstrip("."), "record": request,
+                    "prompt": str(request.get("offer_text") or request.get("description") or summary),
+                    "promise": status == "offered", "deadline": "until the request is completed",
+                    "ready": status == "ready",
                     "chunk_x": int(plan.get("chunk_x", 0)), "chunk_y": int(plan.get("chunk_y", 0)),
                 }
         if kind == "traveler" and actor.get("recurring") and hasattr(self, "recurring_wilderness_traveler_assignment"):
@@ -1858,7 +1902,7 @@ class DialogueFlowMixin:
         situation_type = str(situation.get("type", ""))
         if situation_type == "authored_errand":
             return bool(self.complete_errand(dict(situation.get("record", {}) or {})))
-        if situation_type == "procedural_request":
+        if situation_type in {"procedural_request", "procedural_quest"}:
             return bool(self.complete_procedural_settlement_request(
                 int(situation.get("chunk_x", 0)), int(situation.get("chunk_y", 0)), str(actor.get("id", ""))
             ))
@@ -1866,6 +1910,14 @@ class DialogueFlowMixin:
             return bool(self.complete_recurring_wilderness_traveler_assignment(actor))
         if situation_type == "caretaker_work":
             return bool(self.perform_wilderness_structure_work())
+        if situation_type == "world_opportunity":
+            quest_id = str(situation.get("quest_id", ""))
+            quest = self.quest_record(quest_id) if quest_id else {}
+            return bool(
+                quest
+                and str(quest.get("status", "")) == "ready"
+                and self.complete_quest(quest_id)
+            )
         return False
 
     def dialogue_actor_quest_entries(
@@ -2251,6 +2303,15 @@ class DialogueFlowMixin:
         ):
             rows = slot.get(field, [])
             slot[field] = [row for row in rows if isinstance(row, dict)][-limit:]
+        for field, limit in (
+            ("recent_observation_templates", 12),
+            ("recent_observation_reactions", 10),
+            ("recent_companion_line_ids", 12),
+        ):
+            values = slot.get(field, [])
+            if not isinstance(values, list):
+                values = []
+            slot[field] = [str(value)[:120] for value in values if str(value or "")][-limit:]
         # Story threads created by the earlier automatic system did not record
         # whether their opening was ever spoken. Retire those fragments instead
         # of presenting a mid-story "since we last spoke" prompt in old saves.
@@ -3068,12 +3129,11 @@ class DialogueFlowMixin:
             )
             action = self.world_dialogue_safe_event_action(source_event or {})
             if action:
-                place = self.world_dialogue_event_place_clause(source_event or {})
-                current["text"] = (
-                    f"I saw you {action}{place}. Is everyone safe now?"
-                    if action.startswith(("rescue", "extinguish"))
-                    else f"I saw you {action}{place}. Are you hurt?"
-                )
+                if int(current.get("observation_version", 0) or 0) < 2:
+                    current["text"] = self.dialogue_witness_observation_line(
+                        actor, kind, source_event or {}, "initiation"
+                    )
+                    current["observation_version"] = 2
                 return current
             current["acknowledged"] = True
         reason = ""
@@ -3101,14 +3161,9 @@ class DialogueFlowMixin:
             text = "We planned to continue this today. I kept room in my schedule, so let us pick up where we left off."
         elif unseen:
             reason = "witnessed_event"
-            action = self.world_dialogue_safe_event_action(unseen)
-            place = self.world_dialogue_event_place_clause(unseen)
-            if action.startswith("defeat"):
-                text = f"I saw you {action}{place}. Are you hurt?"
-            elif action.startswith(("rescue", "extinguish")):
-                text = f"I saw you {action}{place}. Is everyone safe now?"
-            else:
-                text = "I saw the fight nearby. Are you all right?"
+            text = self.dialogue_witness_observation_line(
+                actor, kind, unseen, "initiation"
+            )
         elif thread and int(thread.get("updated_day", 0) or 0) < self.dialogue_absolute_day():
             reason = "ongoing_thread"
             text = f"I have an update about {str(thread.get('title', 'what we discussed')).lower()}."
@@ -3135,6 +3190,7 @@ class DialogueFlowMixin:
             "called_out_day": 0,
             "acknowledged": False,
             "source_event_id": str(unseen.get("id", "")) if reason == "witnessed_event" and unseen else "",
+            "observation_version": 2 if reason == "witnessed_event" else 0,
         }
         slot["initiation"] = current
         return current
@@ -3457,7 +3513,15 @@ class DialogueFlowMixin:
 
     def world_dialogue_event_place_clause(self, event: Dict[str, object]) -> str:
         place = self.world_dialogue_safe_location_label(event.get("location", "nearby"))
-        return "" if place in {"", "nearby", "this place"} else f" at {place}"
+        if place in {"", "nearby", "this place"}:
+            return ""
+        preposition = (
+            "in"
+            if place in {"the wilderness", "the dungeon"}
+            or place.startswith("the region around ")
+            else "at"
+        )
+        return f" {preposition} {place}"
 
     def world_dialogue_event_knowledge_summary(self, event: Dict[str, object]) -> str:
         action = self.world_dialogue_safe_event_action(event)
@@ -3578,20 +3642,416 @@ class DialogueFlowMixin:
         if not event:
             return ""
         event[flag] = True
+        return self.dialogue_witness_observation_line(actor, kind, event, channel)
+
+    def dialogue_fresh_world_line(
+        self,
+        actor: Dict[str, object],
+        kind: str,
+        history_field: str,
+        candidates: Sequence[Tuple[str, str]],
+        seed: str,
+        history_limit: int = 10,
+    ) -> str:
+        """Pick a deterministic line while avoiding recently used structures."""
+        usable = [
+            (str(line_id), " ".join(str(line or "").split()))
+            for line_id, line in candidates
+            if str(line_id or "") and str(line or "").strip()
+        ]
+        if not usable:
+            return ""
+        slot = self.dialogue_social_slot(actor, kind)
+        recent = [str(value) for value in slot.get(history_field, []) or [] if str(value or "")]
+        recent_window = (
+            set(recent[-min(len(usable) - 1, max(1, history_limit)):])
+            if len(usable) > 1 else set()
+        )
+        available = [row for row in usable if row[0] not in recent_window]
+        if not available:
+            available = [row for row in usable if row[0] != (recent[-1] if recent else "")] or usable
+        choice = available[_stable_index(f"{seed}:{len(recent)}", len(available))]
+        slot[history_field] = (recent + [choice[0]])[-max(2, int(history_limit)):]
+        return choice[1]
+
+    def world_dialogue_event_past_clause(self, event: Dict[str, object]) -> str:
         action = self.world_dialogue_safe_event_action(event)
-        core = f"I saw you {action}{self.world_dialogue_event_place_clause(event)}."
-        demeanor = self.dialogue_demeanor(actor, kind)
-        reactions = {
-            "warm": " You handled yourself well.",
-            "professional": " That may matter to people working nearby.",
-            "skeptical": " I'm still deciding what to make of it.",
-            "blunt": " I prefer seeing what someone does to hearing what they claim.",
-            "reserved": " I didn't want to make a fuss about it.",
-            "wary": " Don't assume that means I trust you yet.",
-            "hostile": " It didn't improve my opinion of you.",
-            "neutral": " People tend to remember things like that.",
+        if not action:
+            return ""
+        verb, _, detail = action.partition(" ")
+        past = {
+            "defeat": "defeated", "rescue": "rescued", "extinguish": "extinguished",
+            "clear": "cleared", "repair": "repaired", "build": "built",
+            "craft": "crafted", "complete": "completed", "discover": "discovered",
+            "help": "helped",
+        }.get(verb.casefold(), "")
+        if not past:
+            return ""
+        return f"{past}{f' {detail}' if detail else ''}{self.world_dialogue_event_place_clause(event)}"
+
+    def dialogue_witness_observation_line(
+        self,
+        actor: Dict[str, object],
+        kind: str,
+        event: Dict[str, object],
+        channel: str = "conversation",
+    ) -> str:
+        """Describe a witnessed action through event, relationship, role, and voice."""
+        action = self.world_dialogue_safe_event_action(event)
+        past_clause = self.world_dialogue_event_past_clause(event)
+        if not action or not past_clause:
+            return ""
+        verb, _, _detail = action.partition(" ")
+        place = self.world_dialogue_event_place_clause(event)
+        category = str(event.get("category", "general") or "general").casefold()
+        event_id = str(event.get("id", "") or f"{category}:{action}:{place}")
+        already_mentioned = bool(event.get("ambient_acknowledged", False)) and channel != "ambient"
+
+        pools: Dict[str, Tuple[str, ...]] = {
+            "defeat": (
+                f"That fight changed in an instant. You {past_clause} before it could get worse.",
+                f"I had a clear view when you {past_clause}. You kept your footing.",
+                f"For a moment, I wasn't sure how that fight would end. Then you {past_clause}.",
+                f"You {past_clause}. The silence afterward felt different.",
+                f"Watching you {action}{place} told me a great deal about how you handle danger.",
+                f"I was close enough to see the whole fight. You {past_clause} without backing down.",
+            ),
+            "rescue": (
+                f"You {past_clause}. They looked as though they had run out of options.",
+                f"I watched you {action}{place}. You didn't leave someone else to face it alone.",
+                f"What stayed with me was how quickly you moved to help. You {past_clause}.",
+                f"You {past_clause}, and that mattered more than anything anyone could have said afterward.",
+                f"I thought help might come too late. Then you {past_clause}.",
+                f"The moment you {past_clause}, everyone nearby could finally breathe again.",
+            ),
+            "extinguish": (
+                f"You {past_clause}. Another minute and that fire might have spread.",
+                f"I could feel the heat from where I stood when you {past_clause}.",
+                f"You moved before anyone else did and {past_clause}.",
+                f"The smoke was getting worse until you {past_clause}.",
+                f"I watched you {action}{place}. That could have ended very differently.",
+                f"You {past_clause}; the whole place felt safer once the flames were gone.",
+            ),
+            "clear": (
+                f"You {past_clause}. The route feels safer now.",
+                f"I saw what the place looked like before you {past_clause}. The difference is hard to miss.",
+                f"You stayed with the danger until you {past_clause}.",
+                f"People will be able to use that ground differently because you {past_clause}.",
+                f"I watched you {action}{place}. It wasn't easy work, but it was necessary.",
+                f"The area finally went quiet after you {past_clause}.",
+            ),
+            "repair": (
+                f"I watched you {action}{place}. You stayed with the problem until it held.",
+                f"You {past_clause}. That should make the route easier for everyone behind us.",
+                f"The damage looked worse before you {past_clause}.",
+                f"You took the time to {action}{place} instead of walking past it.",
+                f"I wasn't sure that could be put right in the field, but you {past_clause}.",
+                f"That repair will outlast the moment. You {past_clause} when it mattered.",
+            ),
+            "build": (
+                f"You {past_clause}. It already changes how this place can be used.",
+                f"I watched the shape come together while you {action}{place}.",
+                f"There was nothing there before you {past_clause}. That's worth noticing.",
+                f"You {past_clause}, and now other people can build their plans around it.",
+                f"I saw how carefully you worked when you {past_clause}.",
+                f"The place feels less temporary after you {past_clause}.",
+            ),
+            "craft": (
+                f"You {past_clause}. The careful part was easy to miss unless someone was watching.",
+                f"I saw you {action}{place}. You knew exactly where to slow down.",
+                f"You made that look simpler than it was when you {past_clause}.",
+                f"The materials didn't look promising until you {past_clause}.",
+                f"I watched you {action}{place}; the result says more than a boast would.",
+                f"You {past_clause}. I can see the work in the finished piece.",
+            ),
+            "complete": (
+                f"You {past_clause}. It was good to see the work reach an actual end.",
+                f"I watched the last part come together when you {past_clause}.",
+                f"You kept returning to the work until you {past_clause}.",
+                f"People had been waiting on that. You {past_clause} at the right time.",
+                f"I wasn't certain the work would be finished today, but you {past_clause}.",
+                f"The result is visible now that you {past_clause}.",
+            ),
+            "discover": (
+                f"You {past_clause}. I doubt either of us will forget the first sight of it.",
+                f"I was watching your face when you {past_clause}; that gave the moment away.",
+                f"You noticed what the rest of us might have walked past and {past_clause}.",
+                f"The route became more interesting the moment you {past_clause}.",
+                f"I saw you {action}{place}. Now I'm wondering what else is nearby.",
+                f"You {past_clause}, and suddenly the map felt incomplete again.",
+            ),
+            "help": (
+                f"You {past_clause}. They won't forget that you stopped for them.",
+                f"I watched you {action}{place} when it would have been easier to keep moving.",
+                f"You made time to help and {past_clause}. That told me something useful about you.",
+                f"They needed another pair of hands, and you {past_clause}.",
+                f"You {past_clause}. The work went differently because you were there.",
+                f"I noticed that you {past_clause} without waiting to be praised for it.",
+            ),
         }
-        return core + reactions.get(demeanor, reactions["neutral"])
+        base_lines = list(pools.get(verb.casefold(), ()))
+        base_lines.extend((
+            f"I was there when you {past_clause}.",
+            f"You {past_clause}. I wanted you to know that someone noticed.",
+        ))
+        if already_mentioned:
+            base_lines.extend((
+                f"I've been thinking about it since I watched you {action}{place}.",
+                f"About what happened earlier: you {past_clause}, and it has stayed with me.",
+            ))
+        base_candidates = [
+            (f"observation:{verb}:{index}", line)
+            for index, line in enumerate(base_lines)
+        ]
+        base = self.dialogue_fresh_world_line(
+            actor, kind, "recent_observation_templates", base_candidates,
+            f"{self.dialogue_day_key()}:{actor.get('id')}:{event_id}:{channel}:base", 12,
+        )
+
+        demeanor = self.dialogue_demeanor(actor, kind)
+        relationship = self.dialogue_relationship_points(actor, kind)
+        role = self.dialogue_actor_role(actor).casefold()
+        traits = self.dialogue_personality_words(actor)
+        reactions: List[Tuple[str, str]] = []
+        if kind == "spouse":
+            reactions.extend((
+                ("spouse:care", "I'm proud of you, but I don't want courage to become carelessness."),
+                ("spouse:together", "Next time, let me carry more of the weight with you."),
+                ("spouse:home", "I'm glad we're going home together after seeing that through."),
+            ))
+        elif kind == "child":
+            reactions.extend((
+                ("child:honest", "It frightened me, but I was glad you knew what to do."),
+                ("child:question", "Will you explain how you decided what to do first?"),
+                ("child:memory", "I think I'm going to remember that for a long time."),
+            ))
+        elif kind == "companion":
+            reactions.extend((
+                ("companion:share", "We came through it together, even if you did the hardest part."),
+                ("companion:next", "If something like that happens again, let me take some of the pressure."),
+                ("companion:supplies", "We should check ourselves and our supplies before we move on."),
+                ("companion:trust", "Seeing that up close makes me trust your judgment more."),
+            ))
+        if any(word in role for word in ("doctor", "nurse", "medic", "healer")) and category == "combat":
+            reactions.append(("role:healer", "Let me check for injuries before we move on."))
+        if any(word in role for word in ("ranger", "hunter", "scout", "sheriff", "guard")):
+            reactions.append(("role:trail", "That should make this stretch of the route safer."))
+        if any(word in role for word in ("carpenter", "builder", "mechanic", "blacksmith")) and verb in {"repair", "build", "craft"}:
+            reactions.append(("role:maker", "The workmanship was sound; I was watching the parts most people miss."))
+        if traits.intersection({"bold", "brave", "daring", "adventurous"}):
+            reactions.append(("trait:bold", "That is the sort of moment that makes a journey worth remembering."))
+        if traits.intersection({"cautious", "careful", "wary", "anxious"}):
+            reactions.append(("trait:cautious", "I'd rather not depend on luck if we face that situation again."))
+        if traits.intersection({"curious", "studious", "observant", "scholarly"}):
+            reactions.append(("trait:curious", "I want to understand what you noticed before the rest of us did."))
+        if traits.intersection({"practical", "organized", "steady", "reliable"}):
+            reactions.append(("trait:practical", "Before we continue, we should decide what that changes for the route ahead."))
+        demeanor_reactions = {
+            "warm": (
+                ("voice:warm:1", "You handled yourself well."),
+                ("voice:warm:2", "I'm glad I was there to see how it really happened."),
+                ("voice:warm:3", "You did some good there, and I hope you know it."),
+            ),
+            "professional": (
+                ("voice:professional:1", "People working nearby will need to know what changed."),
+                ("voice:professional:2", "I'll account for that when I plan the next part of my work."),
+                ("voice:professional:3", "That had a practical effect beyond the two of us."),
+            ),
+            "skeptical": (
+                ("voice:skeptical:1", "I'm still deciding what the moment says about you."),
+                ("voice:skeptical:2", "One action doesn't answer every question, but it answered one."),
+                ("voice:skeptical:3", "I trust what I witnessed more than anything people may claim later."),
+            ),
+            "blunt": (
+                ("voice:blunt:1", "I prefer seeing what someone does to hearing what they claim."),
+                ("voice:blunt:2", "It needed doing. You did it. That matters."),
+                ("voice:blunt:3", "I'm not going to dress it up, but I noticed."),
+            ),
+            "reserved": (
+                ("voice:reserved:1", "I didn't want to make a fuss about it in front of everyone."),
+                ("voice:reserved:2", "I notice more than I usually say aloud."),
+                ("voice:reserved:3", "I thought you should hear that from someone who was actually there."),
+            ),
+            "wary": (
+                ("voice:wary:1", "Don't assume that means I trust every choice you make."),
+                ("voice:wary:2", "It was the right action; I'm still keeping my own judgment."),
+                ("voice:wary:3", "I noticed, though I'm not ready to draw a larger conclusion."),
+            ),
+            "hostile": (
+                ("voice:hostile:1", "It didn't settle everything between us."),
+                ("voice:hostile:2", "Doing one useful thing doesn't erase the rest."),
+                ("voice:hostile:3", "I can acknowledge what happened without pretending we're friends."),
+            ),
+            "neutral": (
+                ("voice:neutral:1", "People tend to remember things like that."),
+                ("voice:neutral:2", "It changed the rest of the day more than you may realize."),
+                ("voice:neutral:3", "I wanted to mention it while the details were still clear."),
+            ),
+        }
+        reactions.extend(demeanor_reactions.get(demeanor, demeanor_reactions["neutral"]))
+        if relationship >= 100 and kind not in {"spouse", "child"}:
+            if category == "combat":
+                reactions.extend((
+                    ("bond:close:combat:1", "I've known you long enough to recognize how much that demanded of you."),
+                    ("bond:close:combat:2", "You don't need to pretend it was easy with me."),
+                ))
+            else:
+                reactions.extend((
+                    ("bond:close:work:1", "I've known you long enough to recognize how much care you put into that."),
+                    ("bond:close:work:2", "You didn't have to explain why it mattered; I could see it."),
+                ))
+        reaction = self.dialogue_fresh_world_line(
+            actor, kind, "recent_observation_reactions", reactions,
+            f"{self.dialogue_day_key()}:{actor.get('id')}:{event_id}:{channel}:reaction", 10,
+        )
+        line = f"{base} {reaction}".strip()
+        if channel == "initiation":
+            question = (
+                "Is everyone safe now?" if verb in {"rescue", "extinguish"}
+                else "Are you hurt?" if category == "combat" or verb in {"defeat", "clear"}
+                else "How are you feeling about it now?"
+            )
+            line = f"{line} {question}"
+        return line
+
+    def dialogue_companion_ambient_line(
+        self, actor: Dict[str, object], kind: str
+    ) -> str:
+        """Give active companions varied, grounded remarks about the current journey."""
+        name = self.dialogue_actor_name(actor)
+        place = self.world_dialogue_location_label()
+        place_folded = place.casefold()
+        weather = str(getattr(self.state, "weather", "clear") or "clear").casefold()
+        season = str(getattr(self.state, "season", "Spring") or "Spring")
+        hour = int(getattr(self.state, "hour", 12) or 12)
+        minute_band = int(getattr(self.state, "minute", 0) or 0) // 20
+        role = self.dialogue_actor_role(actor).casefold()
+        traits = self.dialogue_personality_words(actor)
+        relationship = self.dialogue_relationship_points(actor, kind)
+        activity = self.dialogue_activity(actor, kind).replace("their ", "the ")
+        candidates: List[Tuple[str, str]] = []
+        if kind == "spouse":
+            candidates.extend((
+                ("spouse:route:1", "I'm glad we're doing this together instead of only talking about it at home."),
+                ("spouse:route:2", "If you want to change our plans, tell me. I'd rather adjust than guess."),
+                ("spouse:route:3", "We've been out for a while. I can keep going, but we should check in with each other."),
+                ("spouse:route:4", f"Seeing {place} with you feels different from hearing about it afterward."),
+            ))
+        elif kind == "child":
+            candidates.extend((
+                ("child:route:1", "I'm still with you. I want to see where this path goes."),
+                ("child:route:2", "Can we remember this route so I can draw it later?"),
+                ("child:route:3", "I keep looking behind us so the way back doesn't disappear."),
+                ("child:route:4", f"There is more to notice around {place} than I expected."),
+            ))
+        else:
+            candidates.extend((
+                ("companion:route:1", "I'm keeping pace. Say something if you want to change course."),
+                ("companion:route:2", "We've covered a fair amount of ground. The return trip will feel shorter."),
+                ("companion:route:3", "I'm watching the path behind us as well as the one ahead."),
+                ("companion:route:4", "Before the next difficult stretch, we should check our supplies."),
+                ("companion:route:5", f"Traveling through {place} makes more sense when someone else is reading the route too."),
+                ("companion:route:6", "If we get separated, I'll return to the last clear landmark."),
+            ))
+        if "storm" in weather:
+            candidates.extend((
+                ("weather:storm:1", "That storm is swallowing distant sounds. Let's stay within sight of each other."),
+                ("weather:storm:2", "The next shelter matters more than the next mile in weather like this."),
+                ("weather:storm:3", "I'm watching the ground. Stormwater can change a safe path quickly."),
+            ))
+        elif any(word in weather for word in ("rain", "drizzle", "shower")):
+            candidates.extend((
+                ("weather:rain:1", "The rain is showing us every low place in the road."),
+                ("weather:rain:2", "Let's keep moving while the footing is still good."),
+                ("weather:rain:3", "Everything smells different after rain; even familiar ground feels new."),
+            ))
+        elif any(word in weather for word in ("snow", "blizzard")):
+            candidates.extend((
+                ("weather:snow:1", "Our tracks will make the return easier unless the snow covers them first."),
+                ("weather:snow:2", "The snow makes distances deceptive. That ridge is farther away than it looks."),
+                ("weather:snow:3", "Fresh tracks stand out clearly. We aren't the only ones moving through here."),
+            ))
+        else:
+            candidates.extend((
+                ("weather:clear:1", "Visibility is good. This is the time to learn the shape of the land."),
+                ("weather:clear:2", "We can see far enough ahead to choose the better route."),
+            ))
+        if hour < 10:
+            candidates.extend((
+                ("time:morning:1", "Morning light makes the road easier to read."),
+                ("time:morning:2", "We started early enough to take our time with the difficult ground."),
+            ))
+        elif hour >= 20:
+            candidates.extend((
+                ("time:late:1", "It is getting late. Let's decide whether we're pressing on or finding shelter."),
+                ("time:late:2", "I can keep going, but darkness changes which risks are worth taking."),
+            ))
+        else:
+            candidates.append(("time:day", f"We still have enough daylight to explore {place} carefully."))
+        if "dungeon" in place_folded:
+            candidates.extend((
+                ("place:dungeon:1", "Let's mark every turn. These corridors are too similar to trust to memory alone."),
+                ("place:dungeon:2", "A closed door can hide more than a room. I'll watch our way back."),
+                ("place:dungeon:3", "Keep some strength in reserve. Deep places rarely end where you expect."),
+            ))
+        elif "cave" in place_folded or "mine" in place_folded:
+            candidates.extend((
+                ("place:cave:1", "The echoes make it hard to judge distance. Stay where we can see each other."),
+                ("place:cave:2", "I'm checking the walls and ceiling as we move. Loose stone announces itself quietly."),
+                ("place:cave:3", "We should remember where the air feels fresher; that usually points toward an exit."),
+            ))
+        elif "wilderness" in place_folded:
+            candidates.extend((
+                ("place:wilderness:1", "The open country looks empty until you slow down enough to notice what is moving."),
+                ("place:wilderness:2", f"{season} has changed the landmarks I would normally use out here."),
+                ("place:wilderness:3", "A road is useful, but I don't want us to stop reading the land around it."),
+            ))
+        elif any(word in place_folded for word in ("town", "settlement", "hamlet")):
+            candidates.extend((
+                ("place:town:1", "We should learn where people gather before we decide how long to stay."),
+                ("place:town:2", "Every settlement has a rhythm. Give it a little time and the useful places reveal themselves."),
+            ))
+        if any(word in role for word in ("ranger", "hunter", "scout", "wayfarer")):
+            candidates.extend((
+                ("role:ranger:1", "The tracks beside the road are fresher than the tracks on it."),
+                ("role:ranger:2", "I'll keep reading the route. You watch for anything that doesn't belong."),
+            ))
+        elif any(word in role for word in ("doctor", "nurse", "medic", "healer")):
+            candidates.extend((
+                ("role:healer:1", "Tell me before exhaustion becomes an injury. It is easier to stop trouble early."),
+                ("role:healer:2", "I'm keeping an eye on both of us. Adrenaline can hide more than pain."),
+            ))
+        elif any(word in role for word in ("miner", "prospector", "blacksmith")):
+            candidates.append(("role:miner", "The ground tells you what it can bear if you pay attention to the cracks."))
+        elif any(word in role for word in ("merchant", "courier", "trader")):
+            candidates.append(("role:merchant", "A good route is measured by where it lets people stop, not only where it ends."))
+        elif any(word in role for word in ("farmer", "gardener", "rancher")):
+            candidates.append(("role:farmer", "I keep noticing which patches of ground would hold water and which would drain."))
+        if traits.intersection({"curious", "studious", "observant", "scholarly"}):
+            candidates.append(("trait:curious", "I keep finding questions out here that I wouldn't have thought to ask at home."))
+        if traits.intersection({"bold", "brave", "daring", "adventurous"}):
+            candidates.append(("trait:bold", "If the road becomes dangerous, I'd rather meet it prepared than turn back too soon."))
+        if traits.intersection({"cautious", "careful", "wary", "anxious"}):
+            candidates.append(("trait:cautious", "I want a clear way back before we commit to going farther."))
+        if traits.intersection({"practical", "organized", "steady", "reliable"}):
+            candidates.append(("trait:practical", "Let's settle our direction before we spend daylight wandering between choices."))
+        if relationship >= 100 or kind == "spouse":
+            candidates.extend((
+                ("bond:close:1", "We've traveled together long enough that I can usually tell when you're about to change plans."),
+                ("bond:close:2", "You don't have to keep a brave face for my sake. Tell me if you need a rest."),
+            ))
+        if activity and not any(
+            phrase in activity.casefold()
+            for phrase in ("traveling with", "following", "accompanying")
+        ):
+            candidates.append((
+                "activity:current",
+                f"I can keep {activity} while we move, but tell me when you need my full attention.",
+            ))
+        return self.dialogue_fresh_world_line(
+            actor, kind, "recent_companion_line_ids", candidates,
+            f"{self.dialogue_day_key()}:{name}:{hour}:{minute_band}:{place}:{weather}", 12,
+        )
 
     def world_dialogue_ambient_line(
         self, actor: Dict[str, object], kind: str
@@ -3606,19 +4066,14 @@ class DialogueFlowMixin:
         activity = self.dialogue_activity(actor, kind).replace("their ", "the ")
         weather = str(getattr(self.state, "weather", "clear") or "clear").casefold()
         hour = int(getattr(self.state, "hour", 12) or 12)
+        if kind in {"companion", "spouse", "child"}:
+            return self.dialogue_companion_ambient_line(actor, kind)
         if "storm" in weather:
             return "That storm is making every route and errand harder to judge."
         if any(word in weather for word in ("rain", "drizzle", "shower")):
             return "The rain has changed which paths people are using today."
         if any(word in weather for word in ("snow", "blizzard")):
             return "Fresh snow makes it easy to see who has already passed this way."
-        if kind in {"companion", "spouse", "child"}:
-            family_lines = (
-                "I'm still with you. Just say the word if our plans change.",
-                "We've covered a fair bit of ground together today.",
-                f"I was watching while you moved through {self.world_dialogue_location_label()}.",
-            )
-            return _stable_pick(f"{self.dialogue_day_key()}:{name}:family:{hour}", family_lines)
         if self.dialogue_is_on_duty(actor, kind):
             return f"I'm {activity}. Let me know if you need something connected to my work."
         if hour >= 21 or hour < 6:
@@ -4751,7 +5206,7 @@ class DialogueFlowMixin:
                 "id": quest_id,
                 "title": f"Follow {self.dialogue_actor_name(actor)} to {place.get('name', 'the destination')}",
                 "category": "Relationships",
-                "description": f"Travel with {self.dialogue_actor_name(actor)} to a place they know, then speak with them on arrival.",
+                "description": f"Stay near {self.dialogue_actor_name(actor)} while they lead you to a place they know.",
                 "giver_id": str(actor.get("id", "")), "giver_name": self.dialogue_actor_name(actor),
                 "participants": [str(actor.get("id", ""))],
                 "objectives": [{
@@ -4767,7 +5222,9 @@ class DialogueFlowMixin:
             self.track_quest(str(quest.get("id", quest_id)), announce=False)
             event = self.schedule_planned_event({
                 "id": event_id, "title": f"Guided journey with {self.dialogue_actor_name(actor)}",
-                "status": "ready", "quest_id": quest_id,
+                "kind": "guided_journey", "status": "ready", "quest_id": quest_id,
+                "requires_attendance": True, "player_manageable": True,
+                "persistent_until_resolved": True,
                 "due_day": self.dialogue_absolute_day(), "due_hour": int(getattr(self.state, "hour", 0)),
                 "destination": destination,
                 "participants": [{

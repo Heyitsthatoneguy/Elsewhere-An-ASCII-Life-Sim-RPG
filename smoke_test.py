@@ -19,6 +19,7 @@ import math
 import os
 import random
 import re
+import time
 
 import ascii_farmstead_data as data
 import ascii_farmstead_actors as actors
@@ -37,6 +38,7 @@ import ascii_farmstead_excavation as excavation
 import ascii_farmstead_furniture as furniture_art
 import ascii_farmstead_furniture_catalog as furniture_catalog
 import ascii_farmstead_furniture_actions as furniture_actions
+import ascii_farmstead_fishing as fishing_system
 import ascii_farmstead_board_visuals as board_visuals
 import ascii_farmstead_checkers as checkers
 import ascii_farmstead_chess as chess
@@ -180,7 +182,8 @@ def main() -> int:
     assert data.CROP_DATA
     assert data.TOWN_NPC_DEFINITIONS
     assert data.FISH_DATA
-    assert len(data.FISH_DATA) >= 48
+    assert len(data.FISH_DATA) >= 89
+    assert len(data.BIOME_FISH_DATA) == 41
     assert {
         "Mosquitofish", "Golden Shiner", "Pumpkinseed", "Mud Loach",
         "Yellow Perch", "Walleye", "Lake Sturgeon", "Rainbow Smelt", "Muskellunge",
@@ -192,6 +195,18 @@ def main() -> int:
             {"Pond", "Lake", "River", "Ocean", "Underground"}
         ) and fish.get("habitats")
         for fish in data.FISH_DATA.values()
+    )
+    assert all(
+        fish.get("depths")
+        and set(fish.get("depths", [])).issubset({"Shallow", "Normal", "Deep"})
+        for fish in data.BIOME_FISH_DATA.values()
+    )
+    assert all(
+        sum(
+            biome_id in fish.get("biomes", [])
+            for fish in data.BIOME_FISH_DATA.values()
+        ) >= 2
+        for biome_id in wilderness_generation.BIOME_IDENTITY_DATA
     )
     assert data.RESIDENT_REQUEST_DATA
     assert data.COMPANION_QUEST_DATA
@@ -1783,6 +1798,12 @@ def main() -> int:
         custom_menus.menu_select = original_custom_menu_select
 
     assert helpers.season_for_month(3) == "Spring"
+    assert helpers.season_daylight_window("Summer") == (5, 21)
+    assert helpers.season_daylight_window("Winter") == (7, 17)
+    assert helpers.crop_valid_for_season("Carrot", "Spring")
+    assert helpers.crop_valid_for_season("Carrot", "Fall")
+    assert not helpers.crop_valid_for_season("Carrot", "Summer")
+    assert helpers.crop_season_label("Ancient Fruit") == "Any"
     assert helpers.days_in_month(2, 4) == 29
     assert helpers.format_date(3, 1, 1) == "March 1, Year 1"
     assert all(helpers.precipitation_symbol("Snowy") in {"*", ".", "·"} for _ in range(20))
@@ -1796,6 +1817,8 @@ def main() -> int:
     assert helpers.weekday_for_date(1, 1, 10**12) in helpers.WEEKDAY_NAMES
     assert helpers.mine_theme_for_floor(20) == "Crystal Hollows"
     assert "Last day of the month" in helpers.calendar_events_for(3, 31, 1)
+    for festival in data.FESTIVAL_DATA.values():
+        assert festival["name"] in helpers.calendar_events_for(festival["month"], festival["day"], 1)
 
     fresh_state = state.GameState()
     assert fresh_state.owned_tools == list(data.STARTING_OWNED_TOOLS)
@@ -2705,6 +2728,26 @@ def main() -> int:
     assert waiting_position == spouse_position
     follower_game.set_travel_follower_mode(spouse_follower_id, "follow")
     assert follower_game.travel_follower_position(spouse_follower_id) == waiting_position
+    # Falling behind on the same map must remain a pathfinding problem, not a
+    # recovery transition that teleports the companion beside the player.
+    distant_record = follower_game.travel_follower_record(spouse_follower_id)
+    distant_record.update({"location": "Farm", "x": 40, "y": 20, "mode": "follow"})
+    follower_game.state.player_x, follower_game.state.player_y = 8, 9
+    recovery_calls = []
+    original_follower_recovery = follower_game.recover_travel_follower
+    follower_game.recover_travel_follower = lambda follower_id: recovery_calls.append(follower_id) or True
+    follower_game.sync_travel_followers()
+    assert not recovery_calls
+    assert (distant_record["x"], distant_record["y"]) == (40, 20)
+    original_route_goals = follower_game.travel_follower_route_goals
+    follower_game.travel_follower_route_goals = lambda *_args, **_kwargs: []
+    follower_game.update_travel_followers_after_player_move()
+    assert not recovery_calls
+    assert (distant_record["x"], distant_record["y"]) == (40, 20)
+    assert "clear route" in str(distant_record["activity"])
+    follower_game.travel_follower_route_goals = original_route_goals
+    follower_game.recover_travel_follower = original_follower_recovery
+    distant_record.update({"x": waiting_position[0], "y": waiting_position[1]})
     assert follower_game.travel_follower_identity_for_npc_id("mira_seed") == spouse_follower_id
     work_crop_x, work_crop_y = 10, 10
     follower_game.base_map[work_crop_y][work_crop_x] = ","
@@ -3579,6 +3622,11 @@ def main() -> int:
     assert population_game.procedural_settlement_population_report_lines(11, -7)
     persistent_resident_id = next(iter(game_population["residents"]))
     persistent_resident = game_population["residents"][persistent_resident_id]
+    assert persistent_resident["birthplace"]
+    assert persistent_resident["upbringing"]
+    assert persistent_resident["formative_event"]
+    assert persistent_resident["arrival_story"]
+    assert persistent_resident["hobbies"]
     dialogue_preview = population_game.procedural_settlement_conversation(
         11,
         -7,
@@ -3625,7 +3673,11 @@ def main() -> int:
     for dialogue_topic in [
         "work",
         "home",
+        "background",
+        "interests",
+        "people",
         "settlement",
+        "concerns",
         "weather",
         "season",
         "rumor",
@@ -3651,18 +3703,32 @@ def main() -> int:
         topic="request",
     )
     procedural_request = request_conversation["request"]
-    assert procedural_request["status"] == "active"
-    procedural_request_phrase = helpers.quantity_item_phrase(
-        procedural_request["item"], procedural_request["quantity"]
-    )
-    assert procedural_request_phrase in procedural_request["description"]
-    assert procedural_request_phrase in request_conversation["follow_up"]
+    assert procedural_request["status"] == "offered"
+    assert procedural_request["quest_id"]
+    assert procedural_request["objective_summary"]
+    procedural_quest = population_game.quest_record(procedural_request["quest_id"])
+    assert procedural_quest["procedural_resident_quest"] is True
+    assert procedural_quest["status"] == "offered"
+    assert procedural_quest["request_type"] in {
+        "delivery", "harvest", "fish", "craft", "danger", "salvage", "neighbors", "survey",
+    }
     assert population_game.procedural_settlement_request_status(
         11,
         -7,
         persistent_resident_id,
-    ).startswith("Need ")
-    population_game.state.inventory[procedural_request["item"]] = procedural_request["quantity"]
+    ) == "Available"
+    assert population_game.accept_procedural_settlement_request(11, -7, persistent_resident_id)
+    assert population_game.quest_record(procedural_request["quest_id"])["status"] == "active"
+    procedural_quest = population_game.quest_record(procedural_request["quest_id"])
+    current_objective = population_game.quest_current_objective(procedural_quest)
+    if current_objective.get("kind") == "item":
+        population_game.state.inventory[str(current_objective["item"])] = int(current_objective["target"])
+    else:
+        for objective in procedural_quest["objectives"]:
+            objective["current"] = int(objective.get("target", 1) or 1)
+            objective["complete"] = True
+        procedural_quest["stage"] = len(procedural_quest["objectives"]) - 1
+    population_game.refresh_quest_states()
     money_before_request = population_game.state.money
     assert population_game.procedural_settlement_request_status(
         11,
@@ -3675,7 +3741,7 @@ def main() -> int:
         persistent_resident_id,
     )
     assert population_game.state.money == money_before_request + procedural_request["reward_money"]
-    assert procedural_request["id"] in persistent_resident["completed_request_ids"]
+    assert procedural_request["quest_id"] in persistent_resident["completed_request_ids"]
     assert persistent_resident["active_request"]["status"] == "completed"
     procedural_request_lines = population_game.procedural_settlement_conversation_lines(
         11,
@@ -3696,7 +3762,51 @@ def main() -> int:
     assert reconciled_population["residents"][persistent_resident_id]["memories"] == ["First hello"]
     assert reconciled_population["residents"][persistent_resident_id]["dialogue_count"] == 3
     assert reconciled_population["residents"][persistent_resident_id]["active_request"]["status"] == "completed"
-    assert procedural_request["id"] in reconciled_population["residents"][persistent_resident_id]["completed_request_ids"]
+    assert procedural_request["quest_id"] in reconciled_population["residents"][persistent_resident_id]["completed_request_ids"]
+
+    # Roles and weeks produce genuinely different work rather than reskinned
+    # daily delivery requests.
+    quest_types = set()
+    quest_kinds = set()
+    quest_context = population_game.procedural_settlement_dialogue_context(11, -7)
+    for cycle in range(12):
+        for resident_record in list(game_population["residents"].values())[:12]:
+            if str(resident_record.get("age_group", "Adult")) == "Child":
+                continue
+            generated_quest = population_game.build_procedural_resident_quest(
+                11, -7, resident_record, game_population, quest_context, str(cycle)
+            )
+            quest_types.add(str(generated_quest.get("request_type")))
+            quest_kinds.update(
+                str(objective.get("kind"))
+                for objective in generated_quest.get("objectives", [])
+                if isinstance(objective, dict)
+            )
+    assert len(quest_types) >= 6
+    assert len({"item", "harvest", "fish", "craft", "defeat", "loot", "talk", "visit"}.intersection(quest_kinds)) >= 6
+
+    # Old save requests retain their original quantities and rewards when
+    # migrated into the unified quest log.
+    legacy_resident_id = next(
+        resident_id for resident_id, resident_record in game_population["residents"].items()
+        if resident_id != persistent_resident_id and str(resident_record.get("age_group", "Adult")) != "Child"
+    )
+    legacy_resident = population_game.procedural_settlement_resident_record(
+        11, -7, legacy_resident_id
+    )
+    legacy_resident["active_request"] = {
+        "id": f"proc-request:{legacy_resident_id}:old-save",
+        "title": "Old Lumber Request", "description": "Bring 3 Wood for repairs.",
+        "item": "Wood", "quantity": 3, "reward_money": 177,
+        "reward_relationship": 6, "created_day": "1-1-1", "status": "active",
+    }
+    legacy_resident["last_request_cycle"] = ""
+    migrated_request = population_game.ensure_procedural_resident_request(11, -7, legacy_resident_id)
+    migrated_quest = population_game.quest_record(migrated_request["quest_id"])
+    assert migrated_quest["status"] == "active"
+    assert migrated_quest["objectives"][0]["item"] == "Wood"
+    assert migrated_quest["objectives"][0]["target"] == 3
+    assert migrated_quest["rewards"]["money"] == 177
 
     procedural_town_game = FarmGame()
     procedural_town_game.autosave_with_message = (
@@ -3946,6 +4056,322 @@ def main() -> int:
     lake_fish = set(knowledge_game.available_fish_here(*lake_local))
     assert {"Yellow Perch", "Bass"}.issubset(lake_fish)
     assert "Dace" not in lake_fish and "Anchovy" not in lake_fish
+    assert set(data.FISHING_ROD_DATA) == {"Fishing Rod", "Casting Rod", "Lake Rod", "Ocean Rod"}
+    assert set(data.FISH_DATA) - {"Old Boot"} <= set(aquarium.FISH_SPRITES)
+    assert set(data.BIOME_FISH_DATA) <= set(aquarium.AQUARIUM_LIFESPAN_YEARS)
+    for species in data.BIOME_FISH_DATA:
+        habitat = aquarium.species_habitat(species, data.FISH_DATA)
+        allowed, reason = aquarium.can_stock_species(
+            {"habitat": habitat, "individuals": []}, species, data.FISH_DATA, 12,
+        )
+        assert allowed, (species, reason)
+        assert len(aquarium.fish_species_sprite(species, 1)) == len(
+            aquarium.fish_species_sprite(species, -1)
+        )
+    assert aquarium.fish_species_sprite("Blue Marlin", 1) == "───<★>>"
+    assert aquarium.fish_species_sprite("Blue Marlin", -1) == "<<★>───"
+    assert aquarium.fish_species_sprite("Unknown Fish", 1) == "><>"
+    fish_colors = {aquarium.fish_species_color(species) for species in aquarium.FISH_SPRITES}
+    assert len(fish_colors) >= 9
+    assert aquarium.fish_species_color("Golden Shiner") == aquarium.FISH_COLOR_PALETTE[1]
+    assert aquarium.fish_species_color("Red Snapper") == aquarium.FISH_COLOR_PALETTE[7]
+    assert aquarium.fish_species_color("Cobalt Jack") == aquarium.FISH_COLOR_PALETTE[8]
+    assert aquarium.fish_species_color("Pond Minnow", "Golden") == aquarium.FISH_COLOR_PALETTE[1]
+    assert aquarium.fish_species_color("Pond Minnow", "Pale") == aquarium.FISH_COLOR_PALETTE[6]
+    assert aquarium.fish_species_color("Pond Minnow", lights_on=False) == support.C.UI_MUTED
+    assert data.FISHING_ROD_DATA["Fishing Rod"]["advanced_cast"]
+    assert data.FISHING_ROD_DATA["Fishing Rod"]["range"] == 1
+    assert data.FISHING_ROD_DATA["Casting Rod"]["advanced_cast"]
+    assert data.FISHING_ROD_DATA["Casting Rod"]["depths"] == ["Shallow", "Normal"]
+    starter_cursor_game = FarmGame()
+    starter_cursor_game.state.selected_tool_index = starter_cursor_game.state.available_tools.index("Fishing Rod")
+    starter_cursor_requests = []
+    starter_cursor_game.advanced_fishing_cast_mode = (
+        lambda rod_name: starter_cursor_requests.append(rod_name)
+    )
+    starter_cursor_game.use_fishing_rod(0, 0)
+    assert starter_cursor_requests == ["Fishing Rod"]
+    synthetic_water = lambda x, y: 0 <= x <= 10 and 0 <= y <= 10
+    assert fishing_system.classify_water_depth(0, 5, "Lake", synthetic_water) == "Shallow"
+    assert fishing_system.classify_water_depth(2, 5, "Lake", synthetic_water) == "Normal"
+    assert fishing_system.classify_water_depth(5, 5, "Lake", synthetic_water) == "Deep"
+    assert len({support.C.WATER_SHALLOW, support.C.WATER_NORMAL, support.C.WATER_DEEP}) == 3
+    biome_fish_game = FarmGame()
+    biome_fish_game.state.location = "Wilderness"
+    biome_fish_game.state.month = 7
+    biome_fish_game.state.weather = "Sunny"
+    biome_fish_game.state.hour = 13
+    biome_fish_game.fishing_location_name = lambda *_args: "Wilderness"
+    biome_fish_game.fishing_water_habitat = lambda *_args: "Lake"
+    biome_fish_game.fishing_water_depth = lambda *_args: "Shallow"
+    biome_fish_game.fishing_biome_id = lambda *_args: "meadow"
+    assert biome_fish_game.fish_matches_conditions(
+        "Golden Tench", data.FISH_DATA["Golden Tench"], 5, 5,
+    )
+    assert not biome_fish_game.fish_matches_conditions(
+        "Dune Tilapia", data.FISH_DATA["Dune Tilapia"], 5, 5,
+    )
+    biome_fish_game.fishing_biome_id = lambda *_args: "dune_desert"
+    biome_fish_game.fish_matches_conditions = (
+        lambda fish_name, _data, *_args: fish_name in {"Dune Tilapia", "Sand Basin Gar"}
+    )
+    shallow_desert_fish = set(biome_fish_game.available_fish_here(5, 5))
+    assert "Dune Tilapia" in shallow_desert_fish
+    assert "Sand Basin Gar" not in shallow_desert_fish
+    biome_fish_game.fishing_water_depth = lambda *_args: "Deep"
+    deep_desert_fish = set(biome_fish_game.available_fish_here(5, 5))
+    assert "Sand Basin Gar" in deep_desert_fish
+    assert "Dune Tilapia" not in deep_desert_fish
+    prior_color_setting = support.get_color_enabled()
+    support.set_color_enabled(True)
+    try:
+        biome_fish_game.state.hour = 12
+        biome_fish_game.state.ambient_visuals_enabled = False
+        for depth, expected_color in (
+            ("Shallow", support.C.WATER_SHALLOW),
+            ("Normal", support.C.WATER_NORMAL),
+            ("Deep", support.C.WATER_DEEP),
+        ):
+            rendered_water = biome_fish_game.render_streamed_wilderness_raw_tile(
+                "~", water_depth=depth,
+            )
+            assert expected_color in rendered_water
+    finally:
+        support.set_color_enabled(prior_color_setting)
+    fishing_journal_game = FarmGame()
+    fishing_journal_game.state.location = "Farm"
+    fishing_journal_game.state.fishing_target_x = 9
+    fishing_journal_game.state.fishing_target_y = 9
+    fishing_journal_game.state.fishing_cast_depth = "Deep"
+    fishing_journal_game.state.fishing_cast_rod = "Lake Rod"
+    fishing_journal_game.fishing_water_habitat = lambda *_args: "Lake"
+    fishing_journal_game.fishing_location_name = lambda *_args: "Farm"
+    assert fishing_journal_game.record_fishing_catch(
+        "Golden Tench", {"size_label": "large"},
+    )
+    assert not fishing_journal_game.record_fishing_catch(
+        "Golden Tench", {"size_label": "small"},
+    )
+    tench_record = fishing_journal_game.state.fishing_records["Golden Tench"]
+    assert tench_record["count"] == 2
+    assert tench_record["best_size"] == "large"
+    assert tench_record["first_depth"] == "Deep"
+    assert tench_record["last_rod"] == "Lake Rod"
+    tench_lines = fishing_journal_game.fishing_journal_species_lines("Golden Tench")
+    assert any("Aquarium: Freshwater" in line for line in tench_lines)
+    assert any("Catches recorded: 2" in line for line in tench_lines)
+    assert any("Species recorded: 1/" in line for line in fishing_journal_game.fishing_journal_overview_lines())
+    assert fishing_system.bresenham_line(0, 0, 3, 0) == [(0, 0), (1, 0), (2, 0), (3, 0)]
+    fishing_fight = fishing_system.build_fishing_fight_state(
+        "Lake Sturgeon",
+        data.FISH_DATA["Lake Sturgeon"],
+        "Lake Rod",
+        data.FISHING_ROD_DATA["Lake Rod"],
+        "Deep",
+        7,
+        "Bright Spoon",
+        "Worm Bait",
+        seed=1701,
+    )
+    assert fishing_fight["behavior"] == "Stubborn"
+    assert fishing_fight["habitat"] == "Lake"
+    assert 0.10 <= float(fishing_fight["fish_depth"]) <= 0.92
+    assert fishing_fight["bubbles"]
+    fishing_art_game = FarmGame()
+    surge_frame = ui.strip_ansi(fishing_art_game.advanced_fishing_fight_frame(fishing_fight))
+    expected_sprite = aquarium.fish_species_sprite("Lake Sturgeon", int(fishing_fight["fish_direction"]))
+    assert expected_sprite in surge_frame
+    assert "≈" in surge_frame and any(glyph in surge_frame for glyph in ("▄", "_"))
+    assert any(glyph in surge_frame for glyph in ("─", "╲", "╱", "│"))
+    assert "RELEASE NOW" in surge_frame
+    assert "Line out" in surge_frame and "Fish energy" in surge_frame
+    assert "[BALANCED]" in surge_frame
+    habitat_scenes = {}
+    habitat_markers = {
+        "Pond": "⚘",
+        "River": "●●○",
+        "Lake": "▔╲__",
+        "Ocean": "╲│╱",
+        "Underground": "◢♦◣",
+    }
+    for habitat_name, marker in habitat_markers.items():
+        habitat_preview = dict(fishing_fight)
+        habitat_preview["habitat"] = habitat_name
+        habitat_preview["depth"] = "Normal"
+        raw_rows = fishing_art_game.advanced_fishing_underwater_rows(
+            habitat_preview, 64, 10
+        )
+        plain_rows = [ui.strip_ansi(line) for line in raw_rows]
+        assert all(ui.visible_text_len(line) == 64 for line in raw_rows)
+        habitat_scenes[habitat_name] = "\n".join(plain_rows)
+        assert {"SURF", "MID ", "BED "}.issubset(
+            {line[:4] for line in plain_rows}
+        )
+        assert marker in habitat_scenes[habitat_name]
+    assert len(set(habitat_scenes.values())) == len(habitat_scenes)
+    initial_distance = float(fishing_fight["distance"])
+    initial_world_x = float(fishing_fight["fish_world_x"])
+    initial_bubble_depth = float(fishing_fight["bubbles"][0]["depth"])
+    fishing_system.advance_fishing_fight(
+        fishing_fight, 0.1, True, 1, 0.5, data.FISHING_ROD_DATA["Lake Rod"],
+    )
+    assert float(fishing_fight["distance"]) > initial_distance
+    assert float(fishing_fight["pull_rate"]) > 0.0
+    assert float(fishing_fight["fish_world_x"]) != initial_world_x
+    assert float(fishing_fight["bubbles"][0]["depth"]) < initial_bubble_depth
+    scene_before_scroll = [ui.strip_ansi(line) for line in fishing_art_game.advanced_fishing_underwater_rows(fishing_fight, 64, 10)]
+    fishing_fight["camera_x"] = float(fishing_fight["camera_x"]) + 6.0
+    scene_after_scroll = [ui.strip_ansi(line) for line in fishing_art_game.advanced_fishing_underwater_rows(fishing_fight, 64, 10)]
+    assert scene_before_scroll != scene_after_scroll
+    rest_preview = dict(fishing_fight)
+    rest_preview["mode"] = "rest"
+    rest_preview["fish_direction"] = -1
+    rest_frame = ui.strip_ansi(fishing_art_game.advanced_fishing_fight_frame(rest_preview))
+    assert "RECOVERING" in rest_frame
+    assert aquarium.fish_species_sprite("Lake Sturgeon", -1) in rest_frame
+    fight_rng = random.Random(1702)
+    for _step in range(1200):
+        fishing_system.advance_fishing_fight(
+            fishing_fight,
+            0.1,
+            fishing_fight["mode"] == "rest",
+            1,
+            fight_rng.random(),
+            data.FISHING_ROD_DATA["Lake Rod"],
+        )
+        if fishing_fight["result"] != "active":
+            break
+    assert fishing_fight["result"] == "landed"
+    assert int(fishing_fight["cycle_count"]) > 0
+    assert "Fish energy" in ui.strip_ansi(fishing_art_game.advanced_fishing_fight_frame(fishing_fight))
+    # A fish's edible stamina recovery is not a combat-endurance statistic.
+    assert fishing_system.fish_fight_profile("Test Fish", {"price": 100, "stamina": 1}) == fishing_system.fish_fight_profile(
+        "Test Fish", {"price": 100, "stamina": 999},
+    )
+    reckless_fight = fishing_system.build_fishing_fight_state(
+        "Blue Marlin",
+        data.FISH_DATA["Blue Marlin"],
+        "Ocean Rod",
+        data.FISHING_ROD_DATA["Ocean Rod"],
+        "Deep",
+        10,
+        seed=1703,
+    )
+    assert reckless_fight["behavior"] == "Powerful"
+    reckless_rng = random.Random(1704)
+    for _step in range(500):
+        fishing_system.advance_fishing_fight(
+            reckless_fight,
+            0.1,
+            True,
+            2,
+            reckless_rng.random(),
+            data.FISHING_ROD_DATA["Ocean Rod"],
+        )
+        if reckless_fight["result"] != "active":
+            break
+    assert reckless_fight["result"] == "line_broke"
+    smart_marlin = fishing_system.build_fishing_fight_state(
+        "Blue Marlin", data.FISH_DATA["Blue Marlin"], "Ocean Rod",
+        data.FISHING_ROD_DATA["Ocean Rod"], "Deep", 10, seed=1710, habitat="Ocean",
+    )
+    smart_marlin_rng = random.Random(1711)
+    for _step in range(3000):
+        fishing_system.advance_fishing_fight(
+            smart_marlin, 0.1, smart_marlin["mode"] == "rest", 1,
+            smart_marlin_rng.random(), data.FISHING_ROD_DATA["Ocean Rod"],
+        )
+        if smart_marlin["result"] != "active":
+            break
+    assert smart_marlin["result"] == "landed"
+    assert float(smart_marlin["elapsed"]) >= 25.0
+    assert int(smart_marlin["cycle_count"]) >= 5
+    starter_fight = fishing_system.build_fishing_fight_state(
+        "Pond Minnow", data.FISH_DATA["Pond Minnow"], "Fishing Rod",
+        data.FISHING_ROD_DATA["Fishing Rod"], "Shallow", 1,
+        seed=1716, habitat="Pond",
+    )
+    starter_fight_rng = random.Random(1717)
+    for _step in range(1200):
+        fishing_system.advance_fishing_fight(
+            starter_fight, 0.1, starter_fight["mode"] == "rest", 1,
+            starter_fight_rng.random(), data.FISHING_ROD_DATA["Fishing Rod"],
+        )
+        if starter_fight["result"] != "active":
+            break
+    assert starter_fight["result"] == "landed"
+    assert starter_fight["rod_name"] == "Fishing Rod"
+    assert float(starter_fight["starting_distance"]) < float(starter_fight["spool_limit"])
+    # Holding the reel continuously must not be a universal winning strategy,
+    # even against a modest fish. Advanced fishing rewards releasing during a
+    # surge; every built-in rod now uses the same active fight system.
+    held_reel_fight = fishing_system.build_fishing_fight_state(
+        "Dace",
+        data.FISH_DATA["Dace"],
+        "Lake Rod",
+        data.FISHING_ROD_DATA["Lake Rod"],
+        "Normal",
+        6,
+        seed=1705,
+    )
+    held_reel_rng = random.Random(1706)
+    for _step in range(500):
+        fishing_system.advance_fishing_fight(
+            held_reel_fight,
+            0.1,
+            True,
+            1,
+            held_reel_rng.random(),
+            data.FISHING_ROD_DATA["Lake Rod"],
+        )
+        if held_reel_fight["result"] != "active":
+            break
+    assert held_reel_fight["result"] == "line_broke"
+    assert float(held_reel_fight["continuous_reel_time"]) > 0.65
+
+    # Waiting is never a winning strategy. Burst energy repeatedly empties and
+    # refills; unattended fish eventually take every remaining metre of line.
+    idle_fight = fishing_system.build_fishing_fight_state(
+        "Dace", data.FISH_DATA["Dace"], "Casting Rod",
+        data.FISHING_ROD_DATA["Casting Rod"], "Normal", 4, seed=1712, habitat="River",
+    )
+    idle_rng = random.Random(1713)
+    for _step in range(2000):
+        fishing_system.advance_fishing_fight(
+            idle_fight, 0.1, False, 1, idle_rng.random(), data.FISHING_ROD_DATA["Casting Rod"],
+        )
+        if idle_fight["result"] != "active":
+            break
+    assert idle_fight["result"] == "spooled"
+    assert int(idle_fight["cycle_count"]) >= 2
+
+    renewal_fight = fishing_system.build_fishing_fight_state(
+        "Lake Sturgeon", data.FISH_DATA["Lake Sturgeon"], "Lake Rod",
+        data.FISHING_ROD_DATA["Lake Rod"], "Deep", 7, seed=1714, habitat="Lake",
+    )
+    renewal_fight["spool_limit"] = 10000.0
+    renewal_rng = random.Random(1715)
+    saw_empty_energy = False
+    saw_refilled_energy = False
+    for _step in range(700):
+        old_mode = str(renewal_fight["mode"])
+        old_distance = float(renewal_fight["distance"])
+        old_world_x = float(renewal_fight["fish_world_x"])
+        fishing_system.advance_fishing_fight(
+            renewal_fight, 0.1, False, 1, renewal_rng.random(), data.FISHING_ROD_DATA["Lake Rod"],
+        )
+        if old_mode == "surge":
+            assert float(renewal_fight["distance"]) >= old_distance
+        elif str(renewal_fight["mode"]) == "rest":
+            assert float(renewal_fight["distance"]) == old_distance
+            assert float(renewal_fight["fish_world_x"]) == old_world_x
+        if float(renewal_fight["burst_energy"]) <= 0.01:
+            saw_empty_energy = True
+        if saw_empty_energy and float(renewal_fight["burst_energy"]) >= float(renewal_fight["burst_energy_max"]) * 0.95:
+            saw_refilled_energy = True
+    assert renewal_fight["result"] == "active"
+    assert int(renewal_fight["cycle_count"]) >= 5
+    assert saw_empty_energy and saw_refilled_energy
 
     river_point = (sea_source_x, int(sea_river["source_y"]))
     knowledge_game.state.wilderness_chunk_x = river_point[0] // 86
@@ -3953,7 +4379,9 @@ def main() -> int:
     river_local = (river_point[0] % 86, river_point[1] % 38)
     assert knowledge_game.fishing_water_habitat(*river_local) == "River"
     river_fish = set(knowledge_game.available_fish_here(*river_local))
-    assert {"Dace", "Smallmouth Bass"}.issubset(river_fish)
+    assert "Smallmouth Bass" in river_fish
+    river_depth = knowledge_game.fishing_water_depth(*river_local)
+    assert ("Dace" in river_fish) == (river_depth in {"Shallow", "Normal"})
     assert "Yellow Perch" not in river_fish and "Anchovy" not in river_fish
     (
         knowledge_game.state.location,
@@ -4405,6 +4833,12 @@ def main() -> int:
     assert farm_action_game.base_map[6][5] == ","
     farm_action_game.refresh_seamless_farm_layer()
     assert farm_action_game.active_map()[6][5] == ","
+    strawberry = state.Crop(name="Strawberry", age=8, ready=True)
+    farm_action_game.set_crop(5, 6, strawberry)
+    farm_action_game.use_harvest(5, 6)
+    assert farm_action_game.get_crop(5, 6) is strawberry
+    assert not strawberry.ready and strawberry.age == 4
+    assert "produce again" in farm_action_game.state.message
 
     # Failed stamina checks are transactions: they cannot modify terrain.
     tired_hoe_game = FarmGame()
@@ -4951,6 +5385,19 @@ def main() -> int:
     visible_leaves = next(point for point in fall_surfaces if climate_game.wilderness_seasonal_surface_at(*point).get("kind") == "autumn_leaves")
     assert climate_game.use_utility_tool_at("Broom", *visible_leaves)
     assert not climate_game.wilderness_seasonal_surface_at(*visible_leaves)
+    climate_game.state.month, climate_game.state.day = 7, 15
+    climate_game.state.weather = "Sunny"
+    summer_patches = {}
+    for candidate_chunk in ((2, 2), (2, 3), (3, 2), (3, 3), (4, 2)):
+        climate_game.set_wilderness_chunk(*candidate_chunk)
+        summer_patches = {
+            point: surface
+            for point, surface in climate_game.wilderness_seasonal_surface_lookup().items()
+            if surface["kind"] == "summer_berry_patch"
+        }
+        if summer_patches:
+            break
+    assert summer_patches
     climate_game.state.month, climate_game.state.day = 12, 20
     winter_surfaces = climate_game.wilderness_seasonal_surface_lookup()
     assert any(data["kind"] == "snow_drift" for data in winter_surfaces.values())
@@ -5467,10 +5914,14 @@ def main() -> int:
     stream_tool_game.state.selected_tool_index = stream_tool_game.state.available_tools.index("Fishing Rod")
     stream_tool_game.state.stamina = 50
     assert stream_tool_game.water_tile_at(86, 9)
+    stream_tool_game.advanced_fishing_cast_mode = (
+        lambda rod_name: stream_tool_game.start_fishing_cast(86, 9, rod_name)
+    )
     stream_tool_game.use_wilderness_tool()
-    assert (stream_tool_game.state.wilderness_chunk_x, stream_tool_game.state.wilderness_chunk_y) == (7, 7)
+    assert (stream_tool_game.state.wilderness_chunk_x, stream_tool_game.state.wilderness_chunk_y) == (6, 7)
     assert stream_tool_game.state.fishing_active
-    assert (stream_tool_game.state.fishing_target_x, stream_tool_game.state.fishing_target_y) == (0, 9)
+    assert stream_tool_game.state.fishing_cast_rod == "Fishing Rod"
+    assert (stream_tool_game.state.fishing_target_x, stream_tool_game.state.fishing_target_y) == (86, 9)
     stream_tool_game.clear_fishing_state()
     stream_tool_game.set_wilderness_chunk(6, 7)
     stream_tool_game.wilderness_maps[stream_tool_east_key][9][0] = "T"
@@ -7416,6 +7867,19 @@ def main() -> int:
     )
     assert len(generated_service_positions) >= 2
     assert len(resolved_room_container_profiles) >= 3
+    procedural_world_work = procedural_town_game.ensure_procedural_town_opportunities(
+        procedural_town_plan
+    )
+    assert procedural_world_work
+    procedural_world_key = procedural_town_game.world_opportunity_town_key(
+        procedural_town_plan
+    )
+    assert all(row["town_key"] == procedural_world_key for row in procedural_world_work)
+    assert all(
+        procedural_town_game.quest_record(str(row["quest_id"])).get("giver_id")
+        == row.get("giver_id")
+        for row in procedural_world_work
+    )
     progression_probe = next(
         resident
         for resident in procedural_town_game.procedural_settlement_residents(
@@ -9723,6 +10187,34 @@ def main() -> int:
     bottom_limit = bounded_view.tank_width - len(bounded_view._fish_sprite(bottom_fish)) - 2
     assert 2 <= int(bottom_fish["x"]) <= bottom_limit
     assert 2 <= int(bottom_fish["y"]) <= bounded_view.tank_height - 3
+    # Feeding used to pull ordinary fish to the floor permanently because the
+    # patrol cadence always selected the same vertical direction for common
+    # three-tick swimmers. They must eventually rise again after food is gone.
+    bottom_fish.update({
+        "species": "Pond Minnow", "personality": "calm",
+        "x": 20, "y": bounded_view.tank_height - 3,
+        "direction": 1, "phase": 0,
+    })
+    bounded_view.food = []
+    floor_y = int(bottom_fish["y"])
+    observed_y = []
+    for _ in range(100):
+        bounded_view._update_animation()
+        observed_y.append(int(bottom_fish["y"]))
+    assert min(observed_y) < floor_y
+    # Hiding fish should remain near shelter without treating one exact cell as
+    # an eternal target that suppresses all movement.
+    bottom_fish.update({
+        "species": "Crystal Eel", "personality": "calm",
+        "x": 11, "y": 11, "direction": 1, "phase": 0,
+    })
+    bounded_view.state["decorations"] = [{"kind": "Cave", "x": 10, "y": 10}]
+    shelter_start_x = int(bottom_fish["x"])
+    shelter_positions = []
+    for _ in range(40):
+        bounded_view._update_animation()
+        shelter_positions.append(int(bottom_fish["x"]))
+    assert any(position != shelter_start_x for position in shelter_positions)
     native_tank["last_fed_day"] = ""
     before_feedings = int(native_tank["feedings"])
     tank_view._handle_key("f")
@@ -10688,6 +11180,19 @@ def main() -> int:
     assert not staging_game._active_scene_reserved_positions
     assert staging_eli["activity"] == "following the ordinary carpenter schedule"
     assert (staging_eli["interior_x"], staging_eli["interior_y"]) == (7, 3)
+    blocked_stage_game = FarmGame()
+    blocked_stage_game.state.location = "CarpenterStoreInterior"
+    blocked_actor = blocked_stage_game.npc_record_by_id("eli_carpenter")
+    blocked_start, blocked_target = (7, 3), (20, 12)
+    blocked_stage_game._active_scene_stage_positions = {"eli_carpenter": blocked_start}
+    blocked_stage_game._active_scene_stage_targets = {"eli_carpenter": blocked_target}
+    blocked_stage_game._active_scene_stage_records = {"eli_carpenter": blocked_actor}
+    blocked_stage_game._active_scene_stage_ready = False
+    blocked_stage_game.scene_stage_tile_open = lambda *_args, **_kwargs: False
+    blocked_stage_game.town_npc_path_step = lambda *_args, **_kwargs: None
+    assert blocked_stage_game.update_active_scene_staging(force=True)
+    assert blocked_stage_game._active_scene_stage_positions["eli_carpenter"] == blocked_start
+    assert blocked_stage_game._active_scene_stage_targets["eli_carpenter"] == blocked_start
     family_dialogue_stage_game = FarmGame()
     family_dialogue_stage_game.state.location = "CarpenterStoreInterior"
     family_dialogue_eli = family_dialogue_stage_game.npc_record_by_id("eli_carpenter")
@@ -11200,9 +11705,48 @@ def main() -> int:
     witness_callback = game.dialogue_witness_callback(
         witness_actor, "procedural", "conversation"
     )
-    assert "saw you repair" in witness_callback.lower()
+    assert "repair" in witness_callback.lower()
+    assert "old trail marker" in witness_callback.lower()
     assert "dungeonroom" not in witness_callback.lower()
     assert witness_slot["witnessed_events"][-1]["conversation_acknowledged"]
+    companion_observer = {
+        "id": "contextual_companion", "name": "Aster", "role": "Ranger",
+        "personality": "Curious, practical", "activity": "traveling with you",
+        "relationship": 120,
+    }
+    companion_slot = game.dialogue_social_slot(companion_observer, "companion")
+    companion_lines = []
+    for index in range(6):
+        companion_slot["witnessed_events"].append({
+            "id": f"companion_repair_{index}",
+            "text": f"Repaired trail marker {index + 1}.",
+            "action": f"repair trail marker {index + 1}",
+            "category": "gain",
+            "location": "Wilderness",
+            "ambient_acknowledged": False,
+            "conversation_acknowledged": False,
+        })
+        companion_lines.append(
+            game.dialogue_witness_callback(companion_observer, "companion", "conversation")
+        )
+    assert all("trail marker" in line.lower() for line in companion_lines)
+    assert len(set(companion_slot["recent_observation_templates"][-6:])) == 6
+    assert len(set(companion_slot["recent_observation_reactions"][-6:])) >= 4
+    assert sum(line.lower().startswith("i saw you") for line in companion_lines) <= 1
+    companion_slot["witnessed_events"] = []
+    companion_slot["initiation"] = {}
+    travel_lines = [
+        game.dialogue_companion_ambient_line(companion_observer, "companion")
+        for _ in range(8)
+    ]
+    assert len(set(travel_lines)) == 8
+    assert len(set(companion_slot["recent_companion_line_ids"][-8:])) == 8
+    assert any(
+        phrase in " ".join(travel_lines).lower()
+        for phrase in ("route", "road", "path", "ground", "supplies", "wilderness")
+    )
+    companion_slot["recent_companion_line_ids"] = "invalid legacy value"
+    assert game.dialogue_social_slot(companion_observer, "companion")["recent_companion_line_ids"] == []
     legacy_witness = {
         "id": "legacy_raw_pickup", "name": "Vale", "role": "Traveler",
         "personality": "Reserved", "relationship": 0,
@@ -11247,7 +11791,7 @@ def main() -> int:
     legacy_combat_callback = game.dialogue_witness_callback(
         legacy_witness, "procedural"
     )
-    assert "at the dungeon" in legacy_combat_callback.lower()
+    assert "in the dungeon" in legacy_combat_callback.lower()
     assert "dungeonroom" not in legacy_combat_callback.lower()
     game.world_dialogue_nearby_actors = lambda radius=7: [{
         "actor": witness_actor, "kind": "procedural",
@@ -11264,6 +11808,7 @@ def main() -> int:
     assert game.state.player_name in initiated_callout
     assert "hurt" in initiated_callout.lower()
     assert "what you intended" not in initiated_callout.lower()
+    assert game.dialogue_social_slot(witness_actor, "procedural")["initiation"]["observation_version"] == 2
     accepted_initiation = game.dialogue_accept_initiation(witness_actor, "procedural")
     assert "hurt" in accepted_initiation.lower()
     assert witness_slot["witnessed_events"][-1]["conversation_acknowledged"]
@@ -11346,6 +11891,11 @@ def main() -> int:
     assert game.dialogue_work_situation({"id": "child:test", "name": "Test Child"}, "child") is None
     original_promises = json.loads(json.dumps(game.state.npc_dialogue_promises))
     original_completed_errands = list(game.state.completed_errand_ids or [])
+    suppressed_world_work = []
+    for world_work in game.world_opportunities():
+        if str(world_work.get("giver_id", "")) == str(first_npc.get("id", "")):
+            suppressed_world_work.append((world_work, str(world_work.get("status", "open"))))
+            world_work["status"] = "withdrawn"
     errand_situation = game.dialogue_work_situation(first_npc, "authored")
     assert errand_situation and errand_situation["type"] == "authored_errand"
     assert errand_situation["deadline"] == "today"
@@ -11373,6 +11923,8 @@ def main() -> int:
     assert any("Current objective" in line for line in game.quest_detail_lines(dialogue_quest))
     assert game.complete_dialogue_quest_for_situation(first_npc, "authored", errand_situation)
     assert game.quest_record(str(dialogue_quest["id"]))["status"] == "completed"
+    for world_work, prior_status in suppressed_world_work:
+        world_work["status"] = prior_status
 
     destination = game.quest_capture_current_destination()
     original_destination_x = int(destination["x"])
@@ -11434,15 +11986,14 @@ def main() -> int:
 
     legacy_snapshots = game.legacy_unified_quest_snapshots()
     legacy_sources = {str(row.get("legacy_source", "")) for row in legacy_snapshots}
-    assert {"resident", "companion", "bulletin", "mission"}.issubset(legacy_sources)
+    assert {"resident", "companion", "mission"}.issubset(legacy_sources)
+    assert "bulletin" not in legacy_sources
     assert all(str(row.get("id", "")).startswith("legacy:") for row in legacy_snapshots)
     assert game.sync_legacy_quest_records() >= 0
     resident_snapshot = next(row for row in legacy_snapshots if row.get("legacy_source") == "resident")
     resident_mirror = game.quest_record(str(resident_snapshot["id"]))
     assert resident_mirror["legacy_managed"] and resident_mirror["legacy_direct_turn_in"]
     assert game.legacy_unified_quest_detail_lines(resident_mirror)
-    bulletin_snapshot = next(row for row in legacy_snapshots if row.get("legacy_source") == "bulletin")
-    assert not bulletin_snapshot["legacy_direct_turn_in"]
     mission_snapshot = next(row for row in legacy_snapshots if row.get("legacy_source") == "mission")
     assert mission_snapshot["status"] in {"offered", "completed"}
 
@@ -11552,6 +12103,37 @@ def main() -> int:
     store_destination = game.quest_destination_for_known_place(store_place)
     assert store_destination["location"] == "Wilderness"
     assert "world_x" in store_destination and "world_y" in store_destination
+    assert store_destination["arrival_mode"] == "approach"
+    exact_world_x, exact_world_y = game.wilderness_world_coords(4, -3, 17, 9)
+    exact_destination = game.quest_destination_for_known_place({
+        "id": "wilderness:smoke:exact", "name": "Exact Smoke Site",
+        "kind": "wilderness", "x": 4, "y": -3, "local_x": 17, "local_y": 9,
+        "world_x": exact_world_x, "world_y": exact_world_y,
+    })
+    assert (exact_destination["world_x"], exact_destination["world_y"]) == (
+        exact_world_x, exact_world_y,
+    )
+    original_poi_state = game.state.wilderness_poi_state
+    original_road_destinations = game.wilderness_road_destinations_for_chunk
+    try:
+        game.state.wilderness_poi_state = {
+            "4,-3:pond:17,9": {
+                "kind": "pond", "name": "Exact Smoke Pond",
+                "chunk_x": 4, "chunk_y": -3, "x": 17, "y": 9, "visited": True,
+            },
+        }
+        game.wilderness_road_destinations_for_chunk = lambda *_args: []
+        exact_place = next(
+            place for place in game.dialogue_known_places({}, "traveler")
+            if place.get("name") == "Exact Smoke Pond"
+        )
+        assert (exact_place["x"], exact_place["y"]) == (4, -3)
+        assert (exact_place["world_x"], exact_place["world_y"]) == (
+            exact_world_x, exact_world_y,
+        )
+    finally:
+        game.state.wilderness_poi_state = original_poi_state
+        game.wilderness_road_destinations_for_chunk = original_road_destinations
 
     meeting_destination = game.quest_capture_current_destination()
     meeting_destination["label"] = "the smoke-test meeting place"
@@ -11573,6 +12155,14 @@ def main() -> int:
     assert game.complete_planned_event("smoke:meeting", reason="smoke-test meeting")
 
     guide_actor = dict(first_npc)
+    live_guide_actor = game.npc_record_by_id(str(guide_actor.get("id", "")))
+    guide_runtime_fields = (
+        "schedule_override", "runtime_location", "x", "y", "world_x", "world_y",
+        "chunk_x", "chunk_y", "interior_x", "interior_y", "activity",
+    )
+    guide_runtime_before = {
+        field: live_guide_actor.get(field, "__missing__") for field in guide_runtime_fields
+    }
     guide_relationship_before = game.town_npc_relationship(str(guide_actor.get("id", "")))
     original_known_places = game.dialogue_known_places
     original_arrangement_choose = game.dialogue_choose
@@ -11593,6 +12183,8 @@ def main() -> int:
     ]
     assert guide_events and guide_events[-1]["status"] == "active"
     guide_event = guide_events[-1]
+    assert guide_event["persistent_until_resolved"] is True
+    assert not int(guide_event.get("expires_at_minute", 0) or 0)
     guide_quest = game.quest_record(str(guide_event["quest_id"]))
     assert guide_quest and game.state.tracked_quest_id == guide_quest["id"]
     guide_runtime = next(
@@ -11604,17 +12196,54 @@ def main() -> int:
     # a quest marker with no accompanying NPC.
     guide_start = int(game.state.player_x), int(game.state.player_y)
     assert (int(guide_runtime["x"]), int(guide_runtime["y"])) == guide_start
-    local_guide_target = next(
+    # Rendering/synchronization must not use companion catch-up rules to pull a
+    # guide back beside the player. The guide owns a persistent route position.
+    far_guide_position = next(
         (x, y)
-        for radius in range(3, 10)
+        for y in range(game.active_map_height())
+        for x in range(game.active_map_width())
+        if abs(x - guide_start[0]) + abs(y - guide_start[1]) > 10
+        and game.passable(x, y)
+    )
+    guide_runtime["x"], guide_runtime["y"] = far_guide_position
+    if game.on_wilderness():
+        far_world_x, far_world_y = game.wilderness_world_coords(
+            int(game.state.wilderness_chunk_x), int(game.state.wilderness_chunk_y),
+            int(far_guide_position[0]), int(far_guide_position[1]),
+        )
+        guide_runtime["world_x"], guide_runtime["world_y"] = far_world_x, far_world_y
+    game.sync_temporary_participants()
+    assert (int(guide_runtime["x"]), int(guide_runtime["y"])) == far_guide_position
+    guide_runtime["x"], guide_runtime["y"] = guide_start
+    if game.on_wilderness():
+        start_world_x, start_world_y = game.wilderness_world_coords(
+            int(game.state.wilderness_chunk_x), int(game.state.wilderness_chunk_y),
+            int(guide_start[0]), int(guide_start[1]),
+        )
+        guide_runtime["world_x"], guide_runtime["world_y"] = start_world_x, start_world_y
+    blocked_route = next(
+        ((x, y), goals)
+        for radius in range(2, 10)
         for y in range(max(0, guide_start[1] - radius), min(game.active_map_height(), guide_start[1] + radius + 1))
         for x in range(max(0, guide_start[0] - radius), min(game.active_map_width(), guide_start[0] + radius + 1))
-        if abs(x - guide_start[0]) + abs(y - guide_start[1]) >= radius and game.passable(x, y)
+        if abs(x - guide_start[0]) + abs(y - guide_start[1]) == radius
+        and not game.passable(x, y)
+        for goals in [game.temporary_guide_route_goals(
+            {"destination": {"arrival_mode": "approach"}}, (x, y)
+        )]
+        if goals and actors.shortest_path_step(
+            guide_start, goals, lambda px, py: game.passable(px, py),
+            max_nodes=max(256, game.active_map_width() * game.active_map_height()),
+        )
     )
+    local_guide_target, local_guide_goals = blocked_route
+    assert not game.passable(*local_guide_target)
+    assert all(game.passable(*goal) for goal in local_guide_goals)
     guide_runtime["destination"] = game.quest_capture_current_destination()
     guide_runtime["destination"].update({
         "x": int(local_guide_target[0]), "y": int(local_guide_target[1]),
         "label": "the smoke-test guide destination",
+        "arrival_mode": "approach",
     })
     if game.on_wilderness():
         guide_world_x, guide_world_y = game.wilderness_world_coords(
@@ -11622,12 +12251,154 @@ def main() -> int:
             int(local_guide_target[0]), int(local_guide_target[1]),
         )
         guide_runtime["destination"].update({"world_x": guide_world_x, "world_y": guide_world_y})
-    game.update_temporary_participants_after_player_move()
+    for _guide_step in range(20):
+        follow_position = int(guide_runtime["x"]), int(guide_runtime["y"])
+        game.state.player_x, game.state.player_y = follow_position
+        game.update_temporary_participants_after_player_move()
+        if str(guide_runtime.get("status", "")) == "completed":
+            break
     assert (int(guide_runtime["x"]), int(guide_runtime["y"])) != guide_start
-    assert game.complete_planned_event(str(guide_event["id"]), reason="arrived together")
+    assert guide_runtime["status"] == "completed"
     assert game.quest_record(str(guide_quest["id"]))["status"] == "completed"
     assert game.town_npc_relationship(str(guide_actor.get("id", ""))) >= guide_relationship_before + 2
+    assert {
+        field: live_guide_actor.get(field, "__missing__") for field in guide_runtime_fields
+    } == guide_runtime_before
     game.state.town_npc_relationships[str(guide_actor.get("id", ""))] = guide_relationship_before
+
+    cancelled_guide_quest = game.register_quest({
+        "id": "smoke:cancelled_guide_quest",
+        "title": "Cancelled Guided Journey",
+        "objectives": [{
+            "id": "arrival", "kind": "escort", "target_id": "smoke:cancelled_guide",
+            "target": 1, "current": 0, "description": "Follow the guide.",
+        }],
+    }, accept=True)
+    cancelled_guide_event = game.schedule_planned_event({
+        "id": "smoke:cancelled_guide", "title": "Cancelled Guide", "status": "ready",
+        "quest_id": str(cancelled_guide_quest["id"]),
+        "participants": [{
+            "actor_id": str(guide_actor.get("id", "")), "name": str(guide_actor.get("name", "Guide")),
+            "role": str(guide_actor.get("role", "Guide")), "kind": "authored", "mode": "guide",
+            "destination": game.quest_capture_current_destination(),
+        }],
+    })
+    assert game.activate_planned_event(str(cancelled_guide_event["id"]))
+    assert game.cancel_planned_event(str(cancelled_guide_event["id"]), reason="smoke-test early ending")
+    assert game.quest_record(str(cancelled_guide_quest["id"]))["status"] == "abandoned"
+    assert str(guide_actor.get("id", "")) not in game.temporary_participant_actor_ids()
+
+    guide_boundary_game = FarmGame()
+    guide_boundary_game.state.location = "Wilderness"
+    guide_boundary_game.set_wilderness_chunk(0, 0)
+    guide_boundary_y = 10
+    guide_boundary_old = guide_boundary_game.get_wilderness_chunk_map(0, 0)
+    guide_boundary_new = guide_boundary_game.get_wilderness_chunk_map(1, 0)
+    for x in range(78, 86):
+        guide_boundary_old[guide_boundary_y][x] = ";"
+    for x in range(0, 9):
+        guide_boundary_new[guide_boundary_y][x] = ";"
+    guide_boundary_game.state.player_x, guide_boundary_game.state.player_y = 83, guide_boundary_y
+    boundary_guide_actor = guide_boundary_game.state.town_npcs[0]
+    boundary_target_world = guide_boundary_game.wilderness_world_coords(1, 0, 6, guide_boundary_y)
+    boundary_guide_destination = {
+        "location": "Wilderness", "chunk_x": 1, "chunk_y": 0,
+        "world_x": boundary_target_world[0], "world_y": boundary_target_world[1],
+        "label": "the route across the boundary", "place_id": "wilderness:smoke:boundary",
+    }
+    boundary_guide_event = guide_boundary_game.schedule_planned_event({
+        "id": "smoke:boundary_guide", "title": "Boundary Guide", "kind": "guided_journey",
+        "status": "ready", "persistent_until_resolved": True, "player_manageable": True,
+        "destination": boundary_guide_destination,
+        "participants": [{
+            "actor_id": str(boundary_guide_actor["id"]), "name": str(boundary_guide_actor["name"]),
+            "role": str(boundary_guide_actor.get("role", "Guide")), "kind": "authored",
+            "mode": "guide", "destination": boundary_guide_destination,
+        }],
+    })
+    assert guide_boundary_game.activate_planned_event(str(boundary_guide_event["id"]))
+    boundary_guide_runtime = next(
+        row for row in guide_boundary_game.active_temporary_participants()
+        if str(row.get("event_id", "")) == str(boundary_guide_event["id"])
+    )
+    guide_boundary_game.update_temporary_participants_after_player_move()
+    assert int(boundary_guide_runtime["x"]) == 85
+    guide_boundary_game.state.player_x, guide_boundary_game.state.player_y = 85, guide_boundary_y
+    assert guide_boundary_game.transition_wilderness_chunk(1, 0)
+    assert int(boundary_guide_runtime["x"]) == 0
+    # If the player crosses first, a guide behind them must catch up rather than
+    # treating all large separations as though the guide were waiting ahead.
+    guide_boundary_game.state.player_x, guide_boundary_game.state.player_y = 7, guide_boundary_y
+    guide_boundary_game.update_temporary_participants_after_player_move()
+    assert int(boundary_guide_runtime["x"]) > 0
+    for _boundary_guide_step in range(20):
+        if str(boundary_guide_event.get("status", "")) == "completed":
+            break
+        guide_x, guide_y = int(boundary_guide_runtime["x"]), int(boundary_guide_runtime["y"])
+        guide_boundary_game.state.player_x = max(0, guide_x - 1)
+        guide_boundary_game.state.player_y = guide_y
+        guide_boundary_game.update_temporary_participants_after_player_move()
+    assert boundary_guide_event["status"] == "completed"
+    assert int(boundary_guide_runtime["x"]) >= 5
+
+    indoor_guide_game = FarmGame()
+    indoor_guide_actor = indoor_guide_game.state.town_npcs[0]
+    indoor_runtime_before = {
+        field: indoor_guide_actor.get(field, "__missing__") for field in guide_runtime_fields
+    }
+    indoor_guide_game.state.location = "GeneralStoreInterior"
+    indoor_guide_game.state.player_x, indoor_guide_game.state.player_y = (
+        indoor_guide_game.authored_interior_entry_tile()
+    )
+    indoor_destination = indoor_guide_game.quest_destination_for_known_place({
+        "id": "town:farm", "name": "Your Farm", "kind": "town",
+    })
+    indoor_guide_event = indoor_guide_game.schedule_planned_event({
+        "id": "smoke:indoor_guide", "title": "Indoor Guide", "kind": "guided_journey",
+        "status": "ready", "persistent_until_resolved": True, "player_manageable": True,
+        "destination": indoor_destination,
+        "participants": [{
+            "actor_id": str(indoor_guide_actor["id"]), "name": str(indoor_guide_actor["name"]),
+            "role": str(indoor_guide_actor.get("role", "Guide")), "kind": "authored",
+            "mode": "guide", "destination": indoor_destination,
+        }],
+    })
+    assert indoor_guide_game.activate_planned_event(str(indoor_guide_event["id"]))
+    indoor_guide_runtime = next(
+        row for row in indoor_guide_game.active_temporary_participants()
+        if str(row.get("event_id", "")) == str(indoor_guide_event["id"])
+    )
+    for _indoor_guide_step in range(80):
+        guide_position = int(indoor_guide_runtime["x"]), int(indoor_guide_runtime["y"])
+        indoor_guide_game.state.player_x, indoor_guide_game.state.player_y = guide_position
+        indoor_guide_game.update_temporary_participants_after_player_move()
+        if indoor_guide_runtime.get("waiting_at_transition"):
+            break
+    assert indoor_guide_runtime.get("waiting_at_transition") is True
+    indoor_guide_game.state.location = "Wilderness"
+    indoor_guide_game.state.wilderness_chunk_x = 0
+    indoor_guide_game.state.wilderness_chunk_y = 0
+    indoor_guide_game.state.player_x, indoor_guide_game.state.player_y = 8, 9
+    indoor_guide_game.sync_temporary_participants()
+    assert indoor_guide_runtime["location"] == "Wilderness"
+    assert not indoor_guide_runtime.get("waiting_at_transition", False)
+    assert indoor_guide_game.cancel_planned_event(str(indoor_guide_event["id"]))
+    assert {
+        field: indoor_guide_actor.get(field, "__missing__") for field in guide_runtime_fields
+    } == indoor_runtime_before
+
+    prior_weather = game.state.weather
+    game.state.weather = "Stormy"
+    storm_boilerplate = {
+        "Rough weather makes long trips risky.", "I would stay close.",
+        "Do not make a long trip in this.", "Storm warning today.",
+        "Keep the trip short.", "Weather looks bad.",
+    }
+    storm_entries = game.contextual_dialogue_entries_for_category(guide_actor, "storm_warning")
+    assert len(storm_entries) >= 10
+    assert not storm_boilerplate.intersection({str(entry.get("text", "")) for entry in storm_entries})
+    assert len({str(entry.get("text", "")) for entry in storm_entries}) == len(storm_entries)
+    game.state.weather = prior_weather
 
     date_actor = next(
         npc for npc in game.state.town_npcs
@@ -12574,6 +13345,26 @@ def main() -> int:
     )
     assert chosen_ai_move["capture"] == (4, 3)
 
+    # Search must value the complete mandatory jump sequence, not merely the
+    # first captured piece. The left move captures twice; the right move only
+    # captures once.
+    chain_choice_board = [
+        [checkers.CHECKERS_EMPTY for _x in range(8)] for _y in range(8)
+    ]
+    chain_choice_board[2][1] = "b"
+    chain_choice_board[3][2] = "r"
+    chain_choice_board[5][4] = "r"
+    chain_choice_board[2][5] = "b"
+    chain_choice_board[3][6] = "r"
+    chain_choice_moves = checkers.checkers_legal_moves(chain_choice_board, "ai")
+    assert len(chain_choice_moves) == 2
+    chain_choice_snapshot = checkers.copy_checkers_board(chain_choice_board)
+    chain_choice = checkers.choose_checkers_ai_move(
+        chain_choice_board, chain_choice_moves, "Expert", random.Random(4401),
+    )
+    assert chain_choice["from"] == (1, 2) and chain_choice["to"] == (3, 4)
+    assert chain_choice_board == chain_choice_snapshot
+
     checkers_game = FarmGame()
     checkers_game.save = lambda *args, **kwargs: True
     active_checkers_match = checkers_game.new_checkers_match("Practiced", "Smoke Test Inn")
@@ -12630,6 +13421,43 @@ def main() -> int:
         active_chess_match, "Expert", random.Random(45),
     )
     assert chosen_chess_move in chess.chess_legal_moves(active_chess_match, "ai")
+
+    # The improved opponent must see immediate mate and search check evasions
+    # rather than treating a checked-but-mobile king as already lost.
+    mate_search_match = chess_game.new_chess_match("Expert", "Search Test")
+    for source, target in (
+        ((5, 6), (5, 5)), ((4, 1), (4, 3)), ((6, 6), (6, 4)),
+    ):
+        side = str(mate_search_match["turn"])
+        move = next(
+            candidate for candidate in chess.chess_legal_moves(mate_search_match, side)
+            if candidate["from"] == source and candidate["to"] == target
+        )
+        chess.apply_chess_move(mate_search_match, move)
+    mate_search_snapshot = chess.clone_chess_match(mate_search_match)
+    mate_search_move = chess.choose_chess_ai_move(
+        mate_search_match, "Expert", random.Random(4501),
+    )
+    assert mate_search_move["from"] == (3, 0) and mate_search_move["to"] == (7, 4)
+    mate_search_result = chess.clone_chess_match(mate_search_match)
+    chess.apply_chess_move(mate_search_result, mate_search_move)
+    assert chess.chess_match_outcome(mate_search_result) == "loss_checkmate"
+    assert mate_search_match == mate_search_snapshot
+
+    checked_board = [[chess.CHESS_EMPTY for _x in range(8)] for _y in range(8)]
+    checked_board[7][4], checked_board[0][0], checked_board[4][4] = "K", "k", "r"
+    checked_match = chess_game.new_chess_match("Expert", "Search Test")
+    checked_match.update({
+        "board": checked_board, "turn": "player", "castling": "",
+        "en_passant": None, "halfmove_clock": 0, "position_counts": {},
+    })
+    assert chess.chess_in_check(checked_board, "player")
+    assert chess.chess_legal_moves(checked_match, "player")
+    checked_score = chess._chess_quiescence(
+        checked_match, "player", -chess.CHESS_MATE_SCORE * 2,
+        chess.CHESS_MATE_SCORE * 2, time.monotonic() + 1.0, depth=2,
+    )
+    assert checked_score > -chess.CHESS_MATE_SCORE
 
     en_passant_board = [[chess.CHESS_EMPTY for _x in range(8)] for _y in range(8)]
     en_passant_board[7][4] = "K"
@@ -13803,8 +14631,9 @@ def main() -> int:
     assert len(set(inn_positions.values())) == 3, "Inn sleepers should occupy separate rooms"
     inn_bed_anchors = set(routine_game.town_npc_fixture_room_anchors("InnInterior", {"B"}))
     assert set(inn_positions.values()) <= inn_bed_anchors
-    # Late travelers describe the trip home instead of appearing to sleep on
-    # the street, and the 11 PM fallback resolves every blocked route indoors.
+    # Late travelers describe the trip home and remain physically present while
+    # the player can see the route. Off-screen schedules may still resolve so
+    # nobody remains stranded outdoors indefinitely.
     routine_game.state.location = "Wilderness"
     routine_game.return_to_seamless_town(50, 24)
     routine_game.state.hour, routine_game.state.minute = 22, 0
@@ -13813,6 +14642,9 @@ def main() -> int:
     late_npc["indoors"] = False
     assert routine_game.town_npc_activity_label(late_npc) == "walking home to sleep"
     routine_game.state.hour = 23
+    routine_game.update_town_npcs(force_reanchor=True)
+    assert routine_game.town_npc_actual_location(late_npc) == "Town"
+    routine_game.state.location = "InnInterior"
     routine_game.update_town_npcs(force_reanchor=True)
     assert all(
         routine_game.town_npc_actual_location(npc) != "Town"
@@ -13916,6 +14748,24 @@ def main() -> int:
         for npc in visitors
     )
 
+    visible_late_game = FarmGame()
+    visible_late_game.state.location = "Town"
+    visible_late_game.state.hour = 23
+    visible_late_npc = visible_late_game.npc_record_by_id("eli_carpenter")
+    visible_late_npc.update({"runtime_location": "Town", "x": 20, "y": 20})
+    visible_late_game.active_town_npcs = lambda: [visible_late_npc]
+    visible_late_game.town_npc_current_routine_phase = lambda _npc: "late"
+    visible_late_game.town_npc_desired_location = lambda _npc: "CarpenterStoreInterior"
+    visible_late_game.town_npc_activity_label = lambda _npc: "walking home"
+    visible_late_game.town_npc_move_town_toward = lambda *_args, **_kwargs: False
+    visible_late_place_calls = []
+    visible_late_game.town_npc_place_at_destination = (
+        lambda npc, desired: visible_late_place_calls.append((npc, desired))
+    )
+    visible_late_game.update_town_npcs()
+    assert not visible_late_place_calls
+    assert visible_late_npc["runtime_location"] == "Town"
+
     malformed_regional_state = GameState(regional_town_life={
         "visitors": [{"id": "route:test", "x": "bad", "route_slot": "bad"}],
         "visitor_bonds": {"route:test": "bad"},
@@ -13978,6 +14828,61 @@ def main() -> int:
         matching_route_traveler["route_destination_world_x"],
         matching_route_traveler["route_destination_world_y"],
     ) == circulation_game.home_world_destination_world_positions()["town"]
+    route_memory_game = FarmGame()
+    route_memory_game.state.location = "Wilderness"
+    route_memory_game.state.wilderness_chunk_x = 0
+    route_memory_game.state.wilderness_chunk_y = 0
+    route_memory_game.wilderness_stream_resolve_from_chunk = (
+        lambda chunk_x, chunk_y, x, y: (chunk_x, chunk_y, x, y)
+    )
+    route_memory_game.wilderness_stream_map = lambda *_args: [[":" for _x in range(20)] for _y in range(20)]
+    route_memory_game.wilderness_world_coords = lambda _cx, _cy, x, y: (x, y)
+    route_memory_traveler = {
+        "x": 5,
+        "y": 5,
+        "route_destination_world_x": 12,
+        "route_destination_world_y": 5,
+        "route_recent_world_positions": [[6, 5]],
+    }
+    route_memory_options = route_memory_game.wilderness_traveler_route_options(
+        route_memory_traveler, 0, 0, [(1, 0), (0, 1), (-1, 0)]
+    )
+    assert route_memory_options[0] != (1, 0)
+    route_memory_game.set_wilderness_traveler_destination(
+        route_memory_traveler,
+        {
+            "id": "new-stop",
+            "name": "New Stop",
+            "kind": "road_service",
+            "chunk_x": 0,
+            "chunk_y": 0,
+            "world_x": 12,
+            "world_y": 5,
+        },
+    )
+    assert route_memory_traveler["route_recent_world_positions"] == []
+
+    blocked_inn_game = FarmGame()
+    blocked_inn_game.state.location = "Town"
+    blocked_inn_game.state.hour = 10
+    blocked_visitor = {
+        "id": "blocked-visitor",
+        "name": "Blocked Visitor",
+        "runtime_location": "Town",
+        "x": 20,
+        "y": 20,
+        "inn_route_steps": 999,
+        "route_blocked": True,
+    }
+    blocked_inn_game.regional_town_visitors = lambda: [blocked_visitor]
+    blocked_inn_game.regional_visitor_desired_location = lambda _visitor: "InnInterior"
+    blocked_inn_game.town_npc_exterior_access = lambda *_args, **_kwargs: (30, 20)
+    blocked_inn_game.town_npc_move_town_toward = lambda *_args, **_kwargs: False
+    blocked_inn_game.town_routine_phase = lambda: "work_morning"
+    blocked_inn_game.update_regional_town_visitors()
+    assert blocked_visitor["runtime_location"] == "Town"
+    assert blocked_visitor["inn_route_steps"] == 1000
+    assert "approach to clear" in str(blocked_visitor["activity"])
     circulation_game.autosave_with_message = lambda message: circulation_game.set_message(message)
     circulation_game.state.stamina = 100
     money_before_escort = int(circulation_game.state.money)
@@ -14963,6 +15868,9 @@ def main() -> int:
     assert not shipping_game.is_shippable_item("Wood")
     assert "protected" in shipping_game.item_hint_for_goods_list("Wood", 12)
     turnip_price = shipping_game.shippable_unit_price("Turnip")
+    shipping_game.state.month = 6
+    assert shipping_game.shippable_unit_price("Turnip") == int(round(turnip_price * 1.15))
+    shipping_game.state.month = 3
     assert shipping_game.ship_inventory_item("Turnip")
     assert shipping_game.state.inventory["Turnip"] == 2
     assert shipping_game.state.shipped_today_items["Turnip"] == 3
@@ -17580,6 +18488,81 @@ def main() -> int:
     assert "Pufferfish" in reef_specialists
     assert not {"Swordfish", "Blue Marlin"}.intersection(reef_specialists)
 
+    cast_game = FarmGame()
+    cast_game.autosave_with_message = lambda message: cast_game.set_message(message)
+    cast_game.state.location = "Farm"
+    cast_game.state.month = 7
+    cast_target = next(
+        (x, y)
+        for y, row in enumerate(cast_game.base_map)
+        for x, tile in enumerate(row)
+        if tile == "~" and x >= 3
+    )
+    cast_game.state.player_x, cast_game.state.player_y = cast_target[0] - 3, cast_target[1]
+    cast_game.state.owned_tools.append("Lake Rod")
+    cast_game.state.tool_levels["Lake Rod"] = 1
+    cast_game.state.inventory["Worm Bait"] = 2
+    cast_game.state.equipped_fishing_bait = "Worm Bait"
+    cast_game.start_fishing_cast(*cast_target, rod_name="Lake Rod")
+    assert cast_game.state.fishing_active
+    assert cast_game.state.fishing_cast_rod == "Lake Rod"
+    assert cast_game.state.fishing_cast_depth in {"Shallow", "Normal", "Deep"}
+    assert cast_game.state.inventory["Worm Bait"] == 1
+    assert cast_game.fishing_line_cells()
+    cast_game.clear_fishing_state()
+    pond_minnow = data.FISH_DATA["Pond Minnow"]
+    assert fishing_system.tackle_weight_multiplier(
+        "Pond Minnow", pond_minnow, "Surface Popper", "Insect Bait",
+    ) > fishing_system.tackle_weight_multiplier(
+        "Pond Minnow", pond_minnow, "Glow Lure", "Shellfish Bait",
+    )
+
+    advanced_reel_game = FarmGame()
+    advanced_reel_game.autosave_with_message = lambda message: advanced_reel_game.set_message(message)
+    advanced_reel_game.state.location = "Farm"
+    advanced_reel_game.state.fishing_active = True
+    advanced_reel_game.state.fishing_elapsed = 3.0
+    advanced_reel_game.state.fishing_bite_at = 2.0
+    advanced_reel_game.state.fishing_end_at = 4.0
+    advanced_reel_game.state.fishing_will_bite = True
+    advanced_reel_game.state.fishing_pool = ["Carp"]
+    advanced_reel_game.state.fishing_cast_rod = "Lake Rod"
+    advanced_reel_game.state.fishing_cast_depth = "Normal"
+    advanced_reel_game.play_advanced_fishing_fight = lambda fish_name: {
+        "fish_name": fish_name,
+        "result": "landed",
+        "elapsed": 8.0,
+        "size_label": "large",
+    }
+    assert advanced_reel_game.reel_fishing_line()
+    assert advanced_reel_game.state.inventory["Carp"] == 1
+    assert "large Carp" in advanced_reel_game.state.message
+    assert not advanced_reel_game.state.fishing_active
+
+    starter_reel_game = FarmGame()
+    starter_reel_game.autosave_with_message = lambda message: starter_reel_game.set_message(message)
+    starter_reel_game.state.location = "Farm"
+    starter_reel_game.state.fishing_active = True
+    starter_reel_game.state.fishing_elapsed = 3.0
+    starter_reel_game.state.fishing_bite_at = 2.0
+    starter_reel_game.state.fishing_end_at = 4.0
+    starter_reel_game.state.fishing_will_bite = True
+    starter_reel_game.state.fishing_pool = ["Pond Minnow"]
+    starter_reel_game.state.fishing_cast_rod = "Fishing Rod"
+    starter_fight_calls = []
+    starter_reel_game.play_advanced_fishing_fight = lambda fish_name: (
+        starter_fight_calls.append(fish_name) or {
+            "fish_name": fish_name,
+            "result": "landed",
+            "elapsed": 6.0,
+            "size_label": "small",
+        }
+    )
+    assert starter_reel_game.reel_fishing_line()
+    assert starter_fight_calls == ["Pond Minnow"]
+    assert starter_reel_game.state.inventory["Pond Minnow"] == 1
+    assert not starter_reel_game.state.fishing_active
+
     # New worlds place a temperate home basin and reachable, seeded headline climates.
     climate_game = FarmGame()
     climate_game.autosave_with_message = lambda message: climate_game.set_message(message)
@@ -18096,7 +19079,7 @@ def main() -> int:
         if feature
     }
     assert set(harbor_features) == {
-        "cargo_store", "passenger_shelter", "repair_bench", "fish_market",
+        "cargo_store", "passenger_shelter", "repair_bench", "fish_market", "tackle_shop",
     }
     assert all(not harbor_game.passable(*position) for position in harbor_features.values())
     cargo_store = harbor_game.world_container_at(*harbor_features["cargo_store"])
@@ -18123,6 +19106,15 @@ def main() -> int:
     assert harbor_game.use_wilderness_harbor_feature(*harbor_features["fish_market"])
     assert harbor_game.state.money == market_money_before + 150
     assert harbor_game.state.inventory["River Chub"] == 0
+    harbor_game.state.money = 500
+    tackle_choices = iter([
+        MenuItem(label="Buy bait", value="bait:Worm Bait", enabled=True),
+        MenuItem(label="Back", value=data.MENU_BACK, enabled=True),
+    ])
+    harbor_game.vertical_panel_select = lambda *_args, **_kwargs: next(tackle_choices)
+    assert harbor_game.use_wilderness_harbor_feature(*harbor_features["tackle_shop"])
+    assert harbor_game.state.inventory["Worm Bait"] >= 5
+    assert harbor_game.state.equipped_fishing_bait == "Worm Bait"
     harbor_reapply_changes = harbor_game.apply_wilderness_harbor_compounds(
         harbor_grid, harbor_chunk_x, harbor_chunk_y
     )
@@ -18137,6 +19129,8 @@ def main() -> int:
     for fishing_cy in range(-10, 11):
         for fishing_cx in range(-10, 11):
             if not fishing_game.wilderness_chunk_has_fishing_settlement(fishing_cx, fishing_cy):
+                continue
+            if fishing_game.procedural_town_plan(fishing_cx, fishing_cy) or fishing_game.wilderness_chunk_has_stronghold(fishing_cx, fishing_cy):
                 continue
             candidate_grid = [["~" for _ in range(86)] for _ in range(38)]
             for x in range(86): candidate_grid[0][x] = candidate_grid[-1][x] = "#"
@@ -18172,8 +19166,36 @@ def main() -> int:
         if fishing_game.wilderness_harbor_feature_at(xx, yy)
     }
     assert settlement_facilities == {
-        "cargo_store", "passenger_shelter", "repair_bench", "fish_market",
+        "cargo_store", "passenger_shelter", "repair_bench", "fish_market", "tackle_shop",
     }
+    harbor_anglers = [
+        traveler for traveler in fishing_game.generate_wilderness_travelers(*fishing_chunk)
+        if traveler.get("regional_angler")
+    ]
+    assert len(harbor_anglers) == 1
+    harbor_angler = harbor_anglers[0]
+    assert harbor_angler["role"] == "Fisher"
+    local_report = fishing_game.wilderness_local_fishing_report_lines(
+        int(harbor_angler["x"]), int(harbor_angler["y"]),
+    )
+    assert any("Fish known in these waters" in line for line in local_report)
+    angler_offer = fishing_game.wilderness_angler_request_offer(harbor_angler)
+    assert angler_offer and angler_offer["fish"] in data.FISH_DATA
+    fishing_game.vertical_panel_select = lambda *_args, **_kwargs: MenuItem(
+        label="Accept", value="accept", enabled=True,
+    )
+    assert fishing_game.handle_wilderness_angler_request(harbor_angler)
+    assert fishing_game.active_regional_angler_request_lines()
+    requested_fish = str(angler_offer["fish"])
+    requested_quantity = int(angler_offer["quantity"])
+    fishing_game.state.inventory[requested_fish] = requested_quantity
+    fishing_game.vertical_panel_select = lambda *_args, **_kwargs: MenuItem(
+        label="Deliver", value="deliver", enabled=True,
+    )
+    angler_money_before = fishing_game.state.money
+    assert fishing_game.handle_wilderness_angler_request(harbor_angler)
+    assert fishing_game.state.money > angler_money_before
+    assert not fishing_game.active_regional_angler_request_lines()
     assert not fishing_game.develop_wilderness_fishing_settlement()
     assert fishing_game.wilderness_region_vitality(*fishing_chunk)[0] == vitality_before_harbor == 0
     assert fishing_game.claim_fishing_settlement_weekly_catch()
@@ -18522,6 +19544,16 @@ def main() -> int:
     assert "S" in dungeon_symbols
     assert "?" in dungeon_symbols
     assert not (set("oqcigACdhmb") & dungeon_symbols)
+    dungeon_visibility_updates = []
+    original_dungeon_update_exploration = dungeon_game.dungeon_update_exploration
+    def counted_dungeon_update_exploration():
+        dungeon_visibility_updates.append(True)
+        return original_dungeon_update_exploration()
+    dungeon_game.dungeon_update_exploration = counted_dungeon_update_exploration
+    first_dungeon_frame = dungeon_game.map_lines()
+    dungeon_game.dungeon_update_exploration = original_dungeon_update_exploration
+    assert first_dungeon_frame
+    assert len(dungeon_visibility_updates) == 1
     dungeon_game.dungeon_update_exploration()
     dungeon_rooms, dungeon_room_lookup = dungeon_game.dungeon_room_regions()
     assert len(dungeon_rooms) >= 2
@@ -20855,6 +21887,137 @@ def main() -> int:
     assert cave_game.observe_expanded_cave_wildlife(cave_animal)
     assert cave_animal["observed"] and cave_game.state.money == money_before_observation + 20
     assert cave_animal["species"] in cave_game.state.wilderness_cave_species_observed
+
+    # World opportunities are one persistent record across the notice board,
+    # Quest Log, giver dialogue, and the few residents inclined to fieldwork.
+    opportunity_game = FarmGame()
+    opportunity_state = opportunity_game.ensure_world_opportunity_state()
+    assert len(opportunity_state["opportunities"]) == 3
+    assert {row["kind"] for row in opportunity_state["opportunities"].values()} == {
+        "gather_delivery", "courier", "survey",
+    }
+    courier = next(
+        row for row in opportunity_state["opportunities"].values()
+        if row["kind"] == "courier"
+    )
+    courier_quest = opportunity_game.quest_record(courier["quest_id"])
+    assert courier_quest["world_opportunity_id"] == courier["id"]
+    assert opportunity_game.world_opportunity_for_giver(courier["giver_id"])["id"] == courier["id"]
+    assert opportunity_game.accept_quest(courier["quest_id"], announce=False)
+    assert courier["status"] == "claimed_player"
+    assert opportunity_game.state.inventory["Sealed Civic Parcel"] == 1
+
+    npc_work_game = FarmGame()
+    npc_work_state = npc_work_game.ensure_world_opportunity_state()
+    gather_work = next(
+        row for row in npc_work_state["opportunities"].values()
+        if row["kind"] == "gather_delivery"
+    )
+    gather_work["created_day"] = npc_work_game.world_opportunity_day() - 2
+    leader = next(
+        npc for npc in npc_work_game.active_town_npcs()
+        if npc_work_game.npc_can_lead_world_opportunity(npc)
+    )
+    party = npc_work_game.npc_claim_world_opportunity(gather_work, leader)
+    assert party["leader_id"] in party["member_ids"]
+    assert npc_work_game.world_opportunity_actor_away_entry(party["leader_id"])
+    # The first arrival selects a real resource. Blocking resource tiles use a
+    # nearby walkable approach, and the saved route then advances cardinally
+    # through the same terrain the player sees.
+    npc_work_game.advance_world_opportunity_party(party, 6)
+    action_target = dict(party.get("action_target", {}))
+    assert action_target and npc_work_game.world_opportunity_world_walkable(
+        int(party["target_world_x"]), int(party["target_world_y"])
+    )
+    if not npc_work_game.world_opportunity_world_walkable(
+        int(action_target["world_x"]), int(action_target["world_y"])
+    ):
+        assert (party["target_world_x"], party["target_world_y"]) != (
+            action_target["world_x"], action_target["world_y"]
+        )
+    previous_world = (int(party["world_x"]), int(party["world_y"]))
+    npc_work_game.advance_world_opportunity_party(party, 60)
+    assert abs(int(party["world_x"]) - previous_world[0]) + abs(int(party["world_y"]) - previous_world[1]) <= 10
+    party_chunk = npc_work_game.home_world_chunk_from_world(
+        int(party["world_x"]), int(party["world_y"])
+    )[:2]
+    visible_party = npc_work_game.world_opportunity_travelers_for_chunk(*party_chunk)
+    visible_positions = {(int(row["x"]), int(row["y"])) for row in visible_party}
+    assert len(visible_party) == len(party["member_ids"])
+    assert len(visible_positions) == len(visible_party)
+    assert any("Distance remaining:" in line for line in npc_work_game.world_opportunity_party_detail_lines(party["id"]))
+    for _ in range(500):
+        if party["status"] != "active":
+            break
+        npc_work_game.advance_world_opportunity_party(party, 60)
+    assert party["status"] == "completed"
+    assert gather_work["status"] == "resolved" and gather_work["resolved_by"] == "npc_party"
+    assert party["gathered"] >= party["quantity"]
+    assert any("Gathered 1" in line for line in party["history"])
+    sanitized_opportunities = GameState(
+        world_opportunity_state=npc_work_state
+    ).world_opportunity_state
+    assert sanitized_opportunities["opportunities"][gather_work["id"]]["status"] == "resolved"
+    assert sanitized_opportunities["parties"][party["id"]]["status"] == "completed"
+
+    # Generated-town requests use the same physical party system. The actual
+    # resident leaves their schedule, visits another saved resident, records a
+    # shared memory, returns to the requester, and resolves the linked quest.
+    generated_population = procedural_town_game.procedural_settlement_population(
+        int(procedural_town_plan["chunk_x"]), int(procedural_town_plan["chunk_y"])
+    )
+    generated_adults = [
+        row for row in generated_population.get("residents", {}).values()
+        if isinstance(row, dict)
+        and str(row.get("age_group", "Adult")) not in {"Baby", "Toddler", "Young Child", "Child", "Teen"}
+        and not bool(row.get("deceased", False))
+    ]
+    assert len(generated_adults) >= 3
+    generated_leader, generated_giver, generated_target = generated_adults[:3]
+    procedural_town_game.npc_progression_record(generated_leader)["adventure_inclination"] = "Adventurous"
+    generated_leader["social_connections"] = {}
+    generated_quest_id = "smoke:generated-world-neighbor-request"
+    generated_quest = procedural_town_game.register_quest({
+        "id": generated_quest_id, "title": "Check on a Neighbor", "category": "Town",
+        "description": "Visit a neighbor in person and report back.",
+        "giver_id": str(generated_giver["id"]), "giver_name": str(generated_giver["name"]),
+        "request_type": "neighbors", "procedural_resident_quest": True,
+        "procedural_town_chunk": [int(procedural_town_plan["chunk_x"]), int(procedural_town_plan["chunk_y"])],
+        "objectives": [{
+            "id": "talk:0", "kind": "talk", "target_id": str(generated_target["id"]),
+            "description": f"Speak with {generated_target['name']}.",
+            "current": 0, "target": 1, "complete": False,
+        }],
+        "turn_in": procedural_town_game.world_opportunity_actor_position(generated_giver),
+        "require_turn_in": False, "rewards": {"money": 120, "xp": 10, "reputation": 1},
+    }, accept=False)
+    generated_opportunity = {
+        "id": f"world-link:{generated_quest_id}", "quest_id": generated_quest_id,
+        "kind": "linked_quest", "request_type": "neighbors", "status": "open",
+        "title": str(generated_quest["title"]), "description": str(generated_quest["description"]),
+        "giver_id": str(generated_giver["id"]), "giver_name": str(generated_giver["name"]),
+        "giver_position": procedural_town_game.world_opportunity_actor_position(generated_giver),
+        "turn_in": procedural_town_game.world_opportunity_actor_position(generated_giver),
+        "created_day": procedural_town_game.world_opportunity_day() - 2,
+        "reward_money": 120, "town_key": procedural_world_key,
+        "procedural_town_chunk": [int(procedural_town_plan["chunk_x"]), int(procedural_town_plan["chunk_y"])],
+        "linked_existing_quest": True, "npc_competition_enabled": True, "history": [],
+    }
+    procedural_town_game.ensure_world_opportunity_state()["opportunities"][generated_opportunity["id"]] = generated_opportunity
+    assert procedural_town_game.world_opportunity_actor(str(generated_leader["id"])) is generated_leader
+    generated_party = procedural_town_game.npc_claim_world_opportunity(
+        generated_opportunity, generated_leader
+    )
+    assert generated_party and generated_party["task_kind"] == "neighbors"
+    assert procedural_town_game.world_opportunity_actor_away_entry(str(generated_leader["id"]))
+    for _ in range(300):
+        if generated_party["status"] != "active":
+            break
+        procedural_town_game.advance_world_opportunity_party(generated_party, 60)
+    assert generated_party["status"] == "completed"
+    assert generated_opportunity["status"] == "resolved"
+    assert procedural_town_game.quest_record(generated_quest_id).get("completed_by_npc") is True
+    assert any("checked in" in str(memory).lower() for memory in generated_target.get("memories", []))
 
     print("Elsewhere smoke test passed.")
     return 0

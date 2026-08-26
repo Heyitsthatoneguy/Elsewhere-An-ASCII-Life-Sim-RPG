@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+import time
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from ascii_farmstead_board_visuals import board_tile
@@ -188,6 +189,104 @@ def checkers_move_score(board: Board, move: Move, side: str) -> int:
     return score
 
 
+CHECKERS_WIN_SCORE = 1_000_000
+CHECKERS_DIFFICULTY_SEARCH = {
+    "Practiced": {"depth": 5, "time": 0.45, "blunder": 0.12},
+    "Expert": {"depth": 7, "time": 1.50, "blunder": 0.0},
+}
+
+
+def checkers_evaluate(board: Board) -> int:
+    """Score material, advancement, safety, and back-rank control for the AI."""
+    score = 0
+    for y, row in enumerate(board):
+        for x, piece in enumerate(row):
+            owner = checkers_owner(piece)
+            if not owner:
+                continue
+            king = piece.isupper()
+            value = 175 if king else 100
+            if not king:
+                value += (y if owner == "ai" else 7 - y) * 6
+            if x in {0, 7}:
+                value += 8
+            if not king and (
+                (owner == "ai" and y == 0) or (owner == "player" and y == 7)
+            ):
+                value += 10
+            score += value if owner == "ai" else -value
+    return score
+
+
+def _checkers_turn_after(
+    board: Board, side: str, move: Move,
+) -> Tuple[str, Optional[Point]]:
+    """Apply one jump/step and preserve mandatory multi-jump turns."""
+    result = apply_checkers_move(board, move)
+    tx, ty = result["to"]
+    if result["captured"] and not result["promoted"]:
+        if checkers_legal_moves(board, side, only_from=(tx, ty)):
+            return side, (tx, ty)
+    return ("ai" if side == "player" else "player"), None
+
+
+def _checkers_ordered_moves(board: Board, moves: Sequence[Move], side: str) -> List[Move]:
+    """Search captures, promotions, and useful central moves first."""
+    def score(move: Move) -> int:
+        tx, ty = move["to"]
+        fx, fy = move["from"]
+        piece = board[fy][fx]
+        value = 0
+        capture = move.get("capture")
+        if capture is not None:
+            captured_piece = board[capture[1]][capture[0]]
+            value += 1_000 + (175 if captured_piece.isupper() else 100)
+        promotes = (piece == "b" and ty == 7) or (piece == "r" and ty == 0)
+        if promotes:
+            value += 600
+        value += 12 - int(abs(3.5 - tx) * 3)
+        value += ty if side == "ai" else 7 - ty
+        return value
+
+    return sorted((dict(move) for move in moves), key=score, reverse=True)
+
+
+def _checkers_search(
+    board: Board,
+    side: str,
+    forced_from: Optional[Point],
+    depth: int,
+    alpha: int,
+    beta: int,
+    deadline: float,
+) -> int:
+    """Alpha-beta search that treats a multi-jump as one continuing turn."""
+    if time.monotonic() >= deadline:
+        return checkers_evaluate(board)
+    moves = checkers_legal_moves(board, side, only_from=forced_from)
+    if not moves:
+        return -CHECKERS_WIN_SCORE - depth if side == "ai" else CHECKERS_WIN_SCORE + depth
+    if depth <= 0 and not any(move.get("capture") for move in moves):
+        return checkers_evaluate(board)
+    maximizing = side == "ai"
+    best = -CHECKERS_WIN_SCORE * 2 if maximizing else CHECKERS_WIN_SCORE * 2
+    for move in _checkers_ordered_moves(board, moves, side):
+        child = copy_checkers_board(board)
+        next_side, next_forced = _checkers_turn_after(child, side, move)
+        score = _checkers_search(
+            child, next_side, next_forced, depth - 1, alpha, beta, deadline,
+        )
+        if maximizing:
+            best = max(best, score)
+            alpha = max(alpha, best)
+        else:
+            best = min(best, score)
+            beta = min(beta, best)
+        if beta <= alpha:
+            break
+    return best
+
+
 def choose_checkers_ai_move(
     board: Board,
     moves: Sequence[Move],
@@ -198,14 +297,42 @@ def choose_checkers_ai_move(
         raise ValueError("No legal checkers move.")
     if difficulty == "Friendly":
         return dict(rng.choice(list(moves)))
-    scored = sorted(
-        ((checkers_move_score(board, move, "ai"), rng.random(), move) for move in moves),
-        key=lambda row: (row[0], row[1]),
-        reverse=True,
+    config = CHECKERS_DIFFICULTY_SEARCH.get(
+        difficulty, CHECKERS_DIFFICULTY_SEARCH["Practiced"],
     )
-    if difficulty == "Practiced" and len(scored) > 1 and rng.random() < 0.35:
-        return dict(rng.choice(scored[: min(3, len(scored))])[2])
-    return dict(scored[0][2])
+    deadline = time.monotonic() + float(config["time"])
+    ordered = _checkers_ordered_moves(board, moves, "ai")
+    best_move = ordered[0]
+    for depth in range(1, int(config["depth"]) + 1):
+        alpha, beta = -CHECKERS_WIN_SCORE * 2, CHECKERS_WIN_SCORE * 2
+        depth_best: Optional[Move] = None
+        depth_score = -CHECKERS_WIN_SCORE * 2
+        aborted = False
+        for move in ordered:
+            if depth > 1 and time.monotonic() >= deadline:
+                aborted = True
+                break
+            child = copy_checkers_board(board)
+            next_side, next_forced = _checkers_turn_after(child, "ai", move)
+            score = _checkers_search(
+                child, next_side, next_forced, depth - 1, alpha, beta, deadline,
+            )
+            if depth > 1 and time.monotonic() >= deadline:
+                aborted = True
+                break
+            if depth_best is None or score > depth_score:
+                depth_score, depth_best = score, move
+            alpha = max(alpha, score)
+        if aborted:
+            break
+        if depth_best is not None:
+            best_move = depth_best
+            ordered.remove(depth_best)
+            ordered.insert(0, depth_best)
+    blunder = float(config.get("blunder", 0.0))
+    if blunder and len(ordered) > 1 and rng.random() < blunder:
+        return dict(rng.choice(ordered[: min(3, len(ordered))]))
+    return dict(best_move)
 
 
 class CheckersMixin:
@@ -320,7 +447,7 @@ class CheckersMixin:
             "- Move with WASD, arrows, or numpad. N jumps to the next movable piece; Z/Enter selects and moves.",
             "- The board uses white and dark-grey tiles; brackets mark the cursor, angles mark selection, and parentheses mark destinations.",
             "- B/X/Escape/Q/Tab clears a selection; press again to pause and save the match.",
-            "- Friendly, Practiced, and Expert opponents use increasingly careful move selection.",
+            "- Friendly plays casually. Practiced and Expert search several turns ahead and understand forced jump chains.",
         ]
 
     def _checkers_piece_glyph(self, piece: str) -> str:
@@ -585,7 +712,7 @@ class CheckersMixin:
                 for difficulty, hint in (
                     ("Friendly", "casual opponent"),
                     ("Practiced", "balanced opponent"),
-                    ("Expert", "careful opponent"),
+                    ("Expert", "deep search with forced-jump planning"),
                 ):
                     items.append(MenuItem(
                         label=f"New match: {difficulty}",

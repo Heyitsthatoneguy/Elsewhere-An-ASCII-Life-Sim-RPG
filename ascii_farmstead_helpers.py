@@ -13,12 +13,15 @@ from typing import List, Optional
 from ascii_farmstead_support import C
 from ascii_farmstead_data import (
     CALENDAR_EVENTS,
+    CROP_DATA,
     FISH_DATA,
     FISH_ITEMS,
+    FESTIVAL_DATA,
     FOOD_DATA,
     MINE_FLOOR_THEMES,
     MONTH_NAMES,
     SEASON_WEATHER_TABLES,
+    SEASON_PROFILE_DATA,
     WEEKDAY_NAMES,
     WILDERNESS_BIOME_DESCRIPTIONS,
     WILDERNESS_BIOME_NAMES,
@@ -149,6 +152,12 @@ def quantity_agreement(quantity: object, singular: str, plural: Optional[str] = 
 
 def calendar_events_for(month: int, day: int, year: int) -> List[str]:
     events = list(CALENDAR_EVENTS.get((month, day), []))
+    events.extend(
+        str(festival.get("name", "Festival"))
+        for festival in FESTIVAL_DATA.values()
+        if int(festival.get("month", 0)) == int(month)
+        and int(festival.get("day", 0)) == int(day)
+    )
     if day == 1:
         events.append("Monthly seed stock reminder")
     if day == days_in_month(month, year):
@@ -259,6 +268,32 @@ def season_for_month(month: int) -> str:
     if month in [9, 10, 11]:
         return "Fall"
     return "Winter"
+
+
+def season_daylight_window(season: str) -> tuple[int, int]:
+    """Return the readable whole-hour sunrise and sunset for a season."""
+    profile = SEASON_PROFILE_DATA.get(str(season), SEASON_PROFILE_DATA["Spring"])
+    return int(profile.get("sunrise", 6)), int(profile.get("sunset", 19))
+
+
+def crop_seasons(crop: object) -> List[str]:
+    """Return every season in which a crop can grow, preserving old data."""
+    data = CROP_DATA.get(str(crop), {}) if not isinstance(crop, dict) else crop
+    explicit = data.get("seasons", []) if isinstance(data, dict) else []
+    if isinstance(explicit, (list, tuple, set)) and explicit:
+        return [str(value) for value in explicit if str(value)]
+    primary = str(data.get("season", "")) if isinstance(data, dict) else ""
+    return [primary] if primary else []
+
+
+def crop_valid_for_season(crop: object, season: str) -> bool:
+    seasons = crop_seasons(crop)
+    return "Any" in seasons or str(season) in seasons
+
+
+def crop_season_label(crop: object) -> str:
+    seasons = crop_seasons(crop)
+    return "Any" if "Any" in seasons else ", ".join(seasons) or "Unknown"
 
 def random_weather_for_season(season: str) -> str:
     options, weights = SEASON_WEATHER_TABLES.get(season, SEASON_WEATHER_TABLES["Spring"])
@@ -458,6 +493,10 @@ __all__ = [
     'is_leap_year',
     'days_in_month',
     'season_for_month',
+    'season_daylight_window',
+    'crop_seasons',
+    'crop_valid_for_season',
+    'crop_season_label',
     'random_weather_for_season',
     'forecast_weather_for_date',
     'weather_forecast_summary',

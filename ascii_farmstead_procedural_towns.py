@@ -4185,6 +4185,11 @@ class ProceduralTownRuntimeMixin:
                 f"{building.get('name', 'The building')} is closed. It opens at {opens}."
             )
             return False
+        completed_guide = ""
+        if hasattr(self, "complete_guided_journey_for_place"):
+            completed_guide = self.complete_guided_journey_for_place(
+                f"settlement:{building.get('id', '')}"
+            )
         self.state.current_procedural_settlement_key = settlement_chunk_key(
             int(plan["chunk_x"]),
             int(plan["chunk_y"]),
@@ -4198,7 +4203,11 @@ class ProceduralTownRuntimeMixin:
         side = self.procedural_town_building_door_side(building)
         self.state.player_x, self.state.player_y = self.procedural_town_interior_entry_landing(interior, building)
         self.state.facing = {"north": "DOWN", "south": "UP", "west": "RIGHT", "east": "LEFT"}[side]
-        self.set_message(f"You entered {building.get('name', 'the building')}.")
+        entered_message = f"You entered {building.get('name', 'the building')}."
+        self.set_message(
+            f"{completed_guide} guided you here. {entered_message}"
+            if completed_guide else entered_message
+        )
         return True
 
     def exit_procedural_town_building(self) -> bool:
@@ -5837,6 +5846,19 @@ class ProceduralTownRuntimeMixin:
         ):
             if bool(resident.get("deceased", False)):
                 continue
+            opportunity_trip = (
+                self.world_opportunity_actor_away_entry(str(resident.get("id", "")))
+                if hasattr(self, "world_opportunity_actor_away_entry") else {}
+            )
+            if opportunity_trip:
+                resident["runtime_location"] = "regional_travel"
+                resident["runtime_schedule_location"] = "regional_travel"
+                resident["runtime_activity"] = str(
+                    opportunity_trip.get("activity", "undertaking posted work in the world")
+                )
+                resident["runtime_transition"] = ""
+                resident["runtime_transition_target"] = ""
+                continue
             active_trip = self.regional_town_life_state().setdefault(
                 "resident_trips", {}
             ).get(str(resident.get("id", "")), {})
@@ -6805,10 +6827,15 @@ class ProceduralTownRuntimeMixin:
             ("chat", "Ask What's on Their Mind", "Current activity and concerns"),
             ("work", "Ask About Their Work", str(resident.get("job_title", resident.get("profession", "Local work")))),
             ("home", "Ask About Home", "Household and daily routine"),
+            ("background", "Ask Where They're From", "Upbringing and how they came here"),
+            ("interests", "Ask About Their Interests", "Hobbies, tastes, and time away from work"),
+            ("people", "Ask About People They Know", "Friends, family, coworkers, and disagreements"),
             ("settlement", "Ask About This Town", str(plan.get("name", "The settlement"))),
+            ("concerns", "Ask If Anything Is Wrong", "Current personal or community concerns"),
             ("season", "Ask About the Season", str(getattr(self.state, "season", "Season"))),
             ("weather", "Ask About the Weather", str(getattr(self.state, "weather", "Weather"))),
             ("rumor", "Ask What They've Heard", "Local people and recent talk"),
+            ("request", "Ask If They Need Help", "A persistent job with tracked objectives and rewards"),
             ("personal", "Ask About Their Goals", "Requires growing trust"),
             ("memory", "Ask What They Remember", "Shared history"),
             ("secret", "Ask What They Rarely Share", "Requires deep trust"),
@@ -6891,6 +6918,49 @@ class ProceduralTownRuntimeMixin:
             LEFT_PANEL_WIDTH,
             LEFT_PANEL_HEIGHT,
         )
+        if topic == "request":
+            request = dict(result.get("request", {}) or {})
+            status = self.procedural_settlement_request_status(
+                int(plan["chunk_x"]), int(plan["chunk_y"]), resident_id
+            )
+            quest_id = str(request.get("quest_id", ""))
+            if status == "Available":
+                choice = self.vertical_panel_select(
+                    str(request.get("title", "Resident Request")),
+                    [
+                        MenuItem(label="Accept", value="accept", enabled=True,
+                                 hint=str(request.get("objective_summary", "Track this request"))),
+                        MenuItem(label="Not Now", value=MENU_BACK, enabled=True),
+                    ],
+                    LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT, return_back=True,
+                )
+                if choice and choice.value == "accept":
+                    self.accept_procedural_settlement_request(
+                        int(plan["chunk_x"]), int(plan["chunk_y"]), resident_id
+                    )
+                    self.autosave_with_message(
+                        f"Accepted {resident.get('name', 'the resident')}'s request."
+                    )
+                else:
+                    self.set_message("You leave the offer open for another time.")
+            elif status == "Ready":
+                if not self.complete_procedural_settlement_request(
+                    int(plan["chunk_x"]), int(plan["chunk_y"]), resident_id
+                ):
+                    self.set_message("The request isn't ready to turn in yet.")
+            elif quest_id and status not in {"Completed", "No longer available"}:
+                choice = self.vertical_panel_select(
+                    str(request.get("title", "Resident Request")),
+                    [
+                        MenuItem(label="Track This Quest", value="track", enabled=True,
+                                 hint=str(request.get("objective_summary", status))),
+                        MenuItem(label="Back", value=MENU_BACK, enabled=True),
+                    ],
+                    LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT, return_back=True,
+                )
+                if choice and choice.value == "track":
+                    self.track_quest(quest_id)
+            return result
         response = self.npc_dialogue_response_choice(
             resident,
             influence_available=influence_available,
@@ -8368,14 +8438,10 @@ class ProceduralTownRuntimeMixin:
                     hint=str(self.procedural_town_market_profile(plan).get("headline", "")),
                 ),
                 MenuItem(
-                    label="Civic work board",
-                    value="commission",
-                    enabled=not bool(commission.get("completed")),
-                    hint=(
-                        "Completed today"
-                        if commission.get("completed")
-                        else f"{commission.get('quantity')} {commission.get('item')} | carried {commission_carried}"
-                    ),
+                    label="Local opportunity board",
+                    value="opportunities",
+                    enabled=hasattr(self, "ensure_procedural_town_opportunities"),
+                    hint="Persistent requests from named residents",
                 ),
                 MenuItem(
                     label="Local concern",
@@ -8472,24 +8538,12 @@ class ProceduralTownRuntimeMixin:
                     LEFT_PANEL_WIDTH,
                     LEFT_PANEL_HEIGHT,
                 )
-            elif choice.value == "commission":
-                if commission_carried >= int(commission.get("quantity", 0)):
-                    self.complete_procedural_town_commission(plan)
-                else:
-                    self.vertical_panel_view(
-                        "Civic Work Board",
-                        [
-                            "DAILY CIVIC WORK ORDER",
-                            "",
-                            f"Needed: {commission.get('quantity')} {commission.get('item')}",
-                            f"Carried: {commission_carried}",
-                            f"Reward: {commission.get('reward')}g",
-                            "",
-                            "Completion improves both reputation and town development.",
-                        ],
-                        LEFT_PANEL_WIDTH,
-                        LEFT_PANEL_HEIGHT,
-                    )
+            elif choice.value == "opportunities":
+                self.ensure_procedural_town_opportunities(plan)
+                self.world_opportunity_board_menu(
+                    self.world_opportunity_town_key(plan),
+                    f"{plan.get('name', 'Town')} Opportunity Board",
+                )
             elif choice.value == "story":
                 if self.procedural_town_story_ready(plan):
                     self.complete_procedural_town_story_stage(plan)

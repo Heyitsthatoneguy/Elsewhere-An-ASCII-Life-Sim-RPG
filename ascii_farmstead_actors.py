@@ -2291,17 +2291,64 @@ class ActorNavigationMixin:
             if (
                 str(record.get("location", "")) != str(self.state.location)
                 or position is None
-                or manhattan_distance(
-                    position,
-                    (int(self.state.player_x), int(self.state.player_y)),
-                ) > 10
             ):
                 self.recover_travel_follower(follower_id)
+            elif manhattan_distance(
+                position,
+                (int(self.state.player_x), int(self.state.player_y)),
+            ) > 10:
+                # A follower who is still on this map is a real actor with a
+                # route to walk, not a missing transition record.  Recovering
+                # here used to visibly teleport distant companions beside the
+                # player before their pathfinder had a chance to catch up.
+                record["activity"] = "hurrying to catch up with you"
             if (
                 str(record.get("mode", "")) == "follow"
                 and str(record.get("location", "")) == str(self.state.location)
             ):
                 self.record_travel_follower_outing(follower_id)
+
+    def travel_follower_route_goals(
+        self,
+        follower_id: str,
+        preferred: Position,
+        occupied: Set[Position],
+    ) -> List[Position]:
+        """Return free formation approaches without requiring one exact tile."""
+        available = lambda x, y: self.travel_follower_tile_available(
+            follower_id,
+            x,
+            y,
+            occupied_positions=occupied,
+        )
+        player = (int(self.state.player_x), int(self.state.player_y))
+        current = self.travel_follower_position(follower_id)
+        if available(*preferred):
+            return [preferred]
+        # Crowds and narrow rooms commonly occupy the ideal formation cell.
+        # Search a small ring instead of declaring the route impossible (and
+        # previously teleporting the follower through the obstruction).
+        for radius in range(1, 4):
+            candidates: List[Position] = []
+            for dy in range(-radius, radius + 1):
+                for dx in range(-radius, radius + 1):
+                    if abs(dx) + abs(dy) != radius:
+                        continue
+                    point = (player[0] + dx, player[1] + dy)
+                    if point == current:
+                        continue
+                    if available(*point):
+                        candidates.append(point)
+            if candidates:
+                candidates.sort(
+                    key=lambda point: (
+                        manhattan_distance(point, preferred),
+                        point[1],
+                        point[0],
+                    )
+                )
+                return candidates
+        return []
 
     def update_travel_followers_after_player_move(
         self,
@@ -2330,19 +2377,19 @@ class ActorNavigationMixin:
                 y,
                 occupied_positions=occupied,
             )
-            if available(*preferred):
-                goals = [preferred]
-            else:
-                goals = []
-                for dx, dy in CARDINAL_STEPS:
-                    goal = (player[0] + dx, player[1] + dy)
-                    if available(*goal):
-                        goals.append(goal)
+            goals = self.travel_follower_route_goals(
+                follower_id, preferred, occupied
+            )
             if distance <= 1 and not goals:
                 record["activity"] = "keeping pace beside you"
                 continue
             moved = 0
-            movement_budget = 2 if distance >= 5 else 1
+            movement_budget = (
+                4 if distance >= 10
+                else 3 if distance >= 6
+                else 2 if distance >= 3
+                else 1
+            )
             current = position
             while moved < movement_budget and current not in goals:
                 step = shortest_path_step(
@@ -2364,7 +2411,7 @@ class ActorNavigationMixin:
                 else:
                     record["activity"] = "following you"
             elif distance > 6:
-                self.recover_travel_follower(follower_id)
+                record["activity"] = "waiting for a clear route to you"
             else:
                 record["activity"] = "finding a path to you"
 

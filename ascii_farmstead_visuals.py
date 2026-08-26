@@ -1022,13 +1022,15 @@ def outdoor_time_color(
     hour: int,
     lit: bool = False,
     ambient: bool = True,
+    sunrise: int = 6,
+    sunset: int = 19,
 ) -> str:
     """Apply restrained time-of-day tint while retaining semantic hue."""
     if not ambient or lit:
         return C.LAMP if lit else base_color
     hour = int(hour) % 24
-    if hour >= 21 or hour < 5:
-        return C.DIM + base_color
-    if hour >= 19 or hour < 7:
+    sunrise = max(0, min(23, int(sunrise)))
+    sunset = max(sunrise + 1, min(24, int(sunset)))
+    if hour >= sunset - 2 or hour < sunrise:
         return C.DIM + base_color
     return base_color

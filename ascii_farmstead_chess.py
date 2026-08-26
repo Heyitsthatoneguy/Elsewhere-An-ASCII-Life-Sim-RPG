@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+import time
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from ascii_farmstead_board_visuals import board_tile
@@ -375,6 +376,84 @@ def chess_match_outcome(match: Dict[str, object]) -> str:
     return "draw_stalemate"
 
 
+_CHESS_PIECE_SQUARE_TABLES = {
+    "P": (
+        (0, 0, 0, 0, 0, 0, 0, 0),
+        (50, 50, 50, 50, 50, 50, 50, 50),
+        (10, 10, 20, 30, 30, 20, 10, 10),
+        (5, 5, 10, 25, 25, 10, 5, 5),
+        (0, 0, 0, 20, 20, 0, 0, 0),
+        (5, -5, -10, 0, 0, -10, -5, 5),
+        (5, 10, 10, -20, -20, 10, 10, 5),
+        (0, 0, 0, 0, 0, 0, 0, 0),
+    ),
+    "N": (
+        (-50, -40, -30, -30, -30, -30, -40, -50),
+        (-40, -20, 0, 0, 0, 0, -20, -40),
+        (-30, 0, 10, 15, 15, 10, 0, -30),
+        (-30, 5, 15, 20, 20, 15, 5, -30),
+        (-30, 0, 15, 20, 20, 15, 0, -30),
+        (-30, 5, 10, 15, 15, 10, 5, -30),
+        (-40, -20, 0, 5, 5, 0, -20, -40),
+        (-50, -40, -30, -30, -30, -30, -40, -50),
+    ),
+    "B": (
+        (-20, -10, -10, -10, -10, -10, -10, -20),
+        (-10, 0, 0, 0, 0, 0, 0, -10),
+        (-10, 0, 5, 10, 10, 5, 0, -10),
+        (-10, 5, 5, 10, 10, 5, 5, -10),
+        (-10, 0, 10, 10, 10, 10, 0, -10),
+        (-10, 10, 10, 10, 10, 10, 10, -10),
+        (-10, 5, 0, 0, 0, 0, 5, -10),
+        (-20, -10, -10, -10, -10, -10, -10, -20),
+    ),
+    "R": (
+        (0, 0, 0, 0, 0, 0, 0, 0),
+        (5, 10, 10, 10, 10, 10, 10, 5),
+        (-5, 0, 0, 0, 0, 0, 0, -5),
+        (-5, 0, 0, 0, 0, 0, 0, -5),
+        (-5, 0, 0, 0, 0, 0, 0, -5),
+        (-5, 0, 0, 0, 0, 0, 0, -5),
+        (-5, 0, 0, 0, 0, 0, 0, -5),
+        (0, 0, 0, 5, 5, 0, 0, 0),
+    ),
+    "Q": (
+        (-20, -10, -10, -5, -5, -10, -10, -20),
+        (-10, 0, 0, 0, 0, 0, 0, -10),
+        (-10, 0, 5, 5, 5, 5, 0, -10),
+        (-5, 0, 5, 5, 5, 5, 0, -5),
+        (0, 0, 5, 5, 5, 5, 0, -5),
+        (-10, 5, 5, 5, 5, 5, 0, -10),
+        (-10, 0, 5, 0, 0, 0, 0, -10),
+        (-20, -10, -10, -5, -5, -10, -10, -20),
+    ),
+    "K": (
+        (-30, -40, -40, -50, -50, -40, -40, -30),
+        (-30, -40, -40, -50, -50, -40, -40, -30),
+        (-30, -40, -40, -50, -50, -40, -40, -30),
+        (-30, -40, -40, -50, -50, -40, -40, -30),
+        (-20, -30, -30, -40, -40, -30, -30, -20),
+        (-10, -20, -20, -20, -20, -20, -20, -10),
+        (20, 20, 0, 0, 0, 20, 20, 20),
+        (20, 30, 10, 0, 0, 10, 30, 20),
+    ),
+}
+
+CHESS_MATE_SCORE = 1_000_000
+CHESS_DIFFICULTY_SEARCH = {
+    "Practiced": {"depth": 2, "time": 0.35, "blunder": 0.15},
+    "Expert": {"depth": 3, "time": 1.25, "blunder": 0.0},
+}
+
+
+def _chess_piece_square_bonus(piece: str, x: int, y: int, owner: str) -> int:
+    """Return a development/placement bonus mirrored for Black."""
+    table = _CHESS_PIECE_SQUARE_TABLES.get(piece.upper())
+    if table is None:
+        return 0
+    return table[7 - y][x] if owner == "ai" else table[y][x]
+
+
 def chess_evaluate(board: Board, side: str) -> int:
     total = 0
     for y, row in enumerate(board):
@@ -382,45 +461,162 @@ def chess_evaluate(board: Board, side: str) -> int:
             owner = chess_owner(piece)
             if not owner:
                 continue
-            value = CHESS_VALUES[piece.upper()]
-            center = max(0, 6 - int(abs(3.5 - x) + abs(3.5 - y)))
-            total += (value + center) * (1 if owner == side else -1)
+            value = CHESS_VALUES[piece.upper()] + _chess_piece_square_bonus(piece, x, y, owner)
+            total += value * (1 if owner == side else -1)
     return total
 
 
-def choose_chess_ai_move(match: Dict[str, object], difficulty: str, rng: random.Random) -> Move:
-    moves = chess_legal_moves(match, "ai")
+def _chess_search_clone(match: Dict[str, object]) -> Dict[str, object]:
+    """Clone only the position fields needed while searching."""
+    en_passant = match.get("en_passant")
+    return {
+        "board": copy_chess_board(match["board"]),
+        "castling": str(match.get("castling", "")),
+        "en_passant": list(en_passant) if isinstance(en_passant, (list, tuple)) else None,
+        "turn": str(match.get("turn", "ai")),
+        "halfmove_clock": int(match.get("halfmove_clock", 0) or 0),
+        "fullmove_number": int(match.get("fullmove_number", 1) or 1),
+        "move_history": [], "position_counts": {}, "captured": [],
+    }
+
+
+def _chess_move_order_score(board: Board, move: Move) -> int:
+    score = 0
+    capture = move.get("capture")
+    if capture is not None:
+        cx, cy = capture
+        fx, fy = move["from"]
+        victim, attacker = board[cy][cx], board[fy][fx]
+        if victim != CHESS_EMPTY:
+            score += 10 * CHESS_VALUES[victim.upper()] - CHESS_VALUES[attacker.upper()]
+    if move.get("promotion"):
+        score += 8_000
+    return score
+
+
+def _chess_search_moves(match: Dict[str, object], side: str, forcing_only: bool = False) -> List[Move]:
+    """Generate legal moves using lean clones and order forcing moves first."""
+    board = match["board"]
+    moves: List[Move] = []
+    for y in range(8):
+        for x in range(8):
+            if chess_owner(board[y][x]) != side:
+                continue
+            for move in chess_pseudo_moves(match, x, y):
+                if forcing_only and move.get("capture") is None and not move.get("promotion"):
+                    continue
+                probe = _chess_search_clone(match)
+                apply_chess_move(probe, move, record=False)
+                if not chess_in_check(probe["board"], side):
+                    moves.append(move)
+    moves.sort(key=lambda move: _chess_move_order_score(board, move), reverse=True)
+    return moves
+
+
+def _chess_quiescence(
+    match: Dict[str, object], side: str, alpha: int, beta: int,
+    deadline: float, depth: int = 4,
+) -> int:
+    """Resolve captures and all required check evasions at the search horizon."""
+    stand_pat = chess_evaluate(match["board"], side)
+    if time.monotonic() >= deadline:
+        return stand_pat
+    in_check = chess_in_check(match["board"], side)
+    if depth <= 0 and not in_check:
+        return stand_pat
+    if not in_check:
+        if stand_pat >= beta:
+            return beta
+        if stand_pat > alpha:
+            alpha = stand_pat
+    moves = _chess_search_moves(match, side, forcing_only=not in_check)
+    if in_check and not moves:
+        return -CHESS_MATE_SCORE - max(0, depth)
+    for move in moves:
+        child = _chess_search_clone(match)
+        apply_chess_move(child, move, record=False)
+        score = -_chess_quiescence(
+            child, chess_opponent(side), -beta, -alpha, deadline, depth - 1,
+        )
+        if score >= beta:
+            return beta
+        if score > alpha:
+            alpha = score
+    return alpha
+
+
+def _chess_negamax(
+    match: Dict[str, object], side: str, depth: int,
+    alpha: int, beta: int, deadline: float,
+) -> int:
+    if time.monotonic() >= deadline:
+        return chess_evaluate(match["board"], side)
+    moves = _chess_search_moves(match, side)
+    if not moves:
+        return -CHESS_MATE_SCORE - depth if chess_in_check(match["board"], side) else 0
+    if depth <= 0:
+        return _chess_quiescence(match, side, alpha, beta, deadline)
+    for move in moves:
+        child = _chess_search_clone(match)
+        apply_chess_move(child, move, record=False)
+        score = -_chess_negamax(
+            child, chess_opponent(side), depth - 1, -beta, -alpha, deadline,
+        )
+        if score >= beta:
+            return beta
+        if score > alpha:
+            alpha = score
+    return alpha
+
+
+def _chess_search_best(match: Dict[str, object], difficulty: str, rng: random.Random) -> Move:
+    config = CHESS_DIFFICULTY_SEARCH.get(difficulty, CHESS_DIFFICULTY_SEARCH["Practiced"])
+    deadline = time.monotonic() + float(config["time"])
+    root = _chess_search_clone(match)
+    moves = _chess_search_moves(root, "ai")
     if not moves:
         raise ValueError("No legal chess move.")
+    best_move = moves[0]
+    for depth in range(1, int(config["depth"]) + 1):
+        alpha, beta = -CHESS_MATE_SCORE * 2, CHESS_MATE_SCORE * 2
+        depth_best: Optional[Move] = None
+        depth_score = -CHESS_MATE_SCORE * 2
+        aborted = False
+        for move in moves:
+            if depth > 1 and time.monotonic() >= deadline:
+                aborted = True
+                break
+            child = _chess_search_clone(root)
+            apply_chess_move(child, move, record=False)
+            score = -_chess_negamax(child, "player", depth - 1, -beta, -alpha, deadline)
+            if depth > 1 and time.monotonic() >= deadline:
+                aborted = True
+                break
+            if depth_best is None or score > depth_score:
+                depth_score, depth_best = score, move
+            if score > alpha:
+                alpha = score
+        if aborted:
+            break
+        if depth_best is not None:
+            best_move = depth_best
+            moves.remove(depth_best)
+            moves.insert(0, depth_best)
+    blunder = float(config.get("blunder", 0.0))
+    if blunder and len(moves) > 1 and rng.random() < blunder:
+        return dict(rng.choice(moves[: min(3, len(moves))]))
+    return dict(best_move)
+
+
+def choose_chess_ai_move(match: Dict[str, object], difficulty: str, rng: random.Random) -> Move:
     if difficulty == "Friendly":
+        moves = chess_legal_moves(match, "ai")
+        if not moves:
+            raise ValueError("No legal chess move.")
         captures = [move for move in moves if move.get("capture")]
         pool = captures + list(moves) if captures else list(moves)
         return dict(rng.choice(pool))
-    scored: List[Tuple[int, float, Move]] = []
-    for move in moves:
-        simulated = clone_chess_match(match)
-        apply_chess_move(simulated, move)
-        outcome = chess_match_outcome(simulated)
-        if outcome == "win_checkmate":
-            score = 1_000_000
-        else:
-            score = chess_evaluate(simulated["board"], "ai")
-            if chess_in_check(simulated["board"], "player"):
-                score += 35
-            if difficulty == "Expert":
-                replies = chess_legal_moves(simulated, "player")
-                if replies:
-                    reply_scores = []
-                    for reply in replies:
-                        answered = clone_chess_match(simulated)
-                        apply_chess_move(answered, reply)
-                        reply_scores.append(chess_evaluate(answered["board"], "ai"))
-                    score = min(reply_scores)
-        scored.append((score, rng.random(), move))
-    scored.sort(key=lambda row: (row[0], row[1]), reverse=True)
-    if difficulty == "Practiced" and len(scored) > 1 and rng.random() < 0.25:
-        return dict(rng.choice(scored[: min(3, len(scored))])[2])
-    return dict(scored[0][2])
+    return _chess_search_best(match, difficulty, rng)
 
 
 class ChessMixin:
@@ -502,7 +698,7 @@ class ChessMixin:
             "- White and dark-grey tiles form the board; brackets mark the cursor, angles mark selection, and parentheses mark destinations.",
             "- Move with WASD, arrows, or numpad. N jumps to the next movable piece; Z/Enter selects and moves.",
             "- B/X/Escape/Q/Tab clears selection, then pauses.",
-            "- Friendly, Practiced, and Expert opponents use bounded increasingly careful evaluation.",
+            "- Friendly plays casually. Practiced and Expert search ahead, with Expert resolving longer tactical sequences.",
         ]
 
     def _draw_chess_board(self, match: Dict[str, object], cursor: Point, selected: Optional[Point], destinations: Sequence[Point]) -> None:
@@ -714,7 +910,9 @@ class ChessMixin:
                 ])
             else:
                 for difficulty, hint in (
-                    ("Friendly", "casual opponent"), ("Practiced", "balanced opponent"), ("Expert", "two-ply tactical opponent"),
+                    ("Friendly", "casual opponent"),
+                    ("Practiced", "searches short tactics"),
+                    ("Expert", "searches deeper and resolves exchanges"),
                 ):
                     items.append(MenuItem(label=f"New match: {difficulty}", value=f"new:{difficulty}", enabled=True, hint=hint))
             items.extend([

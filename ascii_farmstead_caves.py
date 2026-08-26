@@ -892,7 +892,10 @@ class ExpandedCaveMixin:
             return False
         kind = str(feature.get("kind", ""))
         required = str(FEATURE_DATA.get(kind, {}).get("tool", ""))
-        if kind == "tide_pool" and tool == "Fishing Rod":
+        if kind == "tide_pool" and (
+            tool == "Fishing Rod"
+            or (hasattr(self, "is_fishing_rod") and self.is_fishing_rod(tool))
+        ):
             if not self.owns_tool("Fishing Rod"):
                 self.set_message("You need a Fishing Rod to fish the underground pool.")
                 return True

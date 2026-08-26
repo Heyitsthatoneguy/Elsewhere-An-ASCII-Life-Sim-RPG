@@ -605,27 +605,34 @@ class QuestSystemMixin:
                 return {
                     "location": "Wilderness", "world_x": int(world[0]), "world_y": int(world[1]),
                     "label": label, "place_id": place_id,
+                    "arrival_mode": "approach" if place_id not in {"town:farm", "town:mine"} else "tile",
                 }
         if kind == "wilderness" and hasattr(self, "wilderness_world_coords"):
             chunk_x, chunk_y = int(place.get("x", 0)), int(place.get("y", 0))
-            world_x, world_y = self.wilderness_world_coords(chunk_x, chunk_y, 43, 19)
+            if "world_x" in place and "world_y" in place:
+                world_x, world_y = int(place["world_x"]), int(place["world_y"])
+            else:
+                local_x = int(place.get("local_x", 43))
+                local_y = int(place.get("local_y", 19))
+                world_x, world_y = self.wilderness_world_coords(chunk_x, chunk_y, local_x, local_y)
             return {
                 "location": "Wilderness", "chunk_x": chunk_x, "chunk_y": chunk_y,
                 "world_x": int(world_x), "world_y": int(world_y),
                 "label": label, "place_id": place_id,
             }
         if kind == "settlement":
-            destination = self.quest_capture_current_destination()
-            destination.update({
-                "x": int(place.get("x", destination.get("x", 0))),
-                "y": int(place.get("y", destination.get("y", 0))),
-                "label": label, "place_id": place_id,
-            })
-            if destination.get("location") == "Wilderness" and hasattr(self, "wilderness_world_coords"):
-                world_x, world_y = self.wilderness_world_coords(
-                    int(self.state.wilderness_chunk_x), int(self.state.wilderness_chunk_y),
-                    int(destination["x"]), int(destination["y"]),
-                )
+            plan = self.current_procedural_town_plan() if hasattr(self, "current_procedural_town_plan") else {}
+            chunk_x = int(plan.get("chunk_x", getattr(self.state, "wilderness_chunk_x", 0)) or 0)
+            chunk_y = int(plan.get("chunk_y", getattr(self.state, "wilderness_chunk_y", 0)) or 0)
+            local_x = int(place.get("x", 0) or 0)
+            local_y = int(place.get("y", 0) or 0)
+            destination = {
+                "location": "Wilderness", "chunk_x": chunk_x, "chunk_y": chunk_y,
+                "x": local_x, "y": local_y, "label": label,
+                "place_id": place_id, "arrival_mode": "approach",
+            }
+            if hasattr(self, "wilderness_world_coords"):
+                world_x, world_y = self.wilderness_world_coords(chunk_x, chunk_y, local_x, local_y)
                 destination.update({"world_x": int(world_x), "world_y": int(world_y)})
             return destination
         return {}
@@ -826,6 +833,8 @@ class QuestSystemMixin:
         return rows
 
     def unified_quest_journal_lines(self) -> List[str]:
+        if hasattr(self, "ensure_world_opportunity_state"):
+            self.ensure_world_opportunity_state()
         self.sync_legacy_quest_records()
         self.refresh_quest_states()
         records = list(self.ensure_quest_state().values())
@@ -854,6 +863,8 @@ class QuestSystemMixin:
 
     def show_unified_quest_log_menu(self):
         while True:
+            if hasattr(self, "ensure_world_opportunity_state"):
+                self.ensure_world_opportunity_state()
             self.sync_legacy_quest_records()
             self.refresh_quest_states()
             records = list(self.ensure_quest_state().values())
@@ -934,11 +945,17 @@ class QuestSystemMixin:
     def dialogue_quest_id(
         self, actor: Dict[str, object], kind: str, situation: Dict[str, object]
     ) -> str:
+        linked_id = str(situation.get("quest_id", "") or "")
+        if linked_id:
+            return linked_id
         return f"dialogue:{kind}:{actor.get('id') or actor.get('name')}:{situation.get('id', situation.get('type', 'work'))}"
 
     def dialogue_quest_for_situation(
         self, actor: Dict[str, object], kind: str, situation: Dict[str, object]
     ) -> Dict[str, object]:
+        linked = situation.get("quest_record", {})
+        if isinstance(linked, dict) and linked.get("id"):
+            return linked
         record = dict(situation.get("record", {}) or {})
         situation_type = str(situation.get("type", "work"))
         item = str(record.get("item", situation.get("item", "")) or "")
@@ -987,7 +1004,12 @@ class QuestSystemMixin:
         self, actor: Dict[str, object], kind: str, situation: Dict[str, object]
     ) -> Dict[str, object]:
         record = self.dialogue_quest_for_situation(actor, kind, situation)
-        quest = self.register_quest(record, accept=True)
+        linked_id = str(situation.get("quest_id", "") or "")
+        if linked_id and self.quest_record(linked_id):
+            self.accept_quest(linked_id, announce=False)
+            quest = self.quest_record(linked_id)
+        else:
+            quest = self.register_quest(record, accept=True)
         self.track_quest(str(quest.get("id", "")), announce=False)
         return quest
 
@@ -1046,6 +1068,12 @@ class QuestSystemMixin:
             if success:
                 self.sync_legacy_quest_records()
             return success
+        if bool(quest.get("procedural_resident_quest", False)):
+            chunk = list(quest.get("procedural_town_chunk", []) or [])
+            if len(chunk) >= 2 and hasattr(self, "complete_procedural_settlement_request"):
+                return bool(self.complete_procedural_settlement_request(
+                    int(chunk[0]), int(chunk[1]), str(quest.get("giver_id", ""))
+                ))
         return bool(self.complete_quest(quest_id, grant_rewards=True))
 
     # ------------------------------------------------------------------
@@ -1117,7 +1145,11 @@ class QuestSystemMixin:
             "participants": [dict(row) for row in record.get("participants", []) or [] if isinstance(row, dict)],
             "destination": dict(record.get("destination", {}) or {}),
         })
-        if self.planned_event_requires_attendance(event) and not int(event.get("expires_at_minute", 0) or 0):
+        if (
+            self.planned_event_requires_attendance(event)
+            and not bool(event.get("persistent_until_resolved", False))
+            and not int(event.get("expires_at_minute", 0) or 0)
+        ):
             start, end = self.planned_event_time_span(event)
             event["expires_at_minute"] = end + 120
         store[event_id] = event
@@ -1131,9 +1163,19 @@ class QuestSystemMixin:
 
     def planned_event_player_manageable(self, event: Dict[str, object]) -> bool:
         """Keep quest machinery safe while allowing genuine appointments to be edited."""
-        if bool(event.get("locked_schedule", False)) or str(event.get("quest_id", "")):
+        guided_journey = any(
+            isinstance(participant, dict) and str(participant.get("mode", "")) == "guide"
+            for participant in event.get("participants", []) or []
+        )
+        if bool(event.get("locked_schedule", False)):
             return False
-        return bool(event.get("player_manageable", False)) or self.planned_event_requires_attendance(event)
+        if str(event.get("quest_id", "")) and not guided_journey:
+            return False
+        return (
+            guided_journey
+            or bool(event.get("player_manageable", False))
+            or self.planned_event_requires_attendance(event)
+        )
 
     def planned_event_time_span(self, event: Dict[str, object]) -> Tuple[int, int]:
         start = int(event.get("due_day", self.quest_absolute_day())) * 1440 + int(event.get("due_hour", 0)) * 60
@@ -1209,6 +1251,17 @@ class QuestSystemMixin:
                 self.release_temporary_participant_actor(participant)
                 participant["status"] = "completed"
                 participant["schedule_override"] = False
+        quest_id = str(event.get("quest_id", "") or "")
+        if quest_id:
+            quest = self.quest_record(quest_id)
+            if quest and str(quest.get("status", "")) in {"active", "ready"}:
+                quest["status"] = "abandoned"
+                quest["completed_day"] = self.quest_absolute_day()
+                quest["journal"] = (list(quest.get("journal", [])) + [
+                    "The guided journey ended before reaching the destination."
+                ])[-20:]
+                if str(getattr(self.state, "tracked_quest_id", "")) == quest_id:
+                    self.state.tracked_quest_id = ""
         self.planned_event_sync_social_records(event, "cancelled")
         self.refresh_planned_event_conflicts()
         return True
@@ -1402,6 +1455,16 @@ class QuestSystemMixin:
             actor = self.world_actor_record_by_id(actor_id)
             if isinstance(actor, dict):
                 runtime["actor_snapshot"] = self.temporary_participant_actor_snapshot(actor)
+                runtime_fields = (
+                    "schedule_override", "runtime_location", "x", "y", "world_x", "world_y",
+                    "chunk_x", "chunk_y", "interior_x", "interior_y", "activity",
+                )
+                runtime["actor_runtime_before"] = {
+                    field: actor[field] for field in runtime_fields if field in actor
+                }
+                runtime["actor_runtime_missing"] = [
+                    field for field in runtime_fields if field not in actor
+                ]
             if participant_location == "Wilderness" and hasattr(self, "wilderness_world_coords"):
                 if mode in {"meet", "attend"} and "world_x" in participant_destination:
                     runtime["world_x"] = int(participant_destination["world_x"])
@@ -1453,7 +1516,7 @@ class QuestSystemMixin:
             if status != "active":
                 continue
             expires_at = int(event.get("expires_at_minute", 0) or 0)
-            if expires_at and now_minute >= expires_at:
+            if expires_at and not bool(event.get("persistent_until_resolved", False)) and now_minute >= expires_at:
                 requires_attendance = self.planned_event_requires_attendance(event)
                 if requires_attendance:
                     self.miss_planned_event(str(event.get("id", "")))
@@ -1742,14 +1805,50 @@ class QuestSystemMixin:
         origin_x, origin_y = self.wilderness_world_coords(
             int(self.state.wilderness_chunk_x), int(self.state.wilderness_chunk_y), 0, 0
         )
+        width, height = self.active_map_width(), self.active_map_height()
         for participant in self.active_temporary_participants():
             if str(participant.get("location", "")) != "Wilderness":
                 continue
             if str(participant.get("mode", "")) in {"meet", "attend"}:
                 continue
             if "world_x" in participant and "world_y" in participant:
-                participant["x"] = int(participant["world_x"]) - int(origin_x)
-                participant["y"] = int(participant["world_y"]) - int(origin_y)
+                local_x = int(participant["world_x"]) - int(origin_x)
+                local_y = int(participant["world_y"]) - int(origin_y)
+                # A guide crossing a seamless backend boundary can briefly be
+                # one or two cells outside the newly active chunk while the
+                # player has already crossed it. Carry the real actor through
+                # the matching edge and preserve the orthogonal lane instead
+                # of respawning them beside the player like a follower.
+                if (
+                    str(participant.get("mode", "")) == "guide"
+                    and -6 <= local_x <= width + 5
+                    and -6 <= local_y <= height + 5
+                    and not (0 <= local_x < width and 0 <= local_y < height)
+                ):
+                    edge_x = max(0, min(width - 1, local_x))
+                    edge_y = max(0, min(height - 1, local_y))
+                    candidates = [(edge_x, edge_y)]
+                    for radius in range(1, 7):
+                        if local_x < 0 or local_x >= width:
+                            candidates.extend((edge_x, edge_y + offset) for offset in (-radius, radius))
+                        else:
+                            candidates.extend((edge_x + offset, edge_y) for offset in (-radius, radius))
+                    player = int(self.state.player_x), int(self.state.player_y)
+                    crossing = next((
+                        point for point in candidates
+                        if point != player
+                        and self.temporary_participant_tile_available(participant, *point)
+                    ), None)
+                    if crossing is None:
+                        crossing = next((
+                            point for point in candidates
+                        if self.temporary_participant_tile_available(participant, *point)
+                        ), None)
+                    if crossing is not None:
+                        local_x, local_y = int(crossing[0]), int(crossing[1])
+                        participant["world_x"] = int(origin_x) + local_x
+                        participant["world_y"] = int(origin_y) + local_y
+                participant["x"], participant["y"] = local_x, local_y
 
     def temporary_participant_actor(self, participant: Dict[str, object]) -> Dict[str, object]:
         actor_id = str(participant.get("actor_id", ""))
@@ -1773,6 +1872,58 @@ class QuestSystemMixin:
             mode = str(participant.get("mode", "accompany"))
             event = self.ensure_planned_event_state().get(str(participant.get("event_id", "")), {})
             event_kind = str(event.get("kind", "")) if isinstance(event, dict) else ""
+            if mode == "guide":
+                arrived = str(participant.get("status", "")) == "arrived"
+                destination = dict(participant.get("destination", {}) or {})
+                place_name = str(destination.get("label", "the destination"))
+                actions = []
+                if arrived:
+                    actions.append(MenuItem(
+                        label="Conclude the journey", value="finish", enabled=True,
+                        hint="finish the guided trip and complete its quest",
+                    ))
+                else:
+                    actions.append(MenuItem(
+                        label="Keep following", value="continue", enabled=True,
+                        hint=f"continue toward {place_name}",
+                    ))
+                actions.extend([
+                    MenuItem(label="Talk while traveling", value="talk", enabled=True),
+                    MenuItem(
+                        label="End the journey early", value="cancel", enabled=True,
+                        hint="the guide returns to their normal schedule",
+                    ),
+                    MenuItem(label="Back", value=MENU_BACK, enabled=True),
+                ])
+                action = self.vertical_panel_select(
+                    f"Journey with {actor.get('name', 'your guide')}",
+                    actions, 54, 19, return_back=True,
+                )
+                if not action or action.value == MENU_BACK:
+                    return True
+                if action.value == "continue":
+                    if hasattr(self, "set_message"):
+                        self.set_message(
+                            f"{actor.get('name', 'Your guide')} continues toward {place_name}. Stay close.",
+                            "social",
+                        )
+                    return True
+                if action.value == "cancel":
+                    event_id = str(participant.get("event_id", ""))
+                    if self.cancel_planned_event(event_id, reason="journey ended early"):
+                        if hasattr(self, "autosave_with_message"):
+                            self.autosave_with_message(
+                                f"Ended the guided journey with {actor.get('name', 'your guide')}."
+                            )
+                    return True
+                if action.value == "finish":
+                    event_id = str(participant.get("event_id", ""))
+                    if self.complete_planned_event(event_id, reason="arrived together"):
+                        if hasattr(self, "autosave_with_message"):
+                            self.autosave_with_message(
+                                f"Reached {place_name} with {actor.get('name', 'your guide')}."
+                            )
+                    return True
             if event_kind == "social_gathering" and hasattr(
                 self, "dialogue_handle_planned_gathering_arrival"
             ):
@@ -1959,6 +2110,140 @@ class QuestSystemMixin:
             if self.temporary_participant_tile_available(participant, *point)
         ]
 
+    def temporary_guide_route_goals(
+        self, participant: Dict[str, object], target: Tuple[int, int]
+    ) -> List[Tuple[int, int]]:
+        """Return reachable tiles a guide may use to represent an arrival.
+
+        Doors, signs, counters, and structure markers are often deliberately
+        non-walkable interaction tiles. Routing to the marker itself makes the
+        pathfinder reject the entire route. Guides instead stop on a nearby
+        walkable approach tile, leaving the entrance clear for the player.
+        """
+        tx, ty = int(target[0]), int(target[1])
+        if not self.in_active_bounds(tx, ty):
+            return self.temporary_participant_route_edge_goals(participant, (tx, ty))
+        destination = dict(participant.get("destination", {}) or {})
+        approach_only = str(destination.get("arrival_mode", "")) == "approach"
+        candidates: List[Tuple[int, int]] = []
+        if not approach_only and self.temporary_participant_tile_available(participant, tx, ty):
+            return [(tx, ty)]
+        for radius in range(1, 5):
+            ring = [
+                (tx + dx, ty + dy)
+                for dy in range(-radius, radius + 1)
+                for dx in range(-radius, radius + 1)
+                if abs(dx) + abs(dy) == radius
+            ]
+            ring.sort(key=lambda point: (point[1], point[0]))
+            candidates = [
+                point for point in ring
+                if self.temporary_participant_tile_available(participant, *point)
+            ]
+            if candidates:
+                return candidates
+        return candidates
+
+    def temporary_guide_exit_target(
+        self, participant: Dict[str, object]
+    ) -> Optional[Tuple[int, int]]:
+        """Find the physical exit a guide should lead toward before a map handoff."""
+        try:
+            grid = self.active_map()
+        except Exception:
+            return None
+        current = int(participant.get("x", self.state.player_x)), int(
+            participant.get("y", self.state.player_y)
+        )
+        exits = [
+            (x, y)
+            for y, row in enumerate(grid)
+            for x, tile in enumerate(row)
+            if str(tile) == "D"
+        ]
+        if not exits:
+            return None
+        return min(exits, key=lambda point: (manhattan_distance(current, point), point[1], point[0]))
+
+    def temporary_guide_arrival_ready(
+        self,
+        participant: Dict[str, object],
+        target: Optional[Tuple[int, int]] = None,
+        player_radius: int = 3,
+    ) -> bool:
+        """Whether the guide and player have physically reached the same approach."""
+        if target is None:
+            target = self.quest_destination_local_position(
+                dict(participant.get("destination", {}) or {})
+            )
+        if target is None or not self.in_active_bounds(int(target[0]), int(target[1])):
+            return False
+        goals = self.temporary_guide_route_goals(participant, target)
+        if not goals:
+            return False
+        current = int(participant.get("x", -1)), int(participant.get("y", -1))
+        player = int(self.state.player_x), int(self.state.player_y)
+        guide_distance = min(manhattan_distance(current, goal) for goal in goals)
+        player_distance = min(manhattan_distance(player, goal) for goal in goals)
+        return guide_distance <= 1 and player_distance <= max(1, int(player_radius))
+
+    def finish_temporary_guide_arrival(
+        self, participant: Dict[str, object], announce: bool = True
+    ) -> bool:
+        """Complete a guided trip as soon as both travelers actually arrive."""
+        if (
+            not isinstance(participant, dict)
+            or str(participant.get("mode", "")) != "guide"
+            or str(participant.get("status", "")) not in {"active", "arrived"}
+        ):
+            return False
+        destination = dict(participant.get("destination", {}) or {})
+        guide_name = str(participant.get("name", "Your guide"))
+        place_name = str(destination.get("label", "the destination"))
+        participant["status"] = "arrived"
+        self.record_quest_event(
+            "escort", target_id=str(participant.get("event_id", "")),
+            note=f"Arrived at {place_name} with {guide_name}.",
+        )
+        completed = self.complete_planned_event(
+            str(participant.get("event_id", "")), reason="arrived together"
+        )
+        if completed and announce and hasattr(self, "set_message"):
+            self.set_message(
+                f"{guide_name} gets you to {place_name}, then returns to their day.",
+                "social",
+            )
+        return bool(completed)
+
+    def complete_guided_journey_for_place(self, place_id: str) -> str:
+        """Resolve a guide at a door before the player enters its interior."""
+        place_id = str(place_id or "")
+        if not place_id:
+            return ""
+        player = int(self.state.player_x), int(self.state.player_y)
+        for participant in list(self.active_temporary_participants()):
+            if (
+                str(participant.get("mode", "")) != "guide"
+                or str(participant.get("location", "")) != str(self.state.location)
+            ):
+                continue
+            destination = dict(participant.get("destination", {}) or {})
+            if str(destination.get("place_id", "")) != place_id:
+                continue
+            target = self.quest_destination_local_position(destination)
+            if target is None:
+                continue
+            # Walking through the requested door is itself proof that the
+            # player followed the route. Allow a little room for the guide to
+            # be standing beside the entrance rather than directly on it.
+            if manhattan_distance(player, target) <= 2 and self.temporary_guide_arrival_ready(
+                participant, target, player_radius=3
+            ):
+                name = str(participant.get("name", "Your guide"))
+                if self.finish_temporary_guide_arrival(participant, announce=False):
+                    return name
+        return ""
+
     def update_temporary_participants_after_player_move(self) -> None:
         self.rebase_temporary_participant_positions()
         player = int(self.state.player_x), int(self.state.player_y)
@@ -1968,6 +2253,8 @@ class QuestSystemMixin:
                 continue
             mode = str(participant.get("mode", "accompany"))
             current = int(participant.get("x", player[0])), int(participant.get("y", player[1]))
+            if str(participant.get("status", "")) == "arrived":
+                continue
             if mode == "accompany":
                 if manhattan_distance(current, player) <= 2:
                     continue
@@ -1979,43 +2266,98 @@ class QuestSystemMixin:
             elif mode == "guide":
                 destination = dict(participant.get("destination", {}) or {})
                 target = self.quest_destination_local_position(destination)
+                transition_stage = bool(
+                    target is None
+                    and str(destination.get("location", ""))
+                    and str(destination.get("location", "")) != str(self.state.location)
+                )
+                if transition_stage:
+                    target = self.temporary_guide_exit_target(participant)
                 target_is_local = bool(target is not None and self.in_active_bounds(*target))
                 # A guide leads from just ahead, but waits rather than walking
-                # off-screen when the player falls behind or takes a detour.
+                # off-screen when the player falls behind or takes a detour. If
+                # the player has passed the guide, however, the guide catches up
+                # instead of freezing forever at the same separation threshold.
+                participant.pop("catching_up", None)
                 if manhattan_distance(current, player) > 4:
-                    participant["waiting_for_player"] = True
-                    continue
+                    guide_is_ahead = bool(
+                        target is not None
+                        and manhattan_distance(current, target) < manhattan_distance(player, target)
+                    )
+                    if guide_is_ahead:
+                        participant["waiting_for_player"] = True
+                        participant.pop("catching_up", None)
+                        continue
+                    participant["catching_up"] = True
                 participant.pop("waiting_for_player", None)
                 if target is not None:
-                    goals = [target] if target_is_local else self.temporary_participant_route_edge_goals(participant, target)
+                    goals = self.temporary_guide_route_goals(participant, target)
                 else:
                     goals = []
-                if target is not None and manhattan_distance(current, target) <= 1:
-                    participant["status"] = "arrived"
-                    self.record_quest_event("escort", target_id=str(participant.get("event_id", "")), note=f"Arrived with {participant.get('name', 'the guide')}.")
-                    if hasattr(self, "set_message"):
-                        self.set_message(f"You and {participant.get('name', 'your guide')} have reached {destination.get('label', 'the destination')}. Talk to them to conclude the journey.", "social")
+                if transition_stage and goals and min(
+                    manhattan_distance(current, goal) for goal in goals
+                ) <= 1:
+                    participant["waiting_at_transition"] = True
+                    participant["transition_from_location"] = str(self.state.location)
+                    participant["activity"] = "waiting at the exit so you can cross together"
+                    continue
+                if not transition_stage and target_is_local and self.temporary_guide_arrival_ready(participant, target):
+                    self.finish_temporary_guide_arrival(participant)
                     continue
             else:
                 continue
             if not goals:
                 continue
             occupied.discard(current)
-            step = shortest_path_step(
-                current, goals,
-                lambda x, y: self.temporary_participant_tile_available(participant, x, y),
-                blocked=occupied, max_nodes=max(256, self.active_map_width() * self.active_map_height()),
+            # Guides may begin on the player's tile after the conversation that
+            # starts a route. Give them an extra step whenever they are beside
+            # the player so they visibly move out in front instead of remaining
+            # hidden under the player marker for the whole journey.
+            step_budget = (
+                3 if mode == "guide" and bool(participant.get("catching_up", False))
+                else 2 if mode == "guide" and manhattan_distance(current, player) <= 1
+                else 1
             )
+            step = None
+            for _ in range(step_budget):
+                next_step = shortest_path_step(
+                    current, goals,
+                    lambda x, y: self.temporary_participant_tile_available(participant, x, y),
+                    blocked=occupied,
+                    max_nodes=max(256, self.active_map_width() * self.active_map_height()),
+                )
+                if not next_step or next_step == current:
+                    break
+                current = int(next_step[0]), int(next_step[1])
+                step = current
+                if mode == "guide" and target_is_local and current in goals:
+                    break
             if step:
-                participant["x"], participant["y"] = int(step[0]), int(step[1])
+                participant.pop("catching_up", None)
+                participant.pop("route_blocked_steps", None)
+                participant["x"], participant["y"] = int(current[0]), int(current[1])
                 if str(participant.get("location", "")) == "Wilderness" and hasattr(self, "wilderness_world_coords"):
                     world_x, world_y = self.wilderness_world_coords(
                         int(self.state.wilderness_chunk_x), int(self.state.wilderness_chunk_y),
-                        int(step[0]), int(step[1]),
+                        int(current[0]), int(current[1]),
                     )
                     participant["world_x"], participant["world_y"] = int(world_x), int(world_y)
                 self.sync_temporary_participant_actor(participant)
-                occupied.add(step)
+                occupied.add(current)
+                if (
+                    mode == "guide" and not transition_stage and target_is_local
+                    and self.temporary_guide_arrival_ready(participant, target)
+                ):
+                    self.finish_temporary_guide_arrival(participant)
+                elif mode == "guide" and transition_stage and goals and min(
+                    manhattan_distance(current, goal) for goal in goals
+                ) <= 1:
+                    participant["waiting_at_transition"] = True
+                    participant["transition_from_location"] = str(self.state.location)
+                    participant["activity"] = "waiting at the exit so you can cross together"
+            elif mode == "guide":
+                participant["route_blocked_steps"] = int(participant.get("route_blocked_steps", 0) or 0) + 1
+                participant["activity"] = "checking for a clear route to the destination"
 
     def sync_temporary_participants(self) -> None:
         self.update_planned_events()
@@ -2023,7 +2365,31 @@ class QuestSystemMixin:
         occupied = set(self.temporary_participant_position_lookup())
         player = int(self.state.player_x), int(self.state.player_y)
         for participant in self.active_temporary_participants():
-            if str(participant.get("mode", "")) not in {"accompany", "guide"}:
+            # Companions intentionally reform around the player after a map
+            # handoff. Guides retain their own world position and route through
+            # seamless edges; follower-style catch-up caused guide teleporting
+            # and repeatedly snapped routes backward.
+            mode = str(participant.get("mode", ""))
+            if mode == "guide":
+                crossed_together = bool(
+                    participant.get("waiting_at_transition", False)
+                    and str(participant.get("location", "")) != str(self.state.location)
+                    and str(participant.get("transition_from_location", ""))
+                    == str(participant.get("location", ""))
+                )
+                if crossed_together:
+                    if self.place_temporary_participant_near_player(participant, occupied):
+                        participant.pop("waiting_at_transition", None)
+                        participant.pop("transition_from_location", None)
+                        participant["activity"] = str(
+                            participant.get("purpose", "guiding you") or "guiding you"
+                        )
+                    continue
+                # Outdoor seamless boundaries retain world coordinates. An
+                # unrelated interior detour leaves the guide waiting where the
+                # player departed rather than teleporting after them.
+                continue
+            if mode != "accompany":
                 continue
             try:
                 position = int(participant.get("x", -1)), int(participant.get("y", -1))
@@ -2126,6 +2492,24 @@ class QuestSystemMixin:
                     self.save_wilderness_traveler_route_memory(actor)
                 except Exception:
                     pass
+            return
+        # Authored and settlement residents must resume the exact schedule state
+        # they had before agreeing to guide the player. Leaving wilderness-local
+        # x/y values on a town resident caused later schedule updates to teleport
+        # or strand that person in unrelated map coordinates.
+        before = dict(participant.get("actor_runtime_before", {}) or {})
+        missing = {
+            str(field) for field in participant.get("actor_runtime_missing", []) or []
+        }
+        runtime_fields = (
+            "schedule_override", "runtime_location", "x", "y", "world_x", "world_y",
+            "chunk_x", "chunk_y", "interior_x", "interior_y", "activity",
+        )
+        for field in runtime_fields:
+            if field in before:
+                actor[field] = before[field]
+            elif field in missing:
+                actor.pop(field, None)
 
 
 __all__ = ["QuestSystemMixin"]

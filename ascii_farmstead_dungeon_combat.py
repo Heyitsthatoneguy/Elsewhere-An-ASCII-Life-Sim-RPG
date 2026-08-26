@@ -390,15 +390,24 @@ class DungeonRoguelikeCombatMixin:
             return cache["regions"], cache["lookup"]
         height = len(grid)
         width = len(grid[0]) if height else 0
+
+        def structural_floor(x: int, y: int) -> bool:
+            """Use the already-resolved floor map while deriving room geometry."""
+            return bool(
+                0 <= int(y) < height
+                and 0 <= int(x) < len(grid[int(y)])
+                and str(grid[int(y)][int(x)]) not in {"#", " ", "+"}
+            )
+
         core = set()
         for y in range(1, max(1, height - 1)):
             for x in range(1, max(1, width - 1)):
-                if not self.dungeon_structural_floor(x, y):
+                if not structural_floor(x, y):
                     continue
                 open_neighbors = sum(
                     1
                     for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1))
-                    if self.dungeon_structural_floor(x + dx, y + dy)
+                    if structural_floor(x + dx, y + dy)
                 )
                 if open_neighbors >= 3:
                     core.add((x, y))
@@ -427,7 +436,7 @@ class DungeonRoguelikeCombatMixin:
                     (1, 1), (1, -1), (-1, 1), (-1, -1),
                 ):
                     nx, ny = x + dx, y + dy
-                    if 0 <= ny < height and 0 <= nx < width and self.dungeon_structural_floor(nx, ny):
+                    if structural_floor(nx, ny):
                         region.add((nx, ny))
             room_id = self.dungeon_feature_key(start[0], start[1])
             regions.append(region)

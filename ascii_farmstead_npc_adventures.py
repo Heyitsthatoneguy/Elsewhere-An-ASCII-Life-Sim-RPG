@@ -66,6 +66,8 @@ def sanitize_npc_progression_records(value: object) -> Dict[str, Dict[str, objec
             "rescues": _bounded_int(raw.get("rescues", 0), 0, 0, 9999),
             "recovery_until_day": _bounded_int(raw.get("recovery_until_day", 0), 0, 0, 9999999),
             "last_adventure_day": _bounded_int(raw.get("last_adventure_day", 0), 0, 0, 9999999),
+            "earnings": _bounded_int(raw.get("earnings", 0), 0, 0, 99999999),
+            "adventure_inclination": str(raw.get("adventure_inclination", ""))[:40],
             "last_outcome": str(raw.get("last_outcome", ""))[:240],
             "history": [
                 str(row)[:240] for row in history if str(row or "").strip()
@@ -117,6 +119,7 @@ class NpcAdventureMixin:
                 "weapon": weapon, "armor": armor, "gear_tier": 0,
                 "courage": min(80, courage), "journeys": 0, "victories": 0,
                 "rescues": 0, "recovery_until_day": 0, "last_adventure_day": 0,
+                "earnings": 0, "adventure_inclination": "",
                 "last_outcome": "", "history": [],
             }
             store[key] = raw
@@ -173,6 +176,7 @@ class NpcAdventureMixin:
             f"XP {record.get('xp', 0)}/{self.npc_xp_for_next_level(level)}",
             f"Equipment: {record.get('weapon')} / {record.get('armor')}",
             f"Journeys: {record.get('journeys', 0)}  |  Victories: {record.get('victories', 0)}",
+            f"Field inclination: {self.npc_adventure_inclination(npc) if hasattr(self, 'npc_adventure_inclination') else 'Occasional'}  |  Earnings: {record.get('earnings', 0)}g",
             f"Disposition: courage {record.get('courage', 25)}/100; "
             + (
                 f"recovering for {recovery - today} "
@@ -190,6 +194,10 @@ class NpcAdventureMixin:
         return lines
 
     def npc_adventure_dialogue_line(self, npc: Dict[str, object]) -> str:
+        if hasattr(self, "world_opportunity_adventure_line"):
+            line = self.world_opportunity_adventure_line(npc)
+            if line:
+                return line
         record = self.npc_progression_record(npc)
         trip = self.regional_town_life_state().setdefault(
             "resident_trips", {}
@@ -242,6 +250,8 @@ class NpcAdventureMixin:
                 f"- {npc_id}: {quantity_agreement(int(record['recovery_until_day']) - self.absolute_game_day(), 'day')}"
                 for npc_id, record in recovering[:6]
             )
+        if hasattr(self, "world_opportunity_journal_lines"):
+            lines.extend(self.world_opportunity_journal_lines())
         return lines
 
     @staticmethod
@@ -378,6 +388,13 @@ class NpcAdventureMixin:
                         f"{self.town_npc_day_key()}: {resident.get('name')} {outcome}."
                     )
                 return
+        # Persistent world opportunities now schedule generated residents as
+        # physical actors with exact positions, inventories, and objectives.
+        # Keep resolving trips from older saves, but don't create another
+        # off-screen duration-roll trip alongside the physical system.
+        if hasattr(self, "ensure_world_opportunity_state"):
+            self.ensure_world_opportunity_state()
+            return
         if not residents or today % 7 not in {1, 4}:
             return
         candidates = [

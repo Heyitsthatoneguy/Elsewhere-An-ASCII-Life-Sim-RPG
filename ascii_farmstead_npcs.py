@@ -4895,14 +4895,12 @@ class NpcMixin:
                 visitor["activity"] = "following the road toward the inn"
                 visitor["inn_route_steps"] = int(visitor.get("inn_route_steps", 0) or 0) + 1
                 reached_door = self.town_npc_move_town_toward(visitor, target)
-                # A large festival or newly expanded family can temporarily
-                # saturate the narrow inn approach. Do not leave a traveler
-                # pacing forever because every legal path is occupied.
-                route_timed_out = int(visitor["inn_route_steps"]) >= (TOWN_WIDTH + TOWN_HEIGHT)
-                if reached_door or route_timed_out:
+                if reached_door:
                     visitor["runtime_location"] = "InnInterior"
                     visitor["interior_x"], visitor["interior_y"] = (22 + index * 3, 16)
                     visitor["inn_route_steps"] = 0
+                elif bool(visitor.get("route_blocked", False)):
+                    visitor["activity"] = "waiting for the inn approach to clear"
                 continue
             if actual == "InnInterior":
                 visitor["runtime_location"] = "Town"
@@ -4963,6 +4961,10 @@ class NpcMixin:
     def town_npc_public_schedule_entry(self, npc: Dict[str, object]) -> Dict[str, object]:
         npc_id = str(npc.get("id", ""))
         phase = self.town_routine_phase()
+        if hasattr(self, "world_opportunity_actor_away_entry"):
+            away_entry = self.world_opportunity_actor_away_entry(npc_id)
+            if away_entry:
+                return away_entry
         life = self.regional_town_life_state()
         trips = life.setdefault("resident_trips", {})
         active_trip = trips.get(npc_id, {})
@@ -5066,7 +5068,11 @@ class NpcMixin:
                 "Tailor": "sourcing regional cloth and taking measurements",
             }.get(str(npc.get("role", "")), "handling a scheduled regional errand")
             expected_return = self.regional_return_date_label(int(route["travel_days"]))
-            if hasattr(self, "npc_adventure_prepare_trip") and self.npc_adventure_eligible(npc):
+            if (
+                hasattr(self, "npc_adventure_prepare_trip")
+                and self.npc_adventure_eligible(npc)
+                and not hasattr(self, "ensure_world_opportunity_state")
+            ):
                 trips[npc_id] = self.npc_adventure_prepare_trip(
                     npc,
                     destination,
@@ -5201,6 +5207,73 @@ class NpcMixin:
             return str(AUTHORED_TOWN_RESIDENCE_DATA[residence_id]["label"])
         return TOWN_INTERIOR_NAME_BY_LOCATION.get(str(location), "Building")
 
+    def town_npc_seasonal_role_activity(self, npc: Dict[str, object], phase: str) -> str:
+        """Give visible routines seasonal context without rerouting whole crowds."""
+        if phase not in {"work_morning", "work_afternoon", "evening", "bad_weather"}:
+            return ""
+        role = str(npc.get("role", "Villager")).lower()
+        season = str(getattr(self.state, "season", "Spring"))
+        role_group = "resident"
+        if any(word in role for word in ("farm", "orchard", "ranch", "herb", "botan", "garden")):
+            role_group = "land"
+        elif any(word in role for word in ("fish", "ferry", "sail", "dock")):
+            role_group = "water"
+        elif any(word in role for word in ("shop", "merchant", "inn", "tavern", "cook", "baker", "market")):
+            role_group = "trade"
+        elif any(word in role for word in ("ranger", "hunter", "guard", "sheriff", "advent", "scout")):
+            role_group = "route"
+        elif any(word in role for word in ("teacher", "librar", "research", "doctor", "nurse", "mayor")):
+            role_group = "service"
+        activities = {
+            "Spring": {
+                "land": "checking new growth and rain-softened ground",
+                "water": "watching the spring current and newly open water",
+                "trade": "preparing fresh stock for the planting season",
+                "route": "checking muddy roads, bridges, and thaw damage",
+                "service": "helping neighbors plan for the new growing season",
+                "resident": "taking care of spring errands around town",
+            },
+            "Summer": {
+                "land": "working the long daylight hours among summer growth",
+                "water": "checking warm-water catches and busy docks",
+                "trade": "serving travelers and restocking summer goods",
+                "route": "patrolling the well-traveled summer roads",
+                "service": "keeping up with the town's busiest season",
+                "resident": "making use of the long summer afternoon",
+            },
+            "Fall": {
+                "land": "bringing in late crops and preparing the land for cold weather",
+                "water": "watching the colder current and fall fish runs",
+                "trade": "sorting harvest goods and preserving winter stock",
+                "route": "clearing leaves and checking routes before winter",
+                "service": "helping the town prepare for the colder months",
+                "resident": "finishing fall errands before the days shorten",
+            },
+            "Winter": {
+                "land": "maintaining tools and tending hardy winter growth",
+                "water": "checking ice, sheltered docks, and open channels",
+                "trade": "keeping warm goods and winter supplies in stock",
+                "route": "checking icy paths and weather-exposed roads",
+                "service": "keeping essential services running through the cold",
+                "resident": "handling a short list of winter errands",
+            },
+        }
+        if phase == "evening":
+            return {
+                "Spring": "settling in after the cool spring evening",
+                "Summer": "staying out a little longer in the summer light",
+                "Fall": "heading home as the fall evening cools",
+                "Winter": "returning indoors before the early winter dark",
+            }.get(season, "following their evening routine")
+        if phase == "bad_weather":
+            return {
+                "Spring": "keeping out of the heaviest rain while finishing necessary work",
+                "Summer": "sheltering from the storm and checking on nearby travelers",
+                "Fall": "working under cover while the wind moves through town",
+                "Winter": "keeping to sheltered routes during the winter weather",
+            }.get(season, "keeping to a weather-safe routine")
+        return activities.get(season, {}).get(role_group, "")
+
     def town_npc_role_activity(self, npc: Dict[str, object], phase: Optional[str] = None) -> str:
         role = str(npc.get("role", "Villager"))
         phase_key = str(phase or self.town_npc_current_routine_phase(npc))
@@ -5208,6 +5281,9 @@ class NpcMixin:
             return "waking up in their bedroom"
         if phase_key == "late":
             return "sleeping in their bedroom"
+        seasonal_activity = self.town_npc_seasonal_role_activity(npc, phase_key)
+        if seasonal_activity:
+            return seasonal_activity
         activities = TOWN_NPC_ROUTINE_ACTIVITIES.get(role, {})
         if phase_key in activities:
             return str(activities[phase_key])
@@ -7554,11 +7630,26 @@ class NpcMixin:
                     and desired != "Town"
                     and actual != desired
                 ):
-                    # Night routes are allowed time to play out visibly, but a
-                    # blocked route must never leave somebody "sleeping" on a
-                    # street for the rest of the night.
-                    self.town_npc_place_at_destination(npc, desired)
-                    actual = desired
+                    observed = self.town_npc_observed_runtime_location()
+                    visible_actual = (
+                        actual == observed
+                        or (
+                            actual == "Town"
+                            and (
+                                self.on_town()
+                                or (
+                                    hasattr(self, "in_seamless_town_district")
+                                    and self.in_seamless_town_district()
+                                )
+                            )
+                        )
+                    )
+                    # Off-screen schedules may be summarized, but a resident
+                    # on the map the player is watching must finish the route
+                    # physically instead of snapping home at 23:00.
+                    if not visible_actual:
+                        self.town_npc_place_at_destination(npc, desired)
+                        actual = desired
                 npc["runtime_target_location"] = desired
                 npc["activity"] = self.town_npc_activity_label(npc)
 
@@ -8808,6 +8899,94 @@ class NpcMixin:
         except Exception:
             return None
 
+    def storm_dialogue_lines_for_npc(
+        self, npc: Dict[str, object], category: str
+    ) -> List[str]:
+        """Return varied, role-aware storm talk without exposing schedule internals."""
+        warning = str(category) == "storm_warning"
+        common = [
+            "I'm finishing anything outdoors early. The weather is getting worse.",
+            "If you have to travel, stay on a familiar road and leave yourself time to turn back.",
+            "The wind is strong enough that I'd keep clear of old trees and loose signs.",
+            "The low crossings may flood before the rain stops. Don't assume the usual route is safe.",
+            "I can hear the gutters working from here. This isn't a passing shower.",
+            "The sky has been darkening all afternoon. I'm not planning a long trip in it.",
+            "Once the thunder gets this close, I stop pretending one more errand is urgent.",
+            "There may be branches across the roads afterward. Tomorrow's travel could be slow too.",
+            "I'm keeping a dry coat and a lamp close. The power of a storm is mostly in what it interrupts.",
+            "Anyone still outside should be thinking about the nearest shelter, not the shortest schedule.",
+        ]
+        if warning:
+            common.extend([
+                "The warning came early enough to prepare, so I'm taking it seriously.",
+                "This is the useful part of a storm warning: there is still time to get home before it arrives.",
+                "I'd rather postpone a journey than spend the night stranded between shelters.",
+            ])
+        role = str(npc.get("role", "Villager"))
+        role_groups = [
+            (
+                {"Mayor", "Clerk", "Sheriff", "Police Officer", "Ranger"},
+                [
+                    "We're checking the roads, drainage, and public buildings before anyone calls the day finished.",
+                    "A storm becomes a town problem wherever water, traffic, and bad timing meet.",
+                    "I'm more concerned about who is still traveling than about the rain itself.",
+                ],
+            ),
+            (
+                {"Farmer", "Gardener", "Orchardist", "Animal Keeper", "Rancher", "Beekeeper"},
+                [
+                    "The animals noticed the pressure change before most people did. They're all looking for cover.",
+                    "Heavy rain is useful until the soil stops taking it. After that, it only moves things around.",
+                    "I'm checking gates and shelter before the wind gets any stronger.",
+                ],
+            ),
+            (
+                {"Fisher", "Sailor", "Dockworker", "Harbor Master"},
+                [
+                    "The water is no place to argue with a storm. Any sensible boat is tied down already.",
+                    "Wind over open water builds trouble faster than it looks from shore.",
+                    "I'm watching the moorings. One loose line can damage three boats before anyone reaches it.",
+                ],
+            ),
+            (
+                {"Carpenter", "Blacksmith", "Mechanic", "Builder", "Lumberjack"},
+                [
+                    "Weather like this finds every loose hinge, weak brace, and neglected patch of roof.",
+                    "Emergency repairs are mostly ordinary repairs that waited too long.",
+                    "I'm keeping tools ready, but I'm not climbing anything until the wind drops.",
+                ],
+            ),
+            (
+                {"Doctor", "Nurse", "Healer"},
+                [
+                    "Most storm injuries come from rushing through something that could have waited.",
+                    "I'm hoping people stay indoors. Prevention is much quieter than the clinic after a bad storm.",
+                    "Wet roads and poor visibility are a worse combination than people give them credit for.",
+                ],
+            ),
+            (
+                {"Traveler", "Courier", "Merchant", "Market Vendor", "Caravaner"},
+                [
+                    "I've traveled in worse weather, which is how I learned not to travel in this if I have a choice.",
+                    "A delayed delivery is cheaper than a wagon in a ditch.",
+                    "Road knowledge helps, but it doesn't make floodwater shallower.",
+                ],
+            ),
+            (
+                {"Shopkeeper", "Innkeeper", "Chef", "Cook", "Bartender"},
+                [
+                    "People are coming inside wet and staying longer than they planned. I can't blame them.",
+                    "A storm changes business quickly: fewer travelers, more people needing a warm place.",
+                    "I'm keeping the lamps lit and something warm ready for whoever gets caught out.",
+                ],
+            ),
+        ]
+        for roles, lines in role_groups:
+            if role in roles:
+                common.extend(lines)
+                break
+        return common
+
     def contextual_dialogue_entries_for_category(self, npc: Dict[str, object], category: str) -> List[Dict[str, str]]:
         npc_id = str(npc.get("id", ""))
         data = TOWN_NPC_CONTEXTUAL_DIALOGUE_DATA.get(npc_id, {})
@@ -8824,6 +9003,27 @@ class NpcMixin:
         # season/weather/story category, making all 26 residents sound alike
         # despite their large individual dialogue catalogs.
         raw_pool = list(authored_pool) if authored_pool else list(curated_pool)
+        if category in {"stormy", "storm_warning"}:
+            repeated_storm_lines = {
+                "Rough weather makes long trips risky.",
+                "I would stay close.",
+                "Do not make a long trip in this.",
+                "Storm warning today.",
+                "Keep the trip short.",
+                "Weather looks bad.",
+            }
+            # Most legacy residents shared the exact same six storm lines. Keep
+            # genuinely character-specific writing, then supplement it with a
+            # broad role-aware pool so consecutive conversations do not repeat.
+            raw_pool = [
+                raw for raw in raw_pool
+                if str(raw.get("text", "") if isinstance(raw, dict) else raw).strip()
+                not in repeated_storm_lines
+            ]
+            raw_pool.extend(self.storm_dialogue_lines_for_npc(npc, category))
+            for line in curated_pool:
+                if line not in raw_pool:
+                    raw_pool.append(line)
         if category == "legacy_talk":
             legacy_data = self.town_npc_dialogue_data(npc)
             raw_pool = legacy_data.get("talk", [])
@@ -9843,10 +10043,47 @@ class NpcMixin:
                 max_nodes=700,
             )
             if step is None:
-                positions[npc_id] = target
-                step = target
-            else:
-                positions[npc_id] = step
+                # A blocked or disconnected staging mark is not permission to
+                # teleport an actor through walls. Try nearby open marks; if
+                # none are reachable, let the scene proceed with this person
+                # standing where they already are.
+                alternatives = []
+                for radius in range(1, 5):
+                    for dy in range(-radius, radius + 1):
+                        for dx in range(-radius, radius + 1):
+                            if abs(dx) + abs(dy) != radius:
+                                continue
+                            candidate = (target[0] + dx, target[1] + dy)
+                            if self.scene_stage_tile_open(
+                                candidate[0], candidate[1], npc_id, blockers
+                            ):
+                                alternatives.append(candidate)
+                alternatives.sort(
+                    key=lambda point: (
+                        abs(point[0] - target[0]) + abs(point[1] - target[1]),
+                        point[1], point[0],
+                    )
+                )
+                for alternative in alternatives:
+                    candidate_step = self.town_npc_path_step(
+                        start,
+                        alternative,
+                        lambda x, y: self.scene_stage_tile_open(
+                            x, y, npc_id, blockers
+                        ),
+                        max_nodes=700,
+                    )
+                    if candidate_step is not None:
+                        targets[npc_id] = alternative
+                        target = alternative
+                        step = candidate_step
+                        break
+            if step is None:
+                targets[npc_id] = start
+                if isinstance(npc, dict):
+                    npc["activity"] = "taking part from the nearest reachable place"
+                continue
+            positions[npc_id] = step
             self.town_npc_set_facing_for_step(npc, start, step)
             occupied.discard(start)
             occupied.add(step)

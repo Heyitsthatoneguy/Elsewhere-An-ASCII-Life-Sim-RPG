@@ -5,7 +5,13 @@ from __future__ import annotations
 import random
 from typing import Dict, List, Optional, Tuple
 
-from ascii_farmstead_data import FISH_DATA, MENU_BACK
+from ascii_farmstead_data import (
+    FISHING_BAIT_DATA,
+    FISHING_LURE_DATA,
+    FISHING_ROD_DATA,
+    FISH_DATA,
+    MENU_BACK,
+)
 from ascii_farmstead_helpers import quantity_agreement, quantity_item_phrase
 from ascii_farmstead_inventory import add_inventory_items, format_drops
 from ascii_farmstead_visuals import actor_style
@@ -41,6 +47,7 @@ HARBOR_FACILITY_SYMBOLS = {
     "passenger_shelter": "H",
     "repair_bench": "M",
     "fish_market": "$",
+    "tackle_shop": "t",
 }
 
 MARITIME_ENCOUNTER_TYPES = (
@@ -2057,6 +2064,7 @@ class WildernessRevampMixin:
             ("passenger_shelter", 6, -4, 0),
             ("cargo_store", 3, -4, 1),
             ("repair_bench", 6, 4, 2),
+            ("tackle_shop", 9, 4, 1),
         )
         layout: Dict[str, Dict[str, object]] = {}
         for kind, depth, lateral, required_stage in definitions:
@@ -2084,6 +2092,7 @@ class WildernessRevampMixin:
                     "passenger_shelter": "Harbor Passenger Shelter",
                     "repair_bench": "Harbor Repair Bench",
                     "fish_market": "Harbor Fish Market",
+                    "tackle_shop": "Angler's Exchange",
                 }[kind],
                 "symbol": HARBOR_FACILITY_SYMBOLS[kind],
                 "center": center,
@@ -2330,6 +2339,120 @@ class WildernessRevampMixin:
             return True
         return False
 
+    def wilderness_local_fish_species(self, x: int, y: int) -> List[str]:
+        """Return useful, deterministic fishing knowledge for one harbor."""
+        biome_id = ""
+        if hasattr(self, "fishing_biome_id"):
+            biome_id = str(self.fishing_biome_id(int(x), int(y)) or "")
+        native = [
+            name for name, data in FISH_DATA.items()
+            if not data.get("junk") and biome_id in (data.get("biomes", []) or [])
+        ]
+        if native:
+            return sorted(native, key=lambda name: (-int(FISH_DATA[name].get("weight", 1)), name))
+        coastal = self.wilderness_region_profile(
+            self.state.wilderness_chunk_x, self.state.wilderness_chunk_y,
+        ).get("biome") == "["
+        habitat = "Ocean" if coastal else "Lake"
+        common = [
+            name for name, data in FISH_DATA.items()
+            if not data.get("junk")
+            and not data.get("biomes")
+            and habitat in (data.get("habitats", []) or [])
+        ]
+        return sorted(common, key=lambda name: (-int(FISH_DATA[name].get("weight", 1)), name))[:8]
+
+    def wilderness_local_fishing_report_lines(self, x: int, y: int) -> List[str]:
+        biome_id = str(self.fishing_biome_id(int(x), int(y)) or "") if hasattr(self, "fishing_biome_id") else ""
+        biome_name = str(BIOME_IDENTITY_DATA.get(biome_id, {}).get("name", "Local Waters"))
+        species = self.wilderness_local_fish_species(x, y)
+        rows = [
+            "LOCAL FISHING REPORT",
+            "",
+            f"Region: {biome_name}",
+            f"Current conditions: {self.state.season}, {self.state.weather}, {int(self.state.hour):02d}:{int(getattr(self.state, 'minute', 0)):02d}",
+            "",
+            "Fish known in these waters:",
+        ]
+        for fish_name in species:
+            data = FISH_DATA[fish_name]
+            rows.append(
+                f"- {fish_name}: {', '.join(str(value) for value in data.get('depths', []) or ['varied'])}; "
+                f"{', '.join(str(value) for value in data.get('seasons', []) or ['any season'])}; "
+                f"{data.get('time', 'Any').lower()}"
+            )
+        if not species:
+            rows.append("- The local catch hasn't been charted yet.")
+        rows.extend([
+            "",
+            "Light water is shallow, medium blue is ordinary water, and dark blue is deep.",
+            "Ask the harbor angler for a current request or consult your Fishing Journal for full personal records.",
+        ])
+        return rows
+
+    def use_wilderness_harbor_tackle_shop(self, x: int, y: int) -> bool:
+        """Operate a physical regional tackle and chart counter."""
+        changed = False
+        while True:
+            items = [
+                self._wilderness_menu_item("report", "Read local fishing chart", "Regional fish, depth, season, and time guidance."),
+            ]
+            if hasattr(self, "show_fishing_journal_menu"):
+                items.append(self._wilderness_menu_item("journal", "Open Fishing Journal", "Review catches, records, tackle, and aquarium compatibility."))
+            for rod_name, profile in FISHING_ROD_DATA.items():
+                price = int(profile.get("price", 0) or 0)
+                if price <= 0 or rod_name in (self.state.owned_tools or []):
+                    continue
+                items.append(self._wilderness_menu_item(
+                    f"rod:{rod_name}", f"Buy {rod_name} - {price}g",
+                    str(profile.get("description", "Fishing rod.")), enabled=int(self.state.money) >= price,
+                ))
+            for lure_name, profile in FISHING_LURE_DATA.items():
+                price = int(profile.get("price", 0) or 0)
+                if lure_name == "None" or lure_name in (self.state.owned_fishing_lures or []):
+                    continue
+                items.append(self._wilderness_menu_item(
+                    f"lure:{lure_name}", f"Buy {lure_name} - {price}g",
+                    str(profile.get("description", "Reusable lure.")), enabled=int(self.state.money) >= price,
+                ))
+            for bait_name, profile in FISHING_BAIT_DATA.items():
+                price = int(profile.get("price", 0) or 0) * 5
+                items.append(self._wilderness_menu_item(
+                    f"bait:{bait_name}", f"Buy 5 {bait_name} - {price}g",
+                    str(profile.get("description", "Fishing bait.")), enabled=int(self.state.money) >= price,
+                ))
+            choice = self.vertical_panel_select("Angler's Exchange", items, 56, 24, return_back=True)
+            if not choice or choice.value == MENU_BACK:
+                if changed:
+                    self.autosave_with_message("Finished at the Angler's Exchange.")
+                return changed
+            value = str(choice.value)
+            if value == "report":
+                self.vertical_panel_view("Local Fishing Chart", self.wilderness_local_fishing_report_lines(x, y), 56, 25)
+                continue
+            if value == "journal" and hasattr(self, "show_fishing_journal_menu"):
+                self.show_fishing_journal_menu()
+                continue
+            kind, item_name = value.split(":", 1)
+            profile = {"rod": FISHING_ROD_DATA, "lure": FISHING_LURE_DATA, "bait": FISHING_BAIT_DATA}[kind][item_name]
+            quantity = 5 if kind == "bait" else 1
+            price = int(profile.get("price", 0) or 0) * quantity
+            if int(self.state.money) < price:
+                self.set_message(f"You need {price}g for that purchase.")
+                continue
+            self.state.money -= price
+            if kind == "rod":
+                self.state.owned_tools.append(item_name)
+                self.state.tool_levels[item_name] = 1
+            elif kind == "lure":
+                self.state.owned_fishing_lures.append(item_name)
+                self.state.equipped_fishing_lure = item_name
+            else:
+                add_inventory_items(self.state.inventory, {item_name: quantity})
+                self.state.equipped_fishing_bait = item_name
+            changed = True
+            self.set_message(f"Bought {quantity_item_phrase(item_name, quantity)} for {price}g.")
+
     def use_wilderness_harbor_feature(self, x: int, y: int) -> bool:
         feature = self.wilderness_harbor_feature_at(x, y)
         kind = str(feature.get("kind", ""))
@@ -2343,6 +2466,8 @@ class WildernessRevampMixin:
             return self.use_wilderness_harbor_repair_bench(x, y)
         if kind == "fish_market":
             return self.sell_fish_at_wilderness_harbor()
+        if kind == "tackle_shop":
+            return self.use_wilderness_harbor_tackle_shop(x, y)
         return False
 
     def wilderness_harbor_feature_description(self, feature: Dict[str, object]) -> str:
@@ -2351,6 +2476,7 @@ class WildernessRevampMixin:
             "passenger_shelter": "Harbor passenger shelter: rest here once per day before continuing your journey.",
             "repair_bench": "Harbor repair bench: build an Explorer Raft or commission a personal skiff.",
             "fish_market": "Harbor fish market: sell complete stacks of fresh catch directly to the local buyer.",
+            "tackle_shop": "Angler's Exchange: buy regional tackle, read the local chart, and open your Fishing Journal.",
         }.get(str(feature.get("kind", "")), str(feature.get("name", "Harbor facility")))
 
     def wilderness_dock_water_tile(self, x: int, y: int) -> Tuple[int, int]:
@@ -2403,13 +2529,15 @@ class WildernessRevampMixin:
         hydrology = self.wilderness_world_hydrology_at(wx, wy)
         kind = str(hydrology.get("kind", "water"))
         name = str(hydrology.get("name", "Open Water"))
+        depth = str(self.fishing_water_depth(x, y)) if hasattr(self, "fishing_water_depth") else ""
+        depth_prefix = f"{depth} water. " if depth else ""
         if kind == "reef":
-            return f"Warm coral shallows rich in tropical fish. {travel}"
+            return f"{depth_prefix}Warm coral shallows rich in tropical fish. {travel}"
         if kind == "ocean":
             current = self.wilderness_world_current(wx, wy)
             strength = "strong " if int(current.get("strength", 1)) >= 2 else ""
             return (
-                f"Open ocean with a {strength}{current.get('name', 'moving')} current. "
+                f"{depth_prefix}Open ocean with a {strength}{current.get('name', 'moving')} current. "
                 f"Fish here or {travel[0].lower() + travel[1:]}"
             )
         descriptions = {
@@ -2422,7 +2550,7 @@ class WildernessRevampMixin:
             "legacy_lake": "A freshwater wilderness lake.",
         }
         detail = descriptions.get(kind, name)
-        return f"{detail} Fish here or {travel[0].lower() + travel[1:]}"
+        return f"{depth_prefix}{detail} Fish here or {travel[0].lower() + travel[1:]}"
 
     def wilderness_water_movement_preview(self, x: int, y: int) -> bool:
         if not self.on_wilderness() or not self.in_active_bounds(x, y):
@@ -2826,6 +2954,116 @@ class WildernessRevampMixin:
         profile = self.fishing_settlement_upgrade_profile(level + 1)
         if profile: rows.extend(["", f"Next: {profile['name']}", f"Needs: {format_drops(profile['materials'])}"])
         return rows
+
+    def wilderness_angler_request_offer(self, traveler: Dict[str, object]) -> Dict[str, object]:
+        settlement = self.wilderness_fishing_settlement_record()
+        week = self.stronghold_cache_week_key()
+        existing = settlement.get("angler_request", {})
+        if isinstance(existing, dict):
+            if existing.get("accepted") and not existing.get("completed"):
+                return existing
+            if str(existing.get("week", "")) == week:
+                return existing
+        species = self.wilderness_local_fish_species(
+            int(traveler.get("x", self.state.player_x)),
+            int(traveler.get("y", self.state.player_y)),
+        )
+        if not species:
+            return {}
+        seed = self.wilderness_chunk_seed(
+            self.state.wilderness_chunk_x, self.state.wilderness_chunk_y,
+        ) + sum(ord(char) for char in week) * 31 + 89317
+        fish_name = species[random.Random(seed).randrange(len(species))]
+        price = max(1, int(FISH_DATA.get(fish_name, {}).get("price", 1) or 1))
+        quantity = 1 if price >= 220 else 2
+        habitat = "Ocean" if "Ocean" in (FISH_DATA[fish_name].get("habitats", []) or []) else "Freshwater"
+        bait = "Shellfish Bait" if habitat == "Ocean" else "Worm Bait"
+        offer = {
+            "week": week,
+            "fish": fish_name,
+            "quantity": quantity,
+            "reward": price * quantity + max(90, price // 2),
+            "bait": bait,
+            "accepted": False,
+            "completed": False,
+        }
+        settlement["angler_request"] = offer
+        return offer
+
+    def wilderness_angler_request_lines(self, traveler: Dict[str, object]) -> List[str]:
+        offer = self.wilderness_angler_request_offer(traveler)
+        if not offer:
+            return ["No local catch request is available."]
+        fish_name = str(offer.get("fish", "Fish"))
+        quantity = max(1, int(offer.get("quantity", 1) or 1))
+        data = FISH_DATA.get(fish_name, {})
+        carried = int(self.state.inventory.get(fish_name, 0) or 0)
+        return [
+            "LOCAL CATCH REQUEST",
+            "",
+            f"{traveler.get('name', 'The harbor angler')} needs {quantity_item_phrase(fish_name, quantity)} for the harbor's current orders.",
+            str(data.get("description", "The requested species is found in local water.")),
+            "",
+            f"Depth: {', '.join(str(value) for value in data.get('depths', []) or ['varied'])}",
+            f"Season: {', '.join(str(value) for value in data.get('seasons', []) or ['Any'])}",
+            f"Weather: {', '.join(str(value) for value in data.get('weather', []) or ['Any'])}",
+            f"Time: {data.get('time', 'Any')}",
+            f"Carried: {min(carried, quantity)}/{quantity}",
+            f"Reward: {int(offer.get('reward', 0) or 0)}g and 2 {offer.get('bait', 'Worm Bait')}",
+            "",
+            "Accepted requests remain active until delivered; the harbor doesn't discard your work at the end of the week.",
+        ]
+
+    def handle_wilderness_angler_request(self, traveler: Dict[str, object]) -> bool:
+        settlement = self.wilderness_fishing_settlement_record()
+        offer = self.wilderness_angler_request_offer(traveler)
+        if not offer:
+            self.set_message("This harbor has no catch request available.")
+            return False
+        if offer.get("completed"):
+            self.set_message("The harbor's current catch order is already filled.")
+            return False
+        fish_name = str(offer.get("fish", "Fish"))
+        quantity = max(1, int(offer.get("quantity", 1) or 1))
+        carried = int(self.state.inventory.get(fish_name, 0) or 0)
+        items = [self._wilderness_menu_item("details", "Review catch details", "Depth, season, conditions, and reward.")]
+        if not offer.get("accepted"):
+            items.append(self._wilderness_menu_item("accept", "Accept catch request", "Record it in the Fishing Journal until delivered."))
+        else:
+            items.append(self._wilderness_menu_item(
+                "deliver", f"Deliver {quantity_item_phrase(fish_name, quantity)}",
+                f"Carried {min(carried, quantity)}/{quantity}; reward {int(offer.get('reward', 0) or 0)}g.",
+                enabled=carried >= quantity,
+            ))
+        choice = self.vertical_panel_select("Harbor Angler Request", items, 56, 22, return_back=True)
+        if not choice or choice.value == MENU_BACK:
+            return False
+        if choice.value == "details":
+            self.vertical_panel_view("Local Catch Request", self.wilderness_angler_request_lines(traveler), 56, 24)
+            return False
+        if choice.value == "accept":
+            offer["accepted"] = True
+            settlement["angler_request"] = offer
+            self.autosave_with_message(
+                f"Accepted {traveler.get('name', 'the angler')}'s request for {quantity_item_phrase(fish_name, quantity)}."
+            )
+            return True
+        if choice.value == "deliver" and carried >= quantity:
+            self.state.inventory[fish_name] -= quantity
+            reward = max(0, int(offer.get("reward", 0) or 0))
+            bait = str(offer.get("bait", "Worm Bait"))
+            self.state.money += reward
+            add_inventory_items(self.state.inventory, {bait: 2})
+            offer["completed"] = True
+            offer["completed_date"] = str(getattr(self.state, "date_label", ""))
+            settlement["angler_request"] = offer
+            settlement["angler_bond"] = int(settlement.get("angler_bond", 0) or 0) + 3
+            self.advance_time(10)
+            self.autosave_with_message(
+                f"Delivered {quantity_item_phrase(fish_name, quantity)} to {traveler.get('name', 'the harbor angler')}: +{reward}g and 2 {bait}."
+            )
+            return True
+        return False
 
     def show_wilderness_fishing_settlement(self, x: int, y: int):
         record = self.wilderness_fishing_settlement_record()
@@ -4691,8 +4929,12 @@ class WildernessRevampMixin:
                         blocking = True
                     elif season == "Spring" and tile in {".", ";", "%"} and seasonal_roll < 0.012:
                         kind, symbol, description, color = "spring_bloom", '"', "a small spring bloom rooted in the warming ground", "crop"
+                    elif season == "Summer" and tile in {".", ";", "%", '"'} and seasonal_roll < 0.010:
+                        kind, symbol, description, color = "summer_berry_patch", "●", "a sun-warmed patch of ripe summer berries", "crop"
                     elif season == "Fall" and tile in {".", ";", "%", "l"} and seasonal_roll < 0.016:
                         kind, symbol, description, color = "autumn_leaves", "L", "a fresh layer of fallen autumn leaves", "wood"
+                    elif season == "Fall" and tile in {".", ";", "%", '"'} and seasonal_roll < 0.022:
+                        kind, symbol, description, color = "fall_windfall", "●", "late fruit fallen beside the autumn trail", "crop"
 
                 if not kind:
                     continue
@@ -4750,8 +4992,12 @@ class WildernessRevampMixin:
         cost, minutes, drops = 1, 5, {}
         if kind == "spring_bloom":
             drops = {"Wildflowers": 1}
+        elif kind == "summer_berry_patch":
+            drops = {"Berries": 2}
         elif kind == "autumn_leaves":
             drops = {"Fiber": 1}
+        elif kind == "fall_windfall":
+            drops = {"Wild Apple": 1}
         elif kind == "snow_drift":
             if not self.owns_tool("Shovel"):
                 self.set_message("Select and own a Shovel to clear this snow drift.")
@@ -5282,6 +5528,7 @@ class WildernessRevampMixin:
             "route_destination_world_x": int(destination["world_x"]),
             "route_destination_world_y": int(destination["world_y"]),
             "route_steps": 0,
+            "route_recent_world_positions": [],
             "arrival_state": "traveling",
             "arrival_target_refined": "",
             "journey_purpose": str(purpose["purpose"]),
@@ -5699,8 +5946,13 @@ class WildernessRevampMixin:
             for point in traveler.get("home_route_points", [])
             if isinstance(point, (list, tuple)) and len(point) >= 2
         }
+        recent_positions = {
+            (int(point[0]), int(point[1]))
+            for point in traveler.get("route_recent_world_positions", [])
+            if isinstance(point, (list, tuple)) and len(point) >= 2
+        }
 
-        def score(step: Tuple[int, int]) -> Tuple[int, int, int]:
+        def score(step: Tuple[int, int]) -> Tuple[int, int, int, int]:
             destination_x, destination_y, local_x, local_y = self.wilderness_stream_resolve_from_chunk(
                 chunk_x, chunk_y, x + step[0], y + step[1]
             )
@@ -5716,6 +5968,7 @@ class WildernessRevampMixin:
             return (
                 fixed_route_penalty,
                 0 if tile in {":", "="} else 3,
+                5 if (next_world_x, next_world_y) in recent_positions else 0,
                 abs(next_world_x - target_world_x) + abs(next_world_y - target_world_y),
             )
 
@@ -5770,7 +6023,8 @@ class WildernessRevampMixin:
         roles.append({";": "Forager", "%": "Forester", "l": "Cave Guide", "r": "Ferryman", "x": "Quarry Worker", "`": "Caravan Guide", '"': "Snow Guide", "[": "Harbor Pilot"}.get(biome, "Traveler"))
         roles.append("Trail Merchant")
         grid = self.wilderness_stream_map(chunk_x, chunk_y) or self.get_wilderness_chunk_map(chunk_x, chunk_y)
-        blocked = {"#", "~", "=", "S", "V", "X", "!", "T", "o", "*", "?", "R", "J", "P", "K", "Q", "E", WILDERNESS_OUTPOST_SYMBOL, WILDERNESS_STRUCTURE_SYMBOL}
+        blocked = {"#", "~", "=", "S", "V", "X", "!", "T", "o", "*", "?", "R", "J", "P", "K", "Q", "E", WILDERNESS_OUTPOST_SYMBOL, WILDERNESS_STRUCTURE_SYMBOL, WILDERNESS_DOCK_SYMBOL, WILDERNESS_FISHING_SETTLEMENT_SYMBOL}
+        blocked.update(HARBOR_FACILITY_SYMBOLS.values())
         candidates = [(x, y) for y in range(3, len(grid) - 3) for x in range(4, len(grid[0]) - 4) if grid[y][x] not in blocked]
         if (
             self.on_wilderness()
@@ -5797,6 +6051,50 @@ class WildernessRevampMixin:
             rng.shuffle(road_candidates)
         travelers = []
         used = set()
+        settlement_anchor = next(
+            ((x, y) for y, row in enumerate(grid) for x, tile in enumerate(row) if tile == WILDERNESS_FISHING_SETTLEMENT_SYMBOL),
+            None,
+        )
+        if settlement_anchor:
+            position = next(
+                (
+                    (x, y) for x, y in sorted(
+                        candidates,
+                        key=lambda point: abs(point[0] - settlement_anchor[0]) + abs(point[1] - settlement_anchor[1]),
+                    )
+                    if 2 <= abs(x - settlement_anchor[0]) + abs(y - settlement_anchor[1]) <= 12
+                ),
+                None,
+            )
+            if position:
+                settlement = self.wilderness_fishing_settlement_record(chunk_x, chunk_y)
+                identity_rng = random.Random(self.wilderness_chunk_seed(chunk_x, chunk_y) + 89311)
+                sex = str(settlement.get("angler_sex", "") or identity_rng.choice(("Female", "Male")))
+                given_names = FEMALE_GIVEN_NAMES if sex == "Female" else MALE_GIVEN_NAMES
+                name = str(settlement.get("angler_name", "") or f"{identity_rng.choice(given_names)} {identity_rng.choice(SURNAMES)}")
+                settlement["angler_name"] = name
+                settlement["angler_sex"] = sex
+                x, y = position
+                angler = {
+                    "id": f"harbor_angler:{chunk_x},{chunk_y}",
+                    "name": name,
+                    "sex": sex,
+                    "role": "Fisher",
+                    "home": str(settlement.get("name", "the harbor")),
+                    "x": x, "y": y, "anchor_x": x, "anchor_y": y,
+                    "chunk_x": int(chunk_x), "chunk_y": int(chunk_y),
+                    "activity": "checking lines and sorting the harbor's current catch",
+                    "regional_angler": True,
+                    "fishing_settlement_resident": True,
+                    "bond": int(settlement.get("angler_bond", 0) or 0),
+                    "conversations": int(settlement.get("angler_conversations", 0) or 0),
+                    "background": f"I live at {settlement.get('name', 'this harbor')} and fish the surrounding water through every season.",
+                    "goal": "Keep the harbor supplied while learning what changes the local bite.",
+                    "likes": ["fishing", "boats", "weather watching"],
+                }
+                self.enrich_wilderness_traveler_identity(angler, chunk_x, chunk_y)
+                travelers.append(angler)
+                used.add(position)
         specialist_schedule = self.wilderness_specialist_schedule(chunk_x, chunk_y)
         specialist_here = (
             str(specialist_schedule.get("presence", "")) == "wilderness"
@@ -5917,6 +6215,27 @@ class WildernessRevampMixin:
                     "route_destination_world_x": int(target_world_x),
                     "route_destination_world_y": int(target_world_y),
                     "route_steps": 0,
+                })
+                travelers.append(traveler)
+                used.add(position)
+        if hasattr(self, "world_opportunity_travelers_for_chunk"):
+            for traveler in self.world_opportunity_travelers_for_chunk(chunk_x, chunk_y):
+                preferred = (
+                    int(traveler.get("preferred_x", traveler.get("x", -1))),
+                    int(traveler.get("preferred_y", traveler.get("y", -1))),
+                )
+                nearby = sorted(
+                    candidates,
+                    key=lambda point: abs(point[0] - preferred[0]) + abs(point[1] - preferred[1]),
+                )
+                ordered = ([preferred] if preferred in candidates else []) + nearby
+                position = next((point for point in ordered if point not in used), None)
+                if not position:
+                    continue
+                traveler.update({
+                    "x": int(position[0]), "y": int(position[1]),
+                    "anchor_x": int(position[0]), "anchor_y": int(position[1]),
+                    "chunk_x": int(chunk_x), "chunk_y": int(chunk_y),
                 })
                 travelers.append(traveler)
                 used.add(position)
@@ -6068,11 +6387,20 @@ class WildernessRevampMixin:
                         else "leaving the road to avoid nearby hostiles"
                     )
             for dx, dy in options:
+                previous_world = self.wilderness_world_coords(cx, cy, x, y)
                 moved, destination_x, destination_y = self.try_move_wilderness_stream_actor(
                     "traveler", traveler, cx, cy, [(dx, dy)]
                 )
                 if not moved:
                     continue
+                if traveler.get("road_route"):
+                    recent = [
+                        [int(point[0]), int(point[1])]
+                        for point in traveler.get("route_recent_world_positions", [])
+                        if isinstance(point, (list, tuple)) and len(point) >= 2
+                    ]
+                    recent.append([int(previous_world[0]), int(previous_world[1])])
+                    traveler["route_recent_world_positions"] = recent[-6:]
                 if (destination_x, destination_y) == (cx, cy):
                     nx, ny = int(traveler.get("x", x)), int(traveler.get("y", y))
                     awareness = self.wilderness_traveler_environment_awareness(traveler, cx, cy)
@@ -6226,6 +6554,15 @@ class WildernessRevampMixin:
                     f"This is the same traveler recorded by the Elsewhere inn and regional calendar.",
                     f"Route condition: {traveler.get('route_condition', 'Open')}",
                 ])
+        if traveler.get("world_opportunity_party"):
+            rows.extend([
+                "",
+                f"Posted work: {traveler.get('opportunity_title', 'Local Work')}",
+                f"Work party: {', '.join(str(name) for name in traveler.get('party_members', []) if str(name))}",
+                f"Current progress: {traveler.get('party_progress', '0/1')}",
+                f"Next stop: {traveler.get('route_destination_name', 'the next work site')}",
+                f"Payment on return: {int(traveler.get('opportunity_reward', 0))}g",
+            ])
         if traveler.get("resident_adventure_trip"):
             rows.extend([
                 f"Field level: {traveler.get('adventure_level', 1)}",
@@ -6655,9 +6992,25 @@ class WildernessRevampMixin:
     def show_wilderness_traveler(self, traveler: Dict[str, object]):
         items = [
             self._wilderness_menu_item("talk", "Talk", "Ask about this traveler, their route, and nearby places."),
-            self._wilderness_menu_item("patrol", "Walk the local route", "Spend 4 stamina and 25 minutes checking this chunk's roads and hazards."),
         ]
-        if traveler.get("regional_circulation"):
+        if traveler.get("world_opportunity_party"):
+            items.append(self._wilderness_menu_item(
+                "party_work", "Review current work",
+                "See the shared posting, party members, destination, carried supplies, and recent progress.",
+            ))
+        elif traveler.get("regional_angler"):
+            items.extend([
+                self._wilderness_menu_item("fishing_advice", "Ask about local fishing", "Learn which species live here and when and where they bite."),
+                self._wilderness_menu_item("catch_request", "Ask about harbor work", "Accept or deliver the current local catch request."),
+            ])
+            if hasattr(self, "show_fishing_journal_menu"):
+                items.append(self._wilderness_menu_item("fishing_journal", "Compare Fishing Journals", "Open your persistent species and catch records."))
+        else:
+            items.append(self._wilderness_menu_item(
+                "patrol", "Walk the local route",
+                "Spend 4 stamina and 25 minutes checking this chunk's roads and hazards.",
+            ))
+        if traveler.get("regional_circulation") and not traveler.get("world_opportunity_party"):
             items.append(self._wilderness_menu_item(
                 "escort", "Walk together" if traveler.get("home_region_commute") else "Escort along road",
                 (
@@ -6691,7 +7044,16 @@ class WildernessRevampMixin:
             first_meeting = False
             repeated_today = False
             influence_available = False
-            if traveler.get("recurring"):
+            if traveler.get("world_opportunity_party"):
+                npc_id = str(traveler.get("id", ""))
+                first_meeting = int(getattr(self.state, "town_npc_dialogue_counts", {}).get(npc_id, 0) or 0) <= 0
+                repeated_today = str(getattr(self.state, "town_npc_last_talk_day", {}).get(npc_id, "")) == day
+            elif traveler.get("regional_angler"):
+                settlement = self.wilderness_fishing_settlement_record()
+                first_meeting = int(settlement.get("angler_conversations", 0) or 0) <= 0
+                repeated_today = str(settlement.get("angler_talk_day", "")) == day
+                influence_available = not repeated_today
+            elif traveler.get("recurring"):
                 record = self.recurring_wilderness_traveler_record(
                     self.state.wilderness_chunk_x, self.state.wilderness_chunk_y
                 )
@@ -6712,9 +7074,17 @@ class WildernessRevampMixin:
                 (str(line).strip().strip('"“”') for line in route_lines if str(line).strip().startswith(('"', '“'))),
                 str(traveler.get("activity", "I am following the regional roads today.")),
             )
+            if traveler.get("regional_angler"):
+                local_species = self.wilderness_local_fish_species(
+                    int(traveler.get("x", self.state.player_x)), int(traveler.get("y", self.state.player_y)),
+                )
+                agenda = (
+                    f"The water has been changing with the {self.state.weather.lower()} weather. "
+                    + (f"I've been watching for {local_species[0]}." if local_species else "I'm checking the lines before the next boat leaves.")
+                )
             result = self.run_unified_npc_conversation(
                 traveler,
-                kind="traveler",
+                kind="authored" if traveler.get("world_opportunity_party") else "traveler",
                 first_meeting=first_meeting,
                 repeated_today=repeated_today,
                 agenda_override=agenda,
@@ -6728,18 +7098,44 @@ class WildernessRevampMixin:
                 traveler["conversations"] = int(traveler.get("conversations", 0) or 0) + 1
                 if influence_available:
                     traveler["bond"] = int(traveler.get("bond", 0) or 0) + 1
+            if traveler.get("regional_angler") and (result.get("completed") or result.get("transcript")):
+                settlement = self.wilderness_fishing_settlement_record()
+                settlement["angler_talk_day"] = day
+                settlement["angler_conversations"] = int(settlement.get("angler_conversations", 0) or 0) + 1
+                if influence_available:
+                    settlement["angler_bond"] = int(settlement.get("angler_bond", 0) or 0) + 1
             self.autosave_with_message(
                 f"Spoke with {traveler.get('name', 'the traveler')}."
                 + (" Connection +1." if influence_available else "")
             )
         elif choice.value == "patrol":
             self.patrol_with_wilderness_traveler(traveler)
+        elif choice.value == "party_work" and hasattr(self, "world_opportunity_party_detail_lines"):
+            self.vertical_panel_view(
+                f"{traveler.get('name', 'Traveler')} - Current Work",
+                self.world_opportunity_party_detail_lines(str(traveler.get("party_id", ""))),
+                58,
+                27,
+            )
         elif choice.value == "escort" and hasattr(self, "assist_regional_circulation_traveler"):
             self.assist_regional_circulation_traveler(traveler)
         elif choice.value == "snack":
             self.buy_wilderness_traveler_supply("Field Snack", 35)
         elif choice.value == "herbs":
             self.buy_wilderness_traveler_supply("Wild Herbs", 20)
+        elif choice.value == "fishing_advice":
+            self.vertical_panel_view(
+                "Local Fishing Advice",
+                self.wilderness_local_fishing_report_lines(
+                    int(traveler.get("x", self.state.player_x)), int(traveler.get("y", self.state.player_y)),
+                ),
+                56,
+                25,
+            )
+        elif choice.value == "catch_request":
+            self.handle_wilderness_angler_request(traveler)
+        elif choice.value == "fishing_journal" and hasattr(self, "show_fishing_journal_menu"):
+            self.show_fishing_journal_menu()
         elif choice.value == "notes":
             self.vertical_panel_view(
                 f"{traveler.get('name', 'Traveler')} — Route Notebook",

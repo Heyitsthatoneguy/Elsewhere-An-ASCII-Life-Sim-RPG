@@ -21,6 +21,9 @@ from ascii_farmstead_data import (
     CRAFTABLE_ITEMS,
     CROP_DATA,
     FARM_CLAIM_TYPE_DATA,
+    FISHING_BAIT_DATA,
+    FISHING_LURE_DATA,
+    FISHING_ROD_DATA,
     FISH_DATA,
     FOOD_DATA,
     INFRASTRUCTURE_DATA,
@@ -59,6 +62,7 @@ from ascii_farmstead_helpers import (
     weekday_for_date,
 )
 from ascii_farmstead_npc_adventures import sanitize_npc_progression_records
+from ascii_farmstead_world_opportunities import sanitize_world_opportunity_state
 from ascii_farmstead_combat import (
     COMBAT_ACCESSORY_DATA,
     COMBAT_ARMOR_DATA,
@@ -660,6 +664,7 @@ class GameState:
     crime_world_state: Dict[str, object] = None
     quest_records: Dict[str, Dict[str, object]] = None
     tracked_quest_id: str = ""
+    world_opportunity_state: Dict[str, object] = None
     planned_events: Dict[str, Dict[str, object]] = None
     temporary_participant_states: Dict[str, Dict[str, object]] = None
     town_npc_last_gift_day: Dict[str, str] = None
@@ -872,6 +877,14 @@ class GameState:
     fishing_end_at: float = 0.0
     fishing_will_bite: bool = True
     fishing_pool: List[str] = None
+    fishing_cast_rod: str = "Fishing Rod"
+    fishing_cast_depth: str = ""
+    fishing_cast_lure: str = "None"
+    fishing_cast_bait: str = "None"
+    owned_fishing_lures: List[str] = None
+    equipped_fishing_lure: str = "None"
+    equipped_fishing_bait: str = "None"
+    fishing_records: Dict[str, Dict[str, object]] = None
     weather: str = "Sunny"
     message: str = "Welcome to Elsewhere. Press H for help or K for calendar."
     hud_activity_log: List[Dict[str, object]] = None
@@ -1129,6 +1142,9 @@ class GameState:
         if not isinstance(self.quest_records, dict):
             self.quest_records = {}
         self.tracked_quest_id = str(self.tracked_quest_id or "")
+        self.world_opportunity_state = sanitize_world_opportunity_state(
+            self.world_opportunity_state
+        )
         if not isinstance(self.planned_events, dict):
             self.planned_events = {}
         if not isinstance(self.temporary_participant_states, dict):
@@ -2980,6 +2996,54 @@ class GameState:
         self.farm_automation_policy = cleaned_policy
         if self.fishing_pool is None:
             self.fishing_pool = []
+        if not isinstance(self.fishing_records, dict):
+            self.fishing_records = {}
+        cleaned_fishing_records: Dict[str, Dict[str, object]] = {}
+        for species, raw_record in self.fishing_records.items():
+            species = str(species)
+            if species not in FISH_DATA or species == "Old Boot" or not isinstance(raw_record, dict):
+                continue
+            size_label = str(raw_record.get("best_size", "unmeasured") or "unmeasured")
+            if size_label not in {"unmeasured", "small", "average-sized", "large"}:
+                size_label = "unmeasured"
+            try:
+                catch_count = max(0, int(raw_record.get("count", 0) or 0))
+            except (TypeError, ValueError):
+                catch_count = 0
+            cleaned_fishing_records[species] = {
+                "count": catch_count,
+                "best_size": size_label,
+                "first_date": str(raw_record.get("first_date", "") or "")[:48],
+                "last_date": str(raw_record.get("last_date", "") or "")[:48],
+                "first_habitat": str(raw_record.get("first_habitat", "") or "")[:24],
+                "first_depth": str(raw_record.get("first_depth", "") or "")[:16],
+                "first_biome": str(raw_record.get("first_biome", "") or "")[:48],
+                "last_rod": str(raw_record.get("last_rod", "") or "")[:32],
+            }
+        self.fishing_records = cleaned_fishing_records
+        self.owned_fishing_lures = [
+            lure_name for lure_name in clean_string_list(self.owned_fishing_lures)
+            if lure_name in FISHING_LURE_DATA and lure_name != "None"
+        ]
+        self.owned_fishing_lures = list(dict.fromkeys(self.owned_fishing_lures))
+        if (
+            self.equipped_fishing_lure not in self.owned_fishing_lures
+            or self.equipped_fishing_lure not in FISHING_LURE_DATA
+        ):
+            self.equipped_fishing_lure = "None"
+        if (
+            self.equipped_fishing_bait not in FISHING_BAIT_DATA
+            or int(self.inventory.get(str(self.equipped_fishing_bait), 0) or 0) <= 0
+        ):
+            self.equipped_fishing_bait = "None"
+        if self.fishing_cast_rod not in FISHING_ROD_DATA:
+            self.fishing_cast_rod = "Fishing Rod"
+        if self.fishing_cast_depth not in {"", "Shallow", "Normal", "Deep"}:
+            self.fishing_cast_depth = ""
+        if self.fishing_cast_lure not in FISHING_LURE_DATA:
+            self.fishing_cast_lure = "None"
+        if self.fishing_cast_bait not in {"None", *FISHING_BAIT_DATA.keys()}:
+            self.fishing_cast_bait = "None"
         for tool_name, level in default_tool_levels_for(self.owned_tools).items():
             self.tool_levels.setdefault(tool_name, level)
 
@@ -3105,6 +3169,10 @@ def prepare_loaded_state_data(state_data: Dict[str, object]) -> Dict[str, object
 
     # Never resume a half-cast fishing action from a save file.
     state_data["fishing_active"] = False
+    state_data["fishing_cast_rod"] = "Fishing Rod"
+    state_data["fishing_cast_depth"] = ""
+    state_data["fishing_cast_lure"] = "None"
+    state_data["fishing_cast_bait"] = "None"
 
     if state_data.get("location") not in VALID_GAME_LOCATIONS:
         state_data["location"] = "Farm"

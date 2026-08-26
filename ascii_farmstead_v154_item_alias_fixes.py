@@ -11,6 +11,7 @@ Controls:
     F                  Use selected farm/mine tool
     Q / E              Cycle tool
     1 / 2              Cycle owned seed type
+    3 / 4              Cycle fishing bait / reusable lure
     Tab                Inventory / settings
     B                  Reopen shop menu while already standing in shop
     N                  Sleep when inside the farmhouse
@@ -89,6 +90,17 @@ from ascii_farmstead_visuals import (
     wilderness_hydrology_color,
     wilderness_tile_color,
 )
+from ascii_farmstead_fishing import (
+    FISHING_DRAG_LABELS,
+    advance_fishing_fight,
+    bresenham_line,
+    build_fishing_fight_state,
+    classify_water_depth,
+    fish_depth_preferences,
+    fish_tackle_traits,
+    fishing_line_glyph,
+    tackle_weight_multiplier,
+)
 from ascii_farmstead_wilderness_generation import (
     BIOME_PLANT_SYMBOLS,
     BIOME_IDENTITY_DATA,
@@ -128,9 +140,12 @@ from ascii_farmstead_aquarium import (
     aquarium_capacity,
     breed_aquarium_fish,
     can_stock_species,
+    fish_species_color,
+    fish_species_sprite,
     normalize_aquarium_state,
     remove_aquarium_fish,
     rename_aquarium_fish,
+    species_habitat,
     sync_aquarium_legacy_fields,
     transfer_aquarium_fish,
 )
@@ -254,6 +269,7 @@ from ascii_farmstead_ui import (
     pad_to,
     quantity_menu,
     strip_ansi,
+    terminal_height,
     terminal_width,
     text_entry_menu,
     visible_text_len,
@@ -271,6 +287,7 @@ from ascii_farmstead_authored_interiors import (
 )
 from ascii_farmstead_home_world import SeamlessHomeWorldMixin
 from ascii_farmstead_quests import QuestSystemMixin
+from ascii_farmstead_world_opportunities import WorldOpportunityMixin
 from ascii_farmstead_saves import SaveLoadMixin
 from ascii_farmstead_npcs import NpcMixin
 from ascii_farmstead_npc_adventures import NpcAdventureMixin
@@ -760,6 +777,7 @@ class FarmGame(
     VictoryRunMixin,
     DynastyMixin,
     CivicEconomyMixin,
+    WorldOpportunityMixin,
     QuestSystemMixin,
     DialogueFlowMixin,
     ProceduralTownRuntimeMixin,
@@ -10481,9 +10499,9 @@ class FarmGame(
             self.state.player_y = (1 if dy > 0 else max(0, h - 2)) if interaction_target else (0 if dy > 0 else max(0, h - 1))
             preferred = max(0, min(w - 1, old_player_x))
             self.state.player_x = preferred
-        # Short-term social plans are real schedule overrides for their NPCs.
-        # Re-form them beside the player immediately after a seamless chunk
-        # handoff so a bridge/boundary crossing cannot leave the actor off-map.
+        # Companions reform after a backend handoff. Guided NPCs instead retain
+        # their world coordinates and cross through the corresponding edge, so
+        # this synchronization no longer pulls a guide back beside the player.
         self.sync_temporary_participants()
         # Party followers store positions in the current backend chunk. A
         # boundary handoff bypasses the ordinary successful-step path, so their
@@ -13505,10 +13523,18 @@ class FarmGame(
         if building_id and not self.is_town_building_unlocked(building_id):
             self.set_message(self.locked_town_building_message(building_id))
             return False
+        completed_guide = ""
+        if building_id and hasattr(self, "complete_guided_journey_for_place"):
+            completed_guide = self.complete_guided_journey_for_place(
+                f"town:{building_id}"
+            )
         self.state.location = location
         self.state.player_x, self.state.player_y = self.authored_interior_entry_tile()
         self.state.facing = "UP"
-        self.set_message(message)
+        self.set_message(
+            f"{completed_guide} guided you here. {message}"
+            if completed_guide else message
+        )
         return True
 
     def return_from_authored_town_interior(self, building_id: str, message: str) -> None:
@@ -14317,9 +14343,7 @@ class FarmGame(
         return "empty"
 
     def seed_crop_valid_this_season(self, seed_crop: str) -> bool:
-        crop_data = CROP_DATA.get(seed_crop, {})
-        season = str(crop_data.get("season", ""))
-        return season == "Any" or season == self.state.season
+        return crop_valid_for_season(seed_crop, self.state.season)
 
     def seed_hopper_candidates(self, scope: str, land_map: List[List[str]], hopper: Dict[str, object], require_loaded: bool = True) -> List[Tuple[int, int]]:
         hopper_key = str(hopper.get("key", ""))
@@ -14801,7 +14825,8 @@ class FarmGame(
                     quality = crop.projected_quality()
                     item_name = quality_item_name(crop.name, quality)
                     harvested_positions.add(pos)
-                    self.remove_crop_for_scope(scope, xx, yy)
+                    if not self.reset_crop_after_harvest(crop):
+                        self.remove_crop_for_scope(scope, xx, yy)
                     if land_map[yy][xx] in [",", "w"]:
                         land_map[yy][xx] = ","
                     result["harvested"] += 1
@@ -15748,6 +15773,18 @@ class FarmGame(
         self.crops.pop(self.crop_key(x, y), None)
         if self.on_farm() or self.in_seamless_farm_district(x, y):
             self.crops.pop(f"{x},{y}", None)
+
+    def reset_crop_after_harvest(self, crop: Crop) -> bool:
+        """Return a producing crop to its regrowth stage after a harvest."""
+        crop_data = CROP_DATA.get(str(crop.name), {})
+        regrow_days = max(0, int(crop_data.get("regrow_days", 0) or 0))
+        if regrow_days <= 0:
+            return False
+        growth_days = max(1, int(crop_data.get("growth_days", 1) or 1))
+        crop.age = max(0, growth_days - regrow_days)
+        crop.ready = False
+        crop.watered = False
+        return True
 
     def tile_at(self, x: int, y: int) -> str:
         if self.on_farm_work_land():
@@ -16705,18 +16742,43 @@ class FarmGame(
             return "Interior"
         return self.outdoor_lighting_label()
 
+    def seasonal_daylight_window(self) -> Tuple[int, int]:
+        return season_daylight_window(str(getattr(self.state, "season", "Spring")))
+
     def is_night_time(self) -> bool:
-        return int(self.state.hour) >= 19 or int(self.state.hour) < 6
+        sunrise, sunset = self.seasonal_daylight_window()
+        hour = int(self.state.hour)
+        return hour >= sunset or hour < max(0, sunrise - 1)
+
+    def is_dawn_time(self) -> bool:
+        sunrise, _sunset = self.seasonal_daylight_window()
+        return max(0, sunrise - 1) <= int(self.state.hour) < sunrise
 
     def is_dusk_time(self) -> bool:
-        return 17 <= int(self.state.hour) < 19
+        _sunrise, sunset = self.seasonal_daylight_window()
+        return max(0, sunset - 2) <= int(self.state.hour) < sunset
 
     def outdoor_lighting_label(self) -> str:
         if self.is_night_time():
             return "Night"
+        if self.is_dawn_time():
+            return "Dawn"
         if self.is_dusk_time():
             return "Dusk"
         return "Day"
+
+    def seasonal_outdoor_color(self, base_color: str, lit: bool = False, ambient: Optional[bool] = None) -> str:
+        sunrise, sunset = self.seasonal_daylight_window()
+        if ambient is None:
+            ambient = bool(getattr(self.state, "ambient_visuals_enabled", True))
+        return outdoor_time_color(
+            base_color,
+            int(getattr(self.state, "hour", 12)),
+            lit=lit,
+            ambient=bool(ambient),
+            sunrise=sunrise,
+            sunset=sunset,
+        )
 
     def tile_is_near_streetlamp(self, x: int, y: int, radius: int = 5) -> bool:
         if not self.on_town():
@@ -16753,10 +16815,12 @@ class FarmGame(
         return sum(row.count("!") for row in self.town_map)
 
     def town_lighting_report_lines(self) -> List[str]:
+        sunrise, sunset = self.seasonal_daylight_window()
         return [
             "TOWN VISIBILITY",
             "",
             f"Current light level: {self.outdoor_lighting_label()}",
+            f"{self.state.season} daylight: {sunrise:02d}:00-{sunset:02d}:00",
             "",
             "- Outdoor town tiles are dimmer at night.",
             "- Main roads, building entrances, and public boards remain clear.",
@@ -16769,12 +16833,7 @@ class FarmGame(
         lit = bool(tile in {"!", "H", "f"})
         if self.on_town() and self.tile_is_near_streetlamp(x, y):
             lit = True
-        return outdoor_time_color(
-            base_color,
-            int(getattr(self.state, "hour", 12)),
-            lit=lit,
-            ambient=bool(getattr(self.state, "ambient_visuals_enabled", True)),
-        )
+        return self.seasonal_outdoor_color(base_color, lit=lit)
 
     def architectural_display_tile(
         self,
@@ -17102,11 +17161,20 @@ class FarmGame(
         ] = None,
         town_streetlamp_lit_tiles: Optional[Set[Tuple[int, int]]] = None,
         unlocked_town_buildings: Optional[Set[str]] = None,
+        dungeon_explored_tiles: Optional[Set[Tuple[int, int]]] = None,
     ) -> str:
         """Return a one-character tile with location/season-aware color applied."""
         tile_map = tile_map if tile_map is not None else self.active_map()
-        if self.on_wilderness_dungeon() and not self.dungeon_tile_explored(x, y):
-            return " "
+        if self.on_wilderness_dungeon():
+            if dungeon_explored_tiles is None:
+                self.dungeon_update_exploration()
+            explored = (
+                dungeon_explored_tiles
+                if dungeon_explored_tiles is not None
+                else self.dungeon_explored_tiles()
+            )
+            if (int(x), int(y)) not in explored:
+                return " "
         visual_key = int(x) * 31 + int(y) * 17
         if self.on_wilderness():
             visual_world_x, visual_world_y = self.wilderness_world_coords(
@@ -17306,6 +17374,10 @@ class FarmGame(
                 self.wilderness_world_biome_id(visual_world_x, visual_world_y),
                 str(self.wilderness_world_hydrology_at(visual_world_x, visual_world_y).get("kind", ""))
                 if tile == "~" else "",
+                self.wilderness_water_visual_depth(
+                    int(self.state.wilderness_chunk_x), int(self.state.wilderness_chunk_y),
+                    x, y, tile_map,
+                ) if tile == "~" else "",
             )
         if self.on_procedural_town_interior():
             catalog_furniture = self.procedural_town_catalog_furniture_at(x, y)
@@ -17419,9 +17491,8 @@ class FarmGame(
                     if building_glyph == "o":
                         building_glyph = "\u2593"
                     building_color = C.DIM + building_color
-                building_color = outdoor_time_color(
+                building_color = self.seasonal_outdoor_color(
                     building_color,
-                    int(getattr(self.state, "hour", 12)),
                     lit=building_glyph == "o" and building_unlocked,
                     ambient=bool(getattr(self.state, "ambient_visuals_enabled", True)) and building_unlocked,
                 )
@@ -17453,9 +17524,8 @@ class FarmGame(
             )
             if surface:
                 glyph, color = surface
-                color = outdoor_time_color(
+                color = self.seasonal_outdoor_color(
                     color,
-                    int(getattr(self.state, "hour", 12)),
                     lit=glyph == "o",
                     ambient=bool(getattr(self.state, "ambient_visuals_enabled", True)),
                 )
@@ -17627,17 +17697,25 @@ class FarmGame(
                 display_tile = "═" if bool(getattr(self.state, "detailed_glyphs_enabled", True)) else "~"
                 base_color = C.SNOW
             else:
-                display_tile = wilderness_display_glyph(
-                    tile,
-                    int(getattr(self, "_ambient_visual_phase", 0)),
-                    visual_key,
-                    bool(getattr(self.state, "ambient_visuals_enabled", True)),
-                    bool(getattr(self.state, "detailed_glyphs_enabled", True)),
-                )
+                depth = self.fishing_water_depth(x, y)
+                if bool(getattr(self.state, "detailed_glyphs_enabled", True)) and depth in {"Shallow", "Deep"}:
+                    display_tile = "≈" if depth == "Shallow" else "≋"
+                else:
+                    display_tile = wilderness_display_glyph(
+                        tile,
+                        int(getattr(self, "_ambient_visual_phase", 0)),
+                        visual_key,
+                        bool(getattr(self.state, "ambient_visuals_enabled", True)),
+                        bool(getattr(self.state, "detailed_glyphs_enabled", True)),
+                    )
+                base_color = {
+                    "Shallow": C.WATER_SHALLOW,
+                    "Normal": C.WATER_NORMAL,
+                    "Deep": C.WATER_DEEP,
+                }.get(depth, base_color)
         if town_streetlamp_lit_tiles is not None:
-            base_color = outdoor_time_color(
+            base_color = self.seasonal_outdoor_color(
                 base_color,
-                int(getattr(self.state, "hour", 12)),
                 lit=bool(
                     tile in {"!", "H", "f"}
                     or (int(x), int(y)) in town_streetlamp_lit_tiles
@@ -18626,7 +18704,9 @@ class FarmGame(
             if seasonal_surface:
                 action = {
                     "spring_bloom": "Gather it with Z/Enter.",
+                    "summer_berry_patch": "Gather the ripe berries with Z/Enter.",
                     "autumn_leaves": "Collect by hand with Z/Enter or sweep it directly with a Broom and F.",
+                    "fall_windfall": "Gather the fallen fruit with Z/Enter.",
                     "snow_drift": "Clear a passage with a Shovel and F.",
                     "storm_debris": "Cut it directly with an Axe and F.",
                     "spring_high_water": "Use higher ground until it recedes.",
@@ -18872,7 +18952,7 @@ class FarmGame(
                 return feature_text
             if tile in {"<", "U"}: return "Cave exit: walk or use Z/Enter to leave"
             if tile == "=": return "A dry crossing over underground water"
-            if tile == "~": return "Underground water: use F with Fishing Rod"
+            if tile == "~": return "Underground water: use F with a selected fishing rod"
             if tile == "m": return "Cave Mushroom: use Z/Enter to gather"
             if tile == "h": return "Cave Herbs: use Z/Enter to gather"
             if tile == "b": return "Bat Guano: use Z/Enter to collect"
@@ -18915,7 +18995,7 @@ class FarmGame(
                 "g": "Gem node",
                 "B": "Mine barrel",
                 "m": "Cave mushrooms: use Z/Enter to gather",
-                "~": "Underground water: use Fishing Rod with F. Floor 10 has rare cave fish.",
+                "~": "Underground water: use a fishing rod with F. Floor 10 has rare cave fish.",
                 " ": "Dark rock",
             }.get(tile, f"Mine tile '{tile}'")
         if self.on_house():
@@ -19285,8 +19365,10 @@ class FarmGame(
                 return "Z: rest at landmark | I: inspect"
             if tile in ["Y", "u", "W", "N", "F", "O", "L", "e", "p", "G", "Z"]:
                 return "Z: gather/search | I: inspect"
-            if tool == "Fishing Rod":
-                return "F: cast line" if self.water_tile_at(x, y) else "F: fishing needs water"
+            if self.is_fishing_rod(tool):
+                if self.fishing_rod_profile(tool).get("advanced_cast"):
+                    return f"F: aim cast ({self.fishing_power()} tiles) | 3 bait | 4 lure"
+                return "F: cast line | 3 bait | 4 lure" if self.water_tile_at(x, y) else "F: fishing needs water"
             if tool == "Axe":
                 if tile in ["T", "*"]:
                     return "F: chop wilderness wood"
@@ -19307,7 +19389,9 @@ class FarmGame(
             if self.mine_enemy_at(x, y):
                 return "Combat: hostile mine enemy"
             tile = self.active_map()[y][x]
-            if self.state.selected_tool == "Fishing Rod":
+            if self.is_fishing_rod():
+                if self.fishing_rod_profile().get("advanced_cast"):
+                    return f"F: aim cast ({self.fishing_power()} tiles) | 3 bait | 4 lure"
                 return "F: cast line" if tile == "~" else "F: fishing needs water"
             if tile == ">":
                 return "Walk/Z: stairs down" if self.mine_floor_stairs_available(self.state.mine_floor) else "Clear floor to open stairs"
@@ -19346,6 +19430,10 @@ class FarmGame(
             if feature_text:
                 return feature_text
             tile = self.active_map()[y][x]
+            if self.is_fishing_rod():
+                if self.fishing_rod_profile().get("advanced_cast"):
+                    return f"F: aim cast ({self.fishing_power()} tiles) | 3 bait | 4 lure"
+                return "F: cast line" if self.water_tile_at(x, y) else "F: fishing needs water"
             if tile in ["o", "q", "c", "i", "g", "A", "C", "d"]:
                 return "F: mine cave node" if self.owns_tool("Pickaxe") else "F: need Pickaxe"
             if tile in ["<", "U", "m", "h", "b"]:
@@ -19405,7 +19493,7 @@ class FarmGame(
             if qty <= 0:
                 return f"F: no {seed_item}"
             if not self.crop_can_grow_now(seed):
-                return f"F: {seed} is {CROP_DATA[seed]['season']} crop"
+                return f"F: {seed} grows in {crop_season_label(seed)}"
             if tile in [",", "w"] and not crop and not placed:
                 return f"F: plant {seed}"
             return "F: seeds need empty tilled soil"
@@ -19424,10 +19512,16 @@ class FarmGame(
                 return "F: fertilize soil"
             return "F: cannot fertilize"
 
-        if tool == "Fishing Rod":
+        if self.is_fishing_rod(tool):
             if self.state.fishing_active:
                 phase = self.fishing_phase()
+                if phase == "bite" and bool(
+                    self.fishing_rod_profile(self.state.fishing_cast_rod).get("advanced_cast", False)
+                ):
+                    return "F: set hook / start fish fight!"
                 return "F: reel now!" if phase == "bite" else "F: wait for bobber"
+            if self.fishing_rod_profile(tool).get("advanced_cast"):
+                return f"F: aim cast ({self.fishing_power()} tiles) | 3 bait | 4 lure"
             if self.water_tile_at(x, y):
                 return "F: cast line"
             return "F: fishing needs water"
@@ -19673,9 +19767,18 @@ class FarmGame(
 
         return lines
 
-    def draw_with_look_cursor(self, cursor_x: int, cursor_y: int):
+    def draw_with_look_cursor(
+        self,
+        cursor_x: int,
+        cursor_y: int,
+        mode_label: str = "Look",
+        control_text: str = "",
+        detail_text: str = "",
+    ):
         if self.on_wilderness():
-            self.draw_streamed_wilderness_look_cursor(cursor_x, cursor_y)
+            self.draw_streamed_wilderness_look_cursor(
+                cursor_x, cursor_y, mode_label, control_text, detail_text,
+            )
             return
         self.sync_travel_followers()
         lines: List[str] = []
@@ -19690,6 +19793,9 @@ class FarmGame(
         cam_y = max(0, min(max_cam_y, int(cursor_y) - VIEW_HEIGHT // 2))
         npc_positions = self.town_npc_position_lookup()
         actor_lookups = self.frame_actor_position_lookups(map_w, map_h)
+        dungeon_explored_tiles = (
+            self.dungeon_explored_tiles() if self.on_wilderness_dungeon() else None
+        )
         procedural_town_active = bool(
             self.on_wilderness() and self.current_procedural_town_plan()
         )
@@ -19758,19 +19864,21 @@ class FarmGame(
                                 tile_map,
                                 civic_overlay_lookup,
                                 procedural_town_active,
+                                dungeon_explored_tiles=dungeon_explored_tiles,
                             )
                         )
             map_rows.append("".join(line))
 
+        controls = control_text or "LOOK: WASD/Arrows/Num move | Z/Enter/I details | B/X/L/Esc/Q/Tab exit"
         if self.hud_sidebar_active():
             lines.extend(self.header_lines())
-            lines.extend(self.combine_map_and_sidebar(map_rows, (cursor_x, cursor_y), False, "Look"))
-            lines.extend(self.footer_lines("LOOK: WASD/Arrows/Num move | Z/Enter/I details | B/X/L/Esc/Q/Tab exit"))
+            lines.extend(self.combine_map_and_sidebar(map_rows, (cursor_x, cursor_y), False, mode_label))
+            lines.extend(self.footer_lines(controls))
         else:
             lines.extend(self.header_lines())
             lines.extend(map_rows)
-            lines.extend(self.footer_lines("LOOK: WASD/Arrows/Num move | Z/Enter/I details | B/X/L/Esc/Q/Tab exit"))
-            lines.append(f"Look cursor: ({cursor_x},{cursor_y}) {self.describe_tile(cursor_x, cursor_y)}")
+            lines.extend(self.footer_lines(controls))
+            lines.append(detail_text or f"{mode_label} cursor: ({cursor_x},{cursor_y}) {self.describe_tile(cursor_x, cursor_y)}")
         frame = "".join("\033[2K" + str(line) + "\n" for line in lines)
         if frame == self._last_draw_frame and not self._force_full_redraw:
             return
@@ -19833,6 +19941,10 @@ class FarmGame(
         tile = self.wilderness_stream_preview_tile(chunk_x, chunk_y, local_x, local_y)
         if tile == "~" and self.wilderness_water_is_frozen_at(local_x, local_y, chunk_x, chunk_y):
             return "Frozen freshwater ice; passable until the spring thaw"
+        if tile == "~":
+            depth = self.fishing_water_depth(relative_x, relative_y)
+            habitat = self.fishing_water_habitat(relative_x, relative_y)
+            return f"{depth or 'Open'} {habitat.lower() or 'wilderness'} water; fish depth and tackle affect the catch"
         if self.is_wilderness_dungeon_entrance_at(
             local_x, local_y, chunk_x=chunk_x, chunk_y=chunk_y, grid=grid,
         ):
@@ -19864,20 +19976,28 @@ class FarmGame(
             lines.extend(["", "You're looking into the neighboring countryside.", "Step closer to interact with anything there."])
         return lines
 
-    def draw_streamed_wilderness_look_cursor(self, cursor_x: int, cursor_y: int) -> None:
+    def draw_streamed_wilderness_look_cursor(
+        self,
+        cursor_x: int,
+        cursor_y: int,
+        mode_label: str = "Look",
+        control_text: str = "",
+        detail_text: str = "",
+    ) -> None:
         self.sync_travel_followers()
         lines: List[str] = []
         map_rows = self.wilderness_stream_map_lines(cursor_x, cursor_y, (cursor_x, cursor_y))
         chunk_x, chunk_y, local_x, local_y = self.wilderness_stream_resolve(cursor_x, cursor_y)
+        controls = control_text or "LOOK: WASD/Arrows/Num move | Z/Enter/I details | B/X/L/Esc/Q/Tab exit"
         if self.hud_sidebar_active():
             lines.extend(self.header_lines())
-            lines.extend(self.combine_map_and_sidebar(map_rows, (cursor_x, cursor_y), True, "Look"))
-            lines.extend(self.footer_lines("LOOK: WASD/Arrows/Num move | Z/Enter/I details | B/X/L/Esc/Q/Tab exit"))
+            lines.extend(self.combine_map_and_sidebar(map_rows, (cursor_x, cursor_y), True, mode_label))
+            lines.extend(self.footer_lines(controls))
         else:
             lines.extend(self.header_lines())
             lines.extend(map_rows)
-            lines.extend(self.footer_lines("LOOK: WASD/Arrows/Num move | Z/Enter/I details | B/X/L/Esc/Q/Tab exit"))
-            lines.append(f"Look: chunk ({chunk_x},{chunk_y}) tile ({local_x},{local_y}) - {self.describe_streamed_wilderness_tile(cursor_x, cursor_y)}")
+            lines.extend(self.footer_lines(controls))
+            lines.append(detail_text or f"{mode_label}: chunk ({chunk_x},{chunk_y}) tile ({local_x},{local_y}) - {self.describe_streamed_wilderness_tile(cursor_x, cursor_y)}")
         frame = "".join("\033[2K" + str(line) + "\n" for line in lines)
         if frame == self._last_draw_frame and not self._force_full_redraw:
             return
@@ -20370,6 +20490,8 @@ class FarmGame(
             status_chip(tool_label, C.INFRA),
         ]
         context_chips: List[str] = []
+        if self.is_fishing_rod(tool):
+            context_chips.append(status_chip(f"3/4 · {self.fishing_tackle_summary()}", C.WATER))
         if self.unread_mail_count():
             context_chips.append(status_chip(f"Mail {self.unread_mail_count()} unread", C.LAMP))
         if self.on_mine():
@@ -20473,6 +20595,8 @@ class FarmGame(
                 C.UI_MUTED,
             )
         ]
+        if self.is_fishing_rod(tool):
+            context_chips.append(status_chip(f"3/4 · {self.fishing_tackle_summary()}", C.WATER))
         if self.unread_mail_count():
             context_chips.append(status_chip(f"Mail {self.unread_mail_count()} unread", C.LAMP))
         if self.on_mine():
@@ -25075,6 +25199,10 @@ class FarmGame(
                 self.travel_follower_position_lookup(map_width, map_height)
             ),
         }
+        dungeon_visible_tiles: Optional[Set[Tuple[int, int]]] = None
+        if self.on_wilderness_dungeon():
+            self.dungeon_update_exploration()
+            dungeon_visible_tiles = self.dungeon_current_visible_tiles()
 
         def index_records(
             key: str,
@@ -25102,7 +25230,10 @@ class FarmGame(
                     if (
                         key == "dungeon_enemies"
                         and self.on_wilderness_dungeon()
-                        and not self.dungeon_tile_currently_visible(*position)
+                        and (
+                            dungeon_visible_tiles is None
+                            or position not in dungeon_visible_tiles
+                        )
                     ):
                         continue
                     lookup[position] = record
@@ -25114,7 +25245,6 @@ class FarmGame(
                 skip_defeated=True,
             )
         elif self.on_wilderness_dungeon():
-            self.dungeon_update_exploration()
             index_records(
                 "dungeon_enemies",
                 self.get_wilderness_dungeon_enemies(
@@ -25126,7 +25256,7 @@ class FarmGame(
             lookups["followers"] = {
                 position: follower_id
                 for position, follower_id in lookups["followers"].items()
-                if self.dungeon_tile_currently_visible(*position)
+                if dungeon_visible_tiles is not None and position in dungeon_visible_tiles
             }
         elif self.on_wilderness_cave():
             index_records(
@@ -25215,6 +25345,47 @@ class FarmGame(
             else " Inland ice thawed and freshwater routes returned to open water."
         )
 
+    def wilderness_water_visual_depth(
+        self,
+        chunk_x: int,
+        chunk_y: int,
+        x: int,
+        y: int,
+        grid: List[List[str]],
+    ) -> str:
+        if not grid or not (0 <= int(y) < len(grid)) or not (0 <= int(x) < len(grid[0])):
+            return "Normal"
+        if grid[int(y)][int(x)] != "~":
+            return ""
+        nearest_bank = 4
+        for radius in range(1, 4):
+            found = False
+            for check_y in range(int(y) - radius, int(y) + radius + 1):
+                for check_x in range(int(x) - radius, int(x) + radius + 1):
+                    if max(abs(check_x - int(x)), abs(check_y - int(y))) != radius:
+                        continue
+                    if not (0 <= check_y < len(grid) and 0 <= check_x < len(grid[0])):
+                        continue
+                    if grid[check_y][check_x] != "~":
+                        found = True
+                        break
+                if found:
+                    break
+            if found:
+                nearest_bank = radius
+                break
+        if nearest_bank == 1:
+            return "Shallow"
+        world_x, world_y = self.wilderness_world_coords(chunk_x, chunk_y, x, y)
+        if self.wilderness_world_reef_at(world_x, world_y):
+            return "Shallow"
+        kind = str(self.wilderness_world_hydrology_at(world_x, world_y).get("kind", ""))
+        if nearest_bank <= 3:
+            return "Normal"
+        if kind in {"ocean", "lake", "legacy_lake", "terminal_basin"}:
+            return "Deep"
+        return "Normal"
+
     def render_streamed_wilderness_raw_tile(
         self,
         tile: str,
@@ -25224,6 +25395,7 @@ class FarmGame(
         frozen_water: bool = False,
         biome_id: str = "",
         water_kind: str = "",
+        water_depth: str = "",
     ) -> str:
         """Render wilderness terrain identically on either side of a chunk edge."""
         raw_tile = str(tile or " ")[:1]
@@ -25235,9 +25407,8 @@ class FarmGame(
         )
         if landmark_style:
             landmark_glyph, landmark_color = landmark_style
-            landmark_color = outdoor_time_color(
+            landmark_color = self.seasonal_outdoor_color(
                 landmark_color,
-                int(getattr(self.state, "hour", 12)),
                 lit=raw_tile in {WILDERNESS_OUTPOST_SYMBOL, WILDERNESS_STRUCTURE_SYMBOL, WILDERNESS_FISHING_SETTLEMENT_SYMBOL, "R", "Q", "E", "g", "i", "?"},
                 ambient=bool(getattr(self.state, "ambient_visuals_enabled", True)),
             )
@@ -25245,6 +25416,11 @@ class FarmGame(
         if display_tile is None:
             if raw_tile == "~" and frozen_water:
                 display_tile = "═" if bool(getattr(self.state, "detailed_glyphs_enabled", True)) else "~"
+            elif raw_tile == "~" and bool(getattr(self.state, "detailed_glyphs_enabled", True)):
+                display_tile = {
+                    "Shallow": "≈",
+                    "Deep": "≋",
+                }.get(str(water_depth), "~")
             else:
                 display_tile = wilderness_display_glyph(
                     raw_tile,
@@ -25282,11 +25458,16 @@ class FarmGame(
         ) if raw_tile == "~" else None
         if hydrology_color is not None:
             base_color = hydrology_color
+        if raw_tile == "~" and not frozen_water:
+            base_color = {
+                "Shallow": C.WATER_SHALLOW,
+                "Normal": C.WATER_NORMAL,
+                "Deep": C.WATER_DEEP,
+            }.get(str(water_depth), base_color)
         if raw_tile == "~" and frozen_water:
             base_color = C.TUNDRA + (C.BOLD if bool(getattr(self.state, "high_contrast_enabled", False)) else "")
-        base_color = outdoor_time_color(
+        base_color = self.seasonal_outdoor_color(
             base_color,
-            int(getattr(self.state, "hour", 12)),
             lit=raw_tile in {"H", "!"},
             ambient=bool(getattr(self.state, "ambient_visuals_enabled", True)),
         )
@@ -25519,8 +25700,8 @@ class FarmGame(
                 building_id = self.town_building_id_at(source_x, source_y)
                 if building_id and not self.is_town_building_unlocked(building_id):
                     color = C.DIM + color
-                return colorize(glyph, outdoor_time_color(
-                    color, int(getattr(self.state, "hour", 12)),
+                return colorize(glyph, self.seasonal_outdoor_color(
+                    color,
                     lit=glyph == "o",
                     ambient=bool(getattr(self.state, "ambient_visuals_enabled", True)),
                 ))
@@ -25692,7 +25873,7 @@ class FarmGame(
                 seasonal_colors.get(str(seasonal_surface.get("color", "crop")), C.CROP_READY),
             )
         tile = str(grid[int(y)][int(x)])
-        if tile in {"B", "H", "M", "$"}:
+        if tile in {"B", "H", "M", "$", "t"}:
             harbor_feature = self.wilderness_harbor_feature_at(
                 x, y, grid, chunk_x, chunk_y,
             )
@@ -25704,12 +25885,14 @@ class FarmGame(
                     "passenger_shelter": "⌂" if detailed else "H",
                     "repair_bench": "⚒" if detailed else "M",
                     "fish_market": "¤" if detailed else "$",
+                    "tackle_shop": "♢" if detailed else "t",
                 }.get(kind, tile)
                 color = {
                     "cargo_store": C.WOOD,
                     "passenger_shelter": C.LANDMARK_SHELTER,
                     "repair_bench": C.STONE + C.BOLD,
                     "fish_market": C.SERVICE + C.BOLD,
+                    "tackle_shop": C.WATER + C.BOLD,
                 }.get(kind, C.LANDMARK_ACTIVE)
                 return colorize(glyph, color)
         if tile == RECLAIMED_STRONGHOLD_BUILD_BOARD_SYMBOL:
@@ -25771,6 +25954,8 @@ class FarmGame(
             frozen_water,
             self.wilderness_world_biome_id(world_x, world_y),
             str(self.wilderness_world_hydrology_at(world_x, world_y).get("kind", ""))
+            if tile == "~" else "",
+            self.wilderness_water_visual_depth(chunk_x, chunk_y, x, y, grid)
             if tile == "~" else "",
         )
 
@@ -25953,6 +26138,7 @@ class FarmGame(
                 neighbor_expedition_lookups[point] = objective_lookup
                 neighbor_expedition_camps[point] = self.wilderness_expedition_camp_position(point[0], point[1], grid)
         center_screen_x, center_screen_y = VIEW_WIDTH // 2, VIEW_HEIGHT // 2
+        fishing_line_lookup = self.fishing_line_cells()
         lines = []
         for screen_y in range(VIEW_HEIGHT):
             line = []
@@ -25972,10 +26158,20 @@ class FarmGame(
                             held_obj, relative_x, relative_y,
                             held_anchor[0], held_anchor[1], held_ok,
                         ))
+                    elif self.state.fishing_active and (relative_x, relative_y) == (
+                        int(self.state.fishing_target_x), int(self.state.fishing_target_y)
+                    ):
+                        phase = self.fishing_phase()
+                        line.append(colorize(
+                            "!" if phase == "bite" else ("?" if phase == "nibble" else "o"),
+                            C.PLACEMENT if phase == "bite" else C.WATER,
+                        ))
                     elif snapshot:
                         line.append(self.render_wilderness_stream_actor(snapshot[0], snapshot[1]))
                     elif quest_marker == (relative_x, relative_y):
                         line.append(self.render_tracked_quest_marker())
+                    elif (relative_x, relative_y) in fishing_line_lookup:
+                        line.append(colorize(fishing_line_lookup[(relative_x, relative_y)], C.SNOW + C.DIM))
                     else:
                         grid = neighbor_grids.get((chunk_x, chunk_y))
                         if grid:
@@ -26022,6 +26218,11 @@ class FarmGame(
                                     str(self.wilderness_world_hydrology_at(world_x, world_y).get("kind", ""))
                                     if tile == "~" else ""
                                 ),
+                                water_depth=(
+                                    "Deep"
+                                    if tile == "~" and str(self.wilderness_world_hydrology_at(world_x, world_y).get("kind", "")) == "ocean"
+                                    else ("Normal" if tile == "~" else "")
+                                ),
                             ))
                     continue
                 position = (local_x, local_y)
@@ -26055,6 +26256,8 @@ class FarmGame(
                     line.append(self.render_town_npc(npc_positions[position]))
                 elif quest_marker == (relative_x, relative_y):
                     line.append(self.render_tracked_quest_marker())
+                elif (relative_x, relative_y) in fishing_line_lookup:
+                    line.append(colorize(fishing_line_lookup[(relative_x, relative_y)], C.SNOW + C.DIM))
                 else:
                     overlay = (
                         self.render_weather_overlay(local_x, local_y, current_map)
@@ -26120,6 +26323,10 @@ class FarmGame(
         npc_positions = self.town_npc_position_lookup()
         quest_marker = self.tracked_quest_local_position()
         actor_lookups = self.frame_actor_position_lookups(map_w, map_h)
+        dungeon_explored_tiles = (
+            self.dungeon_explored_tiles() if self.on_wilderness_dungeon() else None
+        )
+        fishing_line_lookup = self.fishing_line_cells()
         temporary_participants = self.temporary_participant_position_lookup()
         procedural_town_active = bool(
             self.on_wilderness() and self.current_procedural_town_plan()
@@ -26225,6 +26432,8 @@ class FarmGame(
                     line.append(self.render_town_npc(npc))
                 elif position == quest_marker:
                     line.append(self.render_tracked_quest_marker())
+                elif position in fishing_line_lookup:
+                    line.append(colorize(fishing_line_lookup[position], C.SNOW + C.DIM))
                 else:
                     overlay = (
                         self.render_weather_overlay(world_x, world_y, tile_map)
@@ -26246,6 +26455,7 @@ class FarmGame(
                                 town_public_event_lookup,
                                 town_streetlamp_lit_tiles,
                                 unlocked_town_buildings,
+                                dungeon_explored_tiles=dungeon_explored_tiles,
                             )
                         )
                 if line:
@@ -26318,7 +26528,7 @@ class FarmGame(
 
         status_blocks: List[str] = []
         if self.state.fishing_active:
-            status_blocks.append(f"{self.fishing_status_text()} | F reel")
+            status_blocks.append(f"{self.fishing_status_text()} | {self.fishing_reel_control_text()}")
         if self.state.held_object:
             x, y = self.front_tile_pos()
             rotation = normalize_furniture_rotation(self.state.held_object_rotation)
@@ -26337,6 +26547,9 @@ class FarmGame(
             status_blocks.append(self.dungeon_combat_status_line())
 
         control_line = self.hud_control_line(control_override)
+        if control_line and self.is_fishing_rod() and not self.map_native_combat_active():
+            cast_label = "F aim cast" if self.fishing_rod_profile().get("advanced_cast") else "F cast/reel"
+            control_line += f" | {cast_label} | 3 bait | 4 lure"
         if control_line:
             control_line += " | [ activity log | J history"
 
@@ -26377,7 +26590,7 @@ class FarmGame(
 
         status_blocks: List[str] = []
         if self.state.fishing_active:
-            status_blocks.append(f"{self.fishing_status_text()} | F reel")
+            status_blocks.append(f"{self.fishing_status_text()} | {self.fishing_reel_control_text()}")
         if self.state.held_object:
             x, y = self.front_tile_pos()
             rotation = normalize_furniture_rotation(self.state.held_object_rotation)
@@ -26533,6 +26746,7 @@ class FarmGame(
             self.advance_world_magic_effects(minutes)
             self.world_dialogue_tick(minutes)
             self.update_planned_events()
+            self.update_world_opportunities(minutes)
             self.refresh_quest_states()
             self.crime_decay_incident()
 
@@ -27977,7 +28191,9 @@ class FarmGame(
             if seasonal_surface:
                 return {
                     "spring_bloom": "Z/Enter: gather spring bloom",
+                    "summer_berry_patch": "Z/Enter: gather summer berries",
                     "autumn_leaves": "Z/Enter: collect | F with Broom: sweep",
+                    "fall_windfall": "Z/Enter: gather fallen fruit",
                     "snow_drift": "F with Shovel: clear snow drift",
                     "storm_debris": "F with Axe: clear storm debris",
                     "spring_high_water": "Z/Enter: inspect seasonal high water",
@@ -28043,6 +28259,7 @@ class FarmGame(
                     "passenger_shelter": "Z/Enter: rest at passenger shelter",
                     "repair_bench": "Z/Enter: build or commission watercraft",
                     "fish_market": "Z/Enter: sell fresh catch",
+                    "tackle_shop": "Z/Enter: buy tackle, read local charts, or open Fishing Journal",
                 }.get(str(harbor_feature.get("kind", "")), "Z/Enter: use harbor facility")
             if tile == "S": return "Walk south: return to town"
             if tile in {":", "="}: return "I: inspect route and destinations"
@@ -28598,7 +28815,7 @@ class FarmGame(
                     "Movement and action:",
                     "- WASD, arrows, or numpad move. Numpad 7/9/1/3 move diagonally without cutting blocked corners.",
                     "- Numpad 5 waits during dungeon combat. The number-row 1/2 seed shortcuts remain unchanged.",
-                    "- F uses the selected tool. Q/E cycle tools; 1/2 cycle seed types.",
+                    "- F uses the selected tool. Q/E cycle tools; 1/2 cycle seed types; 3/4 cycle fishing bait and lures.",
                     "- I inspects the target tile. L opens a movable look cursor for distant inspection.",
                     "- Tab opens the player menu. H opens help. K opens the calendar. S saves.",
                     "",
@@ -28625,7 +28842,9 @@ class FarmGame(
                     "- Very late hours eventually force sleep. Plan a safe route home before exhaustion.",
                     "- Weather changes outdoor routines, crop watering, visibility, festivals, animals, and some services.",
                     "- Caves, dungeons, mines, and interiors are sheltered from precipitation.",
-                    "- Crops normally belong to one season and may die when the season changes.",
+                    "- Daylight follows the season: summer days are longest and winter days are shortest.",
+                    "- Crops have listed growing seasons and may die if none match the new season.",
+                    "- Seasonal palettes, freshwater ice, forage, fish, wildlife, and small gatherable changes make each season visible.",
                     "- K opens the calendar. It records birthdays, festivals, markets, hazards, weddings, pregnancy dates, and warnings.",
                     "- Years matter: children grow, elections recur, dynasties age, and succession advances history.",
                     "- Mortality Mode in Settings controls adult aging, old-age succession, lethal combat, and true permadeath.",
@@ -28684,6 +28903,8 @@ class FarmGame(
                     "- Plant the selected seed on tilled soil.",
                     "- Water crops daily unless rain or sprinklers cover them.",
                     "- Crops can die when the season changes if they do not belong to the new season.",
+                    "- Some crops span adjacent seasons; berries, vines, and other producers can regrow after harvest.",
+                    "- Stored crops and fish earn a modest premium when shipped outside their natural season.",
                     "- Ready crops can be picked with Z or Enter.",
                     "- The player decides the farm layout. Clear land, place paths, and make your own rows.",
                 ],
@@ -28706,7 +28927,7 @@ class FarmGame(
                     "- Watering consistency, care days, missed watering, and fertilizer influence harvest quality.",
                     "- Higher-quality harvests are more valuable and remain separate inventory items.",
                     "- Rain waters exposed crops. Sprinklers apply during the overnight update.",
-                    "- Seasonal validity is checked overnight, so harvest vulnerable crops before a season ends.",
+                    "- Seasonal validity is checked overnight; the Crop Almanac lists every valid season and regrowth time.",
                     "- Paths and clear access lanes make large fields faster to work and easier to automate.",
                 ],
             },
@@ -28716,15 +28937,34 @@ class FarmGame(
                 "lines": [
                     "FISHING, FORAGING, AND FOOD SOURCES",
                     "",
-                    "- Select the Fishing Rod, face suitable water, and press F to cast.",
-                    "- Watch the fishing phase and press F again when a bite arrives to reel in the catch.",
+                    "- Every fishing rod uses a casting cursor. The starter Fishing Rod reaches one tile, so stand beside the water before casting.",
+                    "- Buy Casting, Lake, and Ocean Rods from General Store > Fishing Tackle. Their longer casts reach fish and depths farther from shore.",
+                    "- Select rods with Q/E, press F, aim with movement keys, and cast with F, Z, or Enter.",
+                    "- Water is Shallow near banks, Normal farther out, and Deep near the center of large lakes and oceans.",
+                    "- Shallow, Normal, and Deep water are drawn in progressively darker blue so you can judge a cast before aiming.",
+                    "- Press 3 to cycle carried bait and 4 to cycle owned reusable lures. The HUD shows both selections.",
+                    "- Bait is consumed when cast. Matching bait and lures make their preferred fish substantially more likely without guaranteeing a catch.",
+                    "- Watch the fishing phase and press F again when the bobber goes under. A successful hook begins the fish-fighting minigame with any rod.",
+                    "- Hold F, Space, Z, or Enter to reel. Release during a red SURGING warning so the line tension can fall.",
+                    "- The underwater view follows the fish through a scrolling habitat. Its depth, direction, bubbles, bottom terrain, and line angle all move during the fight.",
+                    "- Runs, dives, turns, rises, and thrashing can pull line back off the reel. Watch for TAKING LINE and GAINING LINE.",
+                    "- Fish energy empties during a run, causing a brief rest. Reel immediately: the fish recovers and will pull again.",
+                    "- A fighting fish never swims closer on its own. If you do nothing, repeated runs eventually empty the spool.",
+                    "- Left/Right or A/D changes drag. Firm drag reels faster but builds dangerous tension; Loose drag is slower and safer.",
+                    "- The fish escapes if tension reaches 100% or a powerful fish reaches the end of the spool. B/X/Escape/Q/Tab releases it deliberately.",
+                    "- The starter rod is short and light, Casting Rods offer precise control, Lake Rods balance power and strength, and Ocean Rods retrieve heavy fish on the strongest line.",
                     "- Fish pools are tied to the exact water: farm ponds, wilderness lakes, rivers, and ocean water each support different species.",
+                    "- Wilderness regions also have native fish. Meadows, forests, wetlands, deserts, highlands, tundra, and tropical coasts each hold distinct catches.",
+                    "- Every species you catch is recorded under Tab > Journal > Records & Discoveries > Fishing Journal, including your count and best measured size.",
                     "- Season, weather, and time of day further change which fish can bite.",
                     "- Coral reefs, open coasts, and strong ocean currents have different saltwater fish pools.",
                     "- Tropical reefs contain Coral Darts, Parrotfish, Reef Groupers, and nocturnal Angelfish.",
                     "- Wilderness forage regrows over time and changes with biome and season.",
                     "- Caves provide herbs, mushrooms, minerals, and other specialist ingredients.",
                     "- Fish and forage can be sold, cooked, gifted, donated, or used in requests.",
+                    "- Every real fish can live in an aquarium configured for its freshwater, saltwater, or underground habitat.",
+                    "- Developed harbors have an Angler's Exchange for rods, bait, lures, local charts, and journal access.",
+                    "- Fishing-settlement anglers live beside their harbor. They discuss local conditions and offer persistent catch requests with useful pay and bait rewards.",
                     "- Fish ponds provide a slower farm-based fish supply and can be baited for improved output.",
                     "- Keep rare ingredients until you check crafting, museum, commission, and relationship needs.",
                 ],
@@ -32734,7 +32974,7 @@ class FarmGame(
                 label=seed_item,
                 value=crop_name,
                 enabled=True,
-                hint=f"x{qty}" + ("" if self.seed_crop_valid_this_season(crop_name) else f" {CROP_DATA[crop_name]['season']}"),
+                hint=f"x{qty}" + ("" if self.seed_crop_valid_this_season(crop_name) else f" {crop_season_label(crop_name)}"),
             )
             for crop_name, seed_item, qty in seed_choices
         ]
@@ -33456,7 +33696,7 @@ class FarmGame(
             "- Crystal Eel is possible.",
             "- Pale Koi is rare and valuable.",
             "",
-            "Use the Fishing Rod with F on the water.",
+            "Use any fishing rod with F. Longer-range rods can aim across the underground lake.",
         ]
 
     def deep_shrine_lines(self) -> List[str]:
@@ -33946,7 +34186,9 @@ class FarmGame(
         catalog: Dict[str, Dict[str, object]] = {}
         for crop_name, crop in CROP_DATA.items():
             growth_days = int(crop.get("growth_days", 0) or 0)
-            note = f"{crop.get('season', 'Any')} crop; grows in {growth_days} {quantity_agreement(growth_days, 'day', 'days')}."
+            note = f"{crop_season_label(crop)} crop; grows in {growth_days} {quantity_agreement(growth_days, 'day', 'days')}."
+            if int(crop.get("regrow_days", 0) or 0) > 0:
+                note += f" Regrows in {quantity_agreement(crop['regrow_days'], 'day')}."
             self.museum_add_catalog_record(catalog, "agriculture", crop_name, note=note)
         for fish_name, fish in FISH_DATA.items():
             if fish.get("junk"):
@@ -33956,7 +34198,14 @@ class FarmGame(
                 for x in fish.get("habitats", []) or fish.get("locations", []) or ["Unknown"]
             )
             seasons = ", ".join(str(x) for x in fish.get("seasons", []) or ["Any"])
-            note = f"Habitat: {habitats}. Seasons: {seasons}. Time: {fish.get('time', 'Any')}."
+            depths = ", ".join(fish_depth_preferences(fish_name, fish))
+            note = f"Habitat: {habitats}. Depth: {depths}. Seasons: {seasons}. Time: {fish.get('time', 'Any')}."
+            biome_names = [
+                str(BIOME_IDENTITY_DATA.get(str(biome_id), {}).get("name", biome_id))
+                for biome_id in fish.get("biomes", []) or []
+            ]
+            if biome_names:
+                note += f" Regions: {', '.join(biome_names)}."
             self.museum_add_catalog_record(catalog, "fishing", fish_name, note=note)
         forage_names = sorted({
             str(data.get("item", ""))
@@ -35688,54 +35937,11 @@ class FarmGame(
 
     def festival_catalog(self) -> Dict[str, Dict[str, object]]:
         return {
-            "spring_seed_fair": {
-                "name": "Spring Seed Fair",
-                "month": 3,
-                "day": 7,
-                "season": "Spring",
-                "location": "North Market Street",
-                "description": "A small seed fair celebrating the first serious planting week.",
-                "reward_items": {"Turnip Seeds": 5, "Carrot Seeds": 3},
-                "money": 0,
-                "stamina": 20,
-                "friendship": 3,
-            },
-            "summer_river_picnic": {
-                "name": "Summer River Picnic",
-                "month": 6,
-                "day": 14,
-                "season": "Summer",
-                "location": "Central Park",
-                "description": "A hot-weather picnic with fish, berries, and cold drinks.",
-                "reward_items": {"Woodland Salad": 1, "Berries": 3},
-                "money": 0,
-                "stamina": 35,
-                "friendship": 3,
-            },
-            "fall_harvest_market": {
-                "name": "Fall Harvest Market",
-                "month": 9,
-                "day": 21,
-                "season": "Fall",
-                "location": "Market Promenade",
-                "description": "A harvest market with mushrooms, honey, and late-season goods.",
-                "reward_items": {"Honey": 1, "Cave Mushroom": 2},
-                "money": 200,
-                "stamina": 20,
-                "friendship": 4,
-            },
-            "winter_lantern_night": {
-                "name": "Winter Lantern Night",
-                "month": 12,
-                "day": 28,
-                "season": "Winter",
-                "location": "Civic Boulevard",
-                "description": "A quiet lantern festival for the end of the year.",
-                "reward_items": {"Coal": 3, "Cave Herbs": 2},
-                "money": 300,
-                "stamina": 30,
-                "friendship": 5,
-            },
+            festival_id: {
+                **data,
+                "reward_items": dict(data.get("reward_items", {})),
+            }
+            for festival_id, data in FESTIVAL_DATA.items()
         }
 
     def festival_id_for_date(self, month: int, day: int, year: Optional[int] = None) -> Optional[str]:
@@ -36229,7 +36435,7 @@ class FarmGame(
                     f"Owned land claims: {claim_count}",
                     f"Deepest mine floor: {self.state.deepest_mine_floor}",
                     f"Wilderness chunks visited: {self.state.wilderness_chunks_visited}",
-                    f"Bulletin jobs today: {len(self.today_bulletin_jobs())}",
+                    f"Unresolved posted opportunities: {len(self.world_opportunities(('open', 'claimed_player', 'claimed_npc')))}",
                     f"Fish ponds: {self.fish_pond_summary_counts()[1]}/{self.fish_pond_summary_counts()[0]} stocked, {self.fish_pond_summary_counts()[2]} ready",
                     f"Artisan jars: {self.artisan_processor_summary_counts()[1]}/{self.artisan_processor_summary_counts()[0]} active, {self.artisan_processor_summary_counts()[2]} ready",
                     "",
@@ -37550,6 +37756,29 @@ class FarmGame(
 
 
     def town_bulletin_lines(self) -> List[str]:
+        if hasattr(self, "world_opportunities"):
+            active = self.world_opportunities(("open", "claimed_player", "claimed_npc"))
+            lines = [
+                "TOWN NOTICE BOARD", "", f"Today: {self.state.date_label}", "",
+                "Posted work:",
+            ]
+            lines.extend(
+                f"- {record.get('title')}: {str(record.get('status', 'open')).replace('_', ' ')}; requester {record.get('giver_name', 'unknown')}"
+                for record in active
+            )
+            if not active:
+                lines.append("- No unresolved local postings.")
+            lines.extend([
+                "", "How postings work:",
+                "- The requester, this board, and the Quest Log refer to the same persistent job.",
+                "- Open work remains available until someone accepts it.",
+                "- A few adventurous residents may form a party and undertake unclaimed work in the world.",
+                "- Parties travel, gather, carry, survey, and deliver physical resources rather than resolving work from a timer.",
+                "- New ordinary work is capped and replenished about weekly, not manufactured by daily disasters.",
+                "", "Civic notice:",
+                "- The Museum is open for donations and discovery records." if self.is_town_building_unlocked("museum") else "- The Museum remains listed among the town's restoration projects.",
+            ])
+            return lines
         return [
             "TOWN BULLETIN BOARD",
             "",
@@ -37721,6 +37950,8 @@ class FarmGame(
         return lines
 
     def bulletin_board_menu(self):
+        if hasattr(self, "world_opportunity_board_menu"):
+            return self.world_opportunity_board_menu()
         while True:
             jobs = self.today_bulletin_jobs()
             items: List[MenuItem] = []
@@ -37936,8 +38167,105 @@ class FarmGame(
             return bool(feature and feature.get("kind") == "tide_pool")
         return False
 
-    def fishing_location_name(self) -> Optional[str]:
+    def is_fishing_rod(self, tool_name: Optional[str] = None) -> bool:
+        return str(self.state.selected_tool if tool_name is None else tool_name) in FISHING_ROD_DATA
+
+    def fishing_rod_profile(self, tool_name: Optional[str] = None) -> Dict[str, object]:
+        name = str(self.state.selected_tool if tool_name is None else tool_name)
+        return dict(FISHING_ROD_DATA.get(name, FISHING_ROD_DATA["Fishing Rod"]))
+
+    def fishing_water_is_frozen(self, x: int, y: int) -> bool:
         if self.on_farm():
+            return bool(self.state.season == "Winter" and self.water_tile_at(x, y))
+        if not self.on_wilderness() or not self.water_tile_at(x, y):
+            return False
+        chunk_x, chunk_y = int(self.state.wilderness_chunk_x), int(self.state.wilderness_chunk_y)
+        local_x, local_y = int(x), int(y)
+        if not self.in_active_bounds(local_x, local_y):
+            chunk_x, chunk_y, local_x, local_y = self.wilderness_stream_resolve(local_x, local_y)
+        return bool(self.wilderness_water_is_frozen_at(local_x, local_y, chunk_x, chunk_y))
+
+    def fishing_water_depth(self, x: int, y: int) -> str:
+        if not self.water_tile_at(x, y):
+            return ""
+        habitat = self.fishing_water_habitat(x, y)
+        if habitat == "Ocean" and self.wilderness_coastal_fishing_habitat(x, y) == "Reef":
+            return "Shallow"
+        return classify_water_depth(
+            int(x), int(y), habitat,
+            lambda check_x, check_y: self.water_tile_at(int(check_x), int(check_y)),
+            max_radius=5,
+        )
+
+    def fishing_tackle_summary(self) -> str:
+        lure = str(getattr(self.state, "equipped_fishing_lure", "None") or "None")
+        bait = str(getattr(self.state, "equipped_fishing_bait", "None") or "None")
+        bait_count = int(self.state.inventory.get(bait, 0) or 0) if bait != "None" else 0
+        bait_text = f"{bait} x{bait_count}" if bait != "None" else "None"
+        return f"Bait: {bait_text} | Lure: {lure}"
+
+    def cycle_fishing_bait(self, direction: int = 1) -> None:
+        available = ["None"] + [
+            name for name in FISHING_BAIT_DATA
+            if int(self.state.inventory.get(name, 0) or 0) > 0
+        ]
+        current = str(getattr(self.state, "equipped_fishing_bait", "None") or "None")
+        index = available.index(current) if current in available else 0
+        self.state.equipped_fishing_bait = available[(index + int(direction)) % len(available)]
+        self.set_message(f"Fishing bait equipped: {self.state.equipped_fishing_bait}. {self.fishing_tackle_summary()}")
+
+    def cycle_fishing_lure(self, direction: int = 1) -> None:
+        available = ["None"] + [
+            name for name in FISHING_LURE_DATA
+            if name != "None" and name in (self.state.owned_fishing_lures or [])
+        ]
+        current = str(getattr(self.state, "equipped_fishing_lure", "None") or "None")
+        index = available.index(current) if current in available else 0
+        self.state.equipped_fishing_lure = available[(index + int(direction)) % len(available)]
+        self.set_message(f"Fishing lure equipped: {self.state.equipped_fishing_lure}. {self.fishing_tackle_summary()}")
+
+    def fishing_line_cells(self) -> Dict[Tuple[int, int], str]:
+        if not self.state.fishing_active:
+            return {}
+        signature = (
+            int(self.state.player_x), int(self.state.player_y),
+            int(self.state.fishing_target_x), int(self.state.fishing_target_y),
+            bool(getattr(self.state, "detailed_glyphs_enabled", True)),
+        )
+        if getattr(self, "_fishing_line_cache_signature", None) == signature:
+            return getattr(self, "_fishing_line_cache", {})
+        points = bresenham_line(
+            int(self.state.player_x), int(self.state.player_y),
+            int(self.state.fishing_target_x), int(self.state.fishing_target_y),
+        )
+        cells: Dict[Tuple[int, int], str] = {}
+        for index in range(1, max(1, len(points) - 1)):
+            if index >= len(points) - 1:
+                break
+            cells[points[index]] = fishing_line_glyph(
+                points[index - 1], points[index], points[index + 1],
+                detailed=bool(getattr(self.state, "detailed_glyphs_enabled", True)),
+            )
+        self._fishing_line_cache_signature = signature
+        self._fishing_line_cache = cells
+        return cells
+
+    def fishing_line_render_at(self, x: int, y: int) -> Optional[str]:
+        glyph = self.fishing_line_cells().get((int(x), int(y)))
+        return colorize(glyph, C.SNOW + C.DIM) if glyph else None
+
+    def fishing_location_name(
+        self,
+        target_x: Optional[int] = None,
+        target_y: Optional[int] = None,
+    ) -> Optional[str]:
+        local_x = int(self.state.player_x if target_x is None else target_x)
+        local_y = int(self.state.player_y if target_y is None else target_y)
+        if self.on_farm() or (
+            self.on_wilderness()
+            and target_x is not None and target_y is not None
+            and self.in_seamless_farm_district(local_x, local_y)
+        ):
             return "Farm"
         if self.on_wilderness():
             profile = self.wilderness_region_profile(
@@ -37959,15 +38287,19 @@ class FarmGame(
         target_y: Optional[int] = None,
     ) -> str:
         """Classify the exact body of water being fished, not just its region."""
-        if self.on_farm():
+        local_x = int(self.state.player_x if target_x is None else target_x)
+        local_y = int(self.state.player_y if target_y is None else target_y)
+        if self.on_farm() or (
+            self.on_wilderness()
+            and target_x is not None and target_y is not None
+            and self.in_seamless_farm_district(local_x, local_y)
+        ):
             return "Pond"
         if self.on_mine() or self.on_wilderness_cave():
             return "Underground"
         if not self.on_wilderness():
             return ""
 
-        local_x = int(self.state.player_x if target_x is None else target_x)
-        local_y = int(self.state.player_y if target_y is None else target_y)
         chunk_x = int(self.state.wilderness_chunk_x)
         chunk_y = int(self.state.wilderness_chunk_y)
         if not self.in_active_bounds(local_x, local_y):
@@ -38000,8 +38332,13 @@ class FarmGame(
         target_y: Optional[int] = None,
     ) -> bool:
         habitat = self.fishing_water_habitat(target_x, target_y)
-        location = self.fishing_location_name()
-        if self.on_wilderness():
+        try:
+            location = self.fishing_location_name(target_x, target_y)
+        except TypeError:
+            # Test/content adapters written for the legacy zero-argument hook
+            # remain valid while the built-in classifier accepts exact water.
+            location = self.fishing_location_name()
+        if self.on_wilderness() and location != "Farm":
             location = "Coast" if habitat == "Ocean" else "Wilderness"
         if location is None:
             return False
@@ -38009,6 +38346,9 @@ class FarmGame(
             return False
         habitat_rules = [str(value) for value in data.get("habitats", []) or []]
         if habitat_rules and habitat not in habitat_rules:
+            return False
+        biome_rules = [str(value) for value in data.get("biomes", []) or []]
+        if biome_rules and self.fishing_biome_id(target_x, target_y) not in biome_rules:
             return False
         if self.state.season not in data.get("seasons", []):
             return False
@@ -38023,12 +38363,34 @@ class FarmGame(
             return False
         return True
 
+    def fishing_biome_id(
+        self,
+        target_x: Optional[int] = None,
+        target_y: Optional[int] = None,
+    ) -> str:
+        """Return the persistent detailed biome surrounding an exact cast."""
+        if not self.on_wilderness():
+            return ""
+        local_x = int(self.state.player_x if target_x is None else target_x)
+        local_y = int(self.state.player_y if target_y is None else target_y)
+        if self.in_seamless_farm_district(local_x, local_y):
+            return ""
+        chunk_x, chunk_y = int(self.state.wilderness_chunk_x), int(self.state.wilderness_chunk_y)
+        if not self.in_active_bounds(local_x, local_y):
+            chunk_x, chunk_y, local_x, local_y = self.wilderness_stream_resolve(
+                local_x, local_y
+            )
+        world_x, world_y = self.wilderness_world_coords(
+            chunk_x, chunk_y, local_x, local_y
+        )
+        return str(self.wilderness_world_biome_id(world_x, world_y))
+
     def wilderness_coastal_fishing_habitat(
         self,
         x: Optional[int] = None,
         y: Optional[int] = None,
     ) -> str:
-        if not self.on_wilderness() or self.fishing_location_name() != "Coast":
+        if not self.on_wilderness():
             return ""
         local_x = int(self.state.player_x if x is None else x)
         local_y = int(self.state.player_y if y is None else y)
@@ -38047,8 +38409,22 @@ class FarmGame(
         self,
         target_x: Optional[int] = None,
         target_y: Optional[int] = None,
+        lure_name: Optional[str] = None,
+        bait_name: Optional[str] = None,
     ) -> List[str]:
         water_habitat = self.fishing_water_habitat(target_x, target_y)
+        depth = self.fishing_water_depth(
+            int(self.state.player_x if target_x is None else target_x),
+            int(self.state.player_y if target_y is None else target_y),
+        )
+        lure_name = str(
+            getattr(self.state, "equipped_fishing_lure", "None")
+            if lure_name is None else lure_name
+        )
+        bait_name = str(
+            getattr(self.state, "equipped_fishing_bait", "None")
+            if bait_name is None else bait_name
+        )
         coastal_feature = (
             self.wilderness_coastal_fishing_habitat(target_x, target_y)
             if water_habitat == "Ocean"
@@ -38065,19 +38441,37 @@ class FarmGame(
             ]
             if feature_rules and coastal_feature not in feature_rules:
                 continue
-            weighted.extend([fish_name] * max(0, int(data.get("weight", 1))))
+            if depth and depth not in fish_depth_preferences(fish_name, data):
+                continue
+            base_weight = max(0, int(data.get("weight", 1)))
+            adjusted_weight = int(round(
+                base_weight * tackle_weight_multiplier(
+                    fish_name, data, lure_name, bait_name,
+                )
+            ))
+            if base_weight > 0:
+                adjusted_weight = max(1, adjusted_weight)
+            weighted.extend([fish_name] * adjusted_weight)
         if (self.on_mine() and self.state.mine_floor == 10) or self.on_wilderness_cave():
-            weighted.extend(["Cave Carp"] * 4)
-            weighted.extend(["Blind Minnow"] * 3)
-            weighted.extend(["Crystal Eel"] * 2)
-            weighted.extend(["Pale Koi"] * 2)
+            for cave_fish, base_bonus in (
+                ("Cave Carp", 4), ("Blind Minnow", 3),
+                ("Crystal Eel", 2), ("Pale Koi", 2),
+            ):
+                cave_data = FISH_DATA[cave_fish]
+                if depth and depth not in fish_depth_preferences(cave_fish, cave_data):
+                    continue
+                bonus = max(1, int(round(
+                    base_bonus * tackle_weight_multiplier(
+                        cave_fish, cave_data, lure_name, bait_name,
+                    )
+                )))
+                weighted.extend([cave_fish] * bonus)
         if not weighted:
             weighted = ["Old Boot"]
         return weighted
 
     def fishing_power(self) -> int:
-        # Hook for future rod upgrades; keep simple for now.
-        return 1
+        return max(1, int(self.fishing_rod_profile().get("range", 1)))
 
     def clear_fishing_state(self):
         self.state.fishing_active = False
@@ -38088,6 +38482,12 @@ class FarmGame(
         self.state.fishing_end_at = 0.0
         self.state.fishing_will_bite = True
         self.state.fishing_pool = []
+        self.state.fishing_cast_rod = "Fishing Rod"
+        self.state.fishing_cast_depth = ""
+        self.state.fishing_cast_lure = "None"
+        self.state.fishing_cast_bait = "None"
+        self._fishing_line_cache_signature = None
+        self._fishing_line_cache = {}
 
     def fishing_phase(self) -> str:
         if not self.state.fishing_active:
@@ -38105,16 +38505,26 @@ class FarmGame(
     def fishing_status_text(self) -> str:
         phase = self.fishing_phase()
         if phase == "waiting":
-            return "Fishing: bobber floating..."
+            return f"Fishing ({self.state.fishing_cast_depth or 'water'}): bobber floating..."
         if phase == "nibble":
             return "Fishing: nibble... wait for it..."
         if phase == "bite":
+            if bool(self.fishing_rod_profile(self.state.fishing_cast_rod).get("advanced_cast", False)):
+                return "Fishing: BOBBER UNDER! Press F to set the hook and fight!"
             return "Fishing: BOBBER UNDER! Press F now!"
         if phase == "no_bite":
             return "Fishing: nothing bit."
         if phase == "escaped":
             return "Fishing: the fish got away."
         return ""
+
+    def fishing_reel_control_text(self) -> str:
+        if (
+            self.fishing_phase() == "bite"
+            and bool(self.fishing_rod_profile(self.state.fishing_cast_rod).get("advanced_cast", False))
+        ):
+            return "F hook/fight"
+        return "F reel"
 
     def fishing_tick(self, elapsed_seconds: float):
         if not self.state.fishing_active:
@@ -38130,26 +38540,52 @@ class FarmGame(
             self.clear_fishing_state()
             self.autosave_with_message("The bobber went under, but you reacted too late. The fish got away.")
 
-    def start_fishing_cast(self, x: int, y: int):
+    def start_fishing_cast(self, x: int, y: int, rod_name: Optional[str] = None):
+        rod_name = str(rod_name or self.state.selected_tool)
+        if rod_name not in FISHING_ROD_DATA:
+            rod_name = "Fishing Rod"
+        rod = self.fishing_rod_profile(rod_name)
         if not (self.on_farm() or self.on_wilderness() or self.on_mine() or self.on_wilderness_cave()):
             self.set_message("You need open water to fish.")
             return
         if not self.water_tile_at(x, y):
             self.set_message("Cast the Fishing Rod into water.")
             return
-        if self.on_wilderness() and self.in_active_bounds(x, y) and self.active_map()[y][x] == "~" and self.wilderness_water_is_frozen_at(x, y):
-            self.set_message("The freshwater is frozen solid. Coastal water remains fishable in winter.")
-            return
-        if self.on_farm() and self.in_active_bounds(x, y) and self.active_map()[y][x] == "~" and self.state.season == "Winter":
-            self.set_message("The farm pond is frozen solid. It will be fishable again after the spring thaw.")
+        if self.fishing_water_is_frozen(x, y):
+            self.set_message(
+                "The farm pond is frozen solid until spring."
+                if self.on_farm()
+                else "The freshwater is frozen solid. Coastal water remains fishable in winter."
+            )
             return
         if self.state.fishing_active:
             self.set_message("You already have a line in the water. Press F when the bobber goes under.")
             return
+        distance = max(abs(int(x) - int(self.state.player_x)), abs(int(y) - int(self.state.player_y)))
+        cast_range = max(1, int(rod.get("range", 1)))
+        if distance > cast_range:
+            self.set_message(f"The {rod_name} reaches {cast_range} tiles. Move the casting cursor closer.")
+            return
+        depth = self.fishing_water_depth(x, y)
+        supported_depths = {str(value) for value in rod.get("depths", []) or []}
+        if depth and supported_depths and depth not in supported_depths:
+            self.set_message(f"The {rod_name} cannot handle {depth.lower()} water. Use heavier tackle.")
+            return
+        lure_name = str(getattr(self.state, "equipped_fishing_lure", "None") or "None")
+        bait_name = str(getattr(self.state, "equipped_fishing_bait", "None") or "None")
+        if bait_name != "None" and int(self.state.inventory.get(bait_name, 0) or 0) <= 0:
+            bait_name = "None"
+            self.state.equipped_fishing_bait = "None"
         if not self.spend_stamina(4):
             return
 
-        pool = self.available_fish_here(x, y)
+        pool = self.available_fish_here(x, y, lure_name, bait_name)
+        if bait_name != "None":
+            self.state.inventory[bait_name] = max(
+                0, int(self.state.inventory.get(bait_name, 0) or 0) - 1,
+            )
+            if self.state.inventory[bait_name] <= 0:
+                self.state.equipped_fishing_bait = "None"
         seed = (
             int(self.state.wilderness_seed)
             + self.state.year * 1000000
@@ -38160,6 +38596,7 @@ class FarmGame(
             + x * 31
             + y * 17
             + len(str(self.state.inventory))
+            + sum(ord(char) for char in rod_name + lure_name + bait_name)
         )
         rng = random.Random(seed)
 
@@ -38168,9 +38605,14 @@ class FarmGame(
             bite_chance += 0.10
         if self.state.weather in ["Snow", "Snowy", "Blizzard"]:
             bite_chance -= 0.05
+        bite_chance += float(rod.get("bite_bonus", 0.0) or 0.0)
+        if lure_name != "None":
+            bite_chance += 0.03
+        if bait_name != "None":
+            bite_chance += 0.06
 
         wait_time = rng.uniform(2.0, 5.5)
-        bite_window = 1.35
+        bite_window = 1.35 + float(rod.get("window_bonus", 0.0) or 0.0)
         if self.state.weather in ["Rain", "Rainy", "Storm", "Stormy"]:
             wait_time = max(1.5, wait_time - 0.5)
 
@@ -38182,10 +38624,564 @@ class FarmGame(
         self.state.fishing_end_at = wait_time + bite_window
         self.state.fishing_will_bite = rng.random() <= bite_chance
         self.state.fishing_pool = list(pool)
+        self.state.fishing_cast_rod = rod_name
+        self.state.fishing_cast_depth = depth
+        self.state.fishing_cast_lure = lure_name
+        self.state.fishing_cast_bait = bait_name
+        self._fishing_line_cache_signature = None
 
         habitat = self.fishing_water_habitat(x, y).lower()
-        habitat_text = f" into {habitat} water" if habitat else ""
-        self.set_message(f"You cast your line{habitat_text}. Wait for the bobber to go under, then press F.")
+        water_text = " ".join(value for value in (depth.lower(), habitat) if value)
+        tackle_bits = [value for value in (lure_name, bait_name) if value != "None"]
+        tackle_text = f" using {', '.join(tackle_bits)}" if tackle_bits else ""
+        self.set_message(
+            f"You cast the {rod_name} into {water_text or 'open water'}{tackle_text}. "
+            + (
+                "Wait for the bobber to go under, then press F to set the hook and fight the fish."
+                if bool(rod.get("advanced_cast", False)) else
+                "Wait for the bobber to go under, then press F."
+            )
+        )
+
+    def hooked_fish_seed(self) -> int:
+        return (
+            int(self.state.wilderness_seed)
+            + self.state.year * 1000000
+            + self.state.month * 10000
+            + self.state.day * 100
+            + self.state.hour * 17
+            + self.state.minute * 3
+            + self.state.fishing_target_x * 43
+            + self.state.fishing_target_y * 19
+            + len(str(self.state.inventory))
+        )
+
+    def hooked_fish_name(self) -> str:
+        pool = self.state.fishing_pool or self.available_fish_here(
+            int(self.state.fishing_target_x), int(self.state.fishing_target_y),
+            str(self.state.fishing_cast_lure), str(self.state.fishing_cast_bait),
+        )
+        return random.Random(self.hooked_fish_seed()).choice(pool or ["Old Boot"])
+
+    def record_fishing_catch(
+        self,
+        fish_name: str,
+        fight: Optional[Dict[str, object]] = None,
+    ) -> bool:
+        """Persist portable catch knowledge before the active cast is cleared."""
+        if fish_name == "Old Boot" or fish_name not in FISH_DATA:
+            return False
+        records = getattr(self.state, "fishing_records", None)
+        if not isinstance(records, dict):
+            records = {}
+            self.state.fishing_records = records
+        previous = records.get(fish_name, {})
+        if not isinstance(previous, dict):
+            previous = {}
+        first_catch = fish_name not in records
+        size_label = str((fight or {}).get("size_label", "unmeasured") or "unmeasured")
+        size_rank = {"unmeasured": 0, "small": 1, "average-sized": 2, "large": 3}
+        previous_best = str(previous.get("best_size", "unmeasured") or "unmeasured")
+        best_size = (
+            size_label
+            if size_rank.get(size_label, 0) > size_rank.get(previous_best, 0)
+            else previous_best
+        )
+        target_x = int(getattr(self.state, "fishing_target_x", self.state.player_x))
+        target_y = int(getattr(self.state, "fishing_target_y", self.state.player_y))
+        habitat = str(self.fishing_water_habitat(target_x, target_y) or "Unknown")
+        depth = str(getattr(self.state, "fishing_cast_depth", "") or "Unmeasured")
+        biome_name = ""
+        if self.on_wilderness():
+            biome_id = self.fishing_biome_id(target_x, target_y)
+            biome_name = str(BIOME_IDENTITY_DATA.get(biome_id, {}).get("name", ""))
+        if not biome_name:
+            biome_name = {
+                "Farm": "Farm Pond",
+                "Mine": "Mine Pool",
+                "Coast": "Coast",
+                "Wilderness": "Wilderness",
+            }.get(str(self.fishing_location_name(target_x, target_y)), "Local Water")
+        date_label = str(getattr(self.state, "date_label", "") or "")
+        records[fish_name] = {
+            "count": max(0, int(previous.get("count", 0) or 0)) + 1,
+            "best_size": best_size,
+            "first_date": str(previous.get("first_date", "") or date_label),
+            "last_date": date_label,
+            "first_habitat": str(previous.get("first_habitat", "") or habitat),
+            "first_depth": str(previous.get("first_depth", "") or depth),
+            "first_biome": str(previous.get("first_biome", "") or biome_name),
+            "last_rod": str(getattr(self.state, "fishing_cast_rod", "Fishing Rod") or "Fishing Rod"),
+        }
+        return first_catch
+
+    def award_fishing_catch(
+        self,
+        fish_name: str,
+        *,
+        fight: Optional[Dict[str, object]] = None,
+    ) -> None:
+        first_catch = self.record_fishing_catch(fish_name, fight)
+        self.state.inventory[fish_name] = self.state.inventory.get(fish_name, 0) + 1
+        if hasattr(self, "record_quest_event"):
+            fish_tags = ["fish"]
+            if fish_name == "Old Boot":
+                fish_tags = ["junk", "fishing"]
+            else:
+                habitats = [
+                    str(value).lower()
+                    for value in FISH_DATA.get(fish_name, {}).get("habitats", []) or []
+                ]
+                if "ocean" in habitats:
+                    fish_tags.append("ocean")
+                elif "underground" in habitats:
+                    fish_tags.append("underground")
+                else:
+                    fish_tags.append("freshwater")
+                fish_tags.extend(
+                    value for value in habitats
+                    if value not in fish_tags and value != "underground"
+                )
+            self.record_quest_event(
+                "fish", target_name=fish_name, target_id=fish_name, target_tags=fish_tags,
+                amount=1, location=str(getattr(self.state, "location", "")),
+                note=f"Caught {fish_name} while fishing.",
+            )
+        elapsed = float((fight or {}).get("elapsed", 0.0) or 0.0)
+        self.advance_time(10 + min(10, int(elapsed // 4)))
+        self.clear_fishing_state()
+        price = fish_sell_price(fish_name)
+        if fish_name == "Old Boot":
+            self.autosave_with_message("You reeled in an Old Boot. Not exactly dinner.")
+            return
+        if fight:
+            size_label = str(fight.get("size_label", "") or "")
+            fight_text = f" after a {max(1, round(elapsed))}-second fight" if elapsed else ""
+            article = "an" if size_label[:1].lower() in "aeiou" else "a"
+            self.autosave_with_message(
+                f"You landed {article + ' ' if size_label else 'a '}{size_label + ' ' if size_label else ''}{fish_name}{fight_text}! "
+                f"It can sell for ${price} or be cooked/eaten."
+                + (" New species recorded in your Fishing Journal." if first_catch else "")
+            )
+            return
+        self.autosave_with_message(
+            f"You reeled in {fish_name}! It can sell for ${price} or be cooked/eaten."
+            + (" New species recorded in your Fishing Journal." if first_catch else "")
+        )
+
+    @staticmethod
+    def fishing_fight_meter(
+        value: float,
+        maximum: float,
+        width: int,
+        shade: str,
+    ) -> str:
+        maximum = max(1.0, float(maximum))
+        ratio = max(0.0, min(1.0, float(value) / maximum))
+        filled = max(0, min(int(width), int(round(int(width) * ratio))))
+        return colorize("█" * filled, shade) + colorize("░" * (int(width) - filled), C.UI_MUTED)
+
+    def advanced_fishing_underwater_rows(self, fight: Dict[str, object], width: int, height: int) -> List[str]:
+        """Render a scrolling vertical slice of the hooked fish's habitat."""
+        width = max(30, int(width))
+        height = max(8, int(height))
+        depth = str(fight.get("depth", "Normal"))
+        habitat = str(fight.get("habitat", "Lake") or "Lake")
+        cast_water_style = {
+            "Shallow": C.WATER_SHALLOW,
+            "Normal": C.WATER_NORMAL,
+            "Deep": C.WATER_DEEP,
+        }.get(depth, C.WATER_NORMAL)
+        bottom_style = C.CRYSTAL if habitat == "Underground" else C.STONE if habitat in {"River", "Lake"} else C.COAST if habitat == "Ocean" else C.WOOD
+        chars = [[" " for _x in range(width)] for _y in range(height)]
+        styles = []
+        for y in range(height):
+            depth_ratio = y / float(max(1, height - 1))
+            if depth_ratio < 0.28:
+                band_style = C.WATER_SHALLOW
+            elif depth_ratio < 0.66:
+                band_style = C.WATER_NORMAL
+            else:
+                band_style = C.WATER_DEEP
+            # The selected fishing depth still tints the whole slice while the
+            # vertical bands make the surface-to-bed transition readable.
+            if depth == "Shallow" and depth_ratio < 0.66:
+                band_style = C.WATER_SHALLOW
+            elif depth == "Deep" and depth_ratio >= 0.28:
+                band_style = C.WATER_DEEP
+            styles.append([band_style or cast_water_style for _x in range(width)])
+        camera_x = float(fight.get("camera_x", 0.0) or 0.0)
+        fish_world_x = float(fight.get("fish_world_x", 0.0) or 0.0)
+        elapsed = float(fight.get("elapsed", 0.0) or 0.0)
+        bottom_seed = int(fight.get("bottom_seed", 1) or 1)
+        center_x = width // 2
+        world_origin = int(math.floor(camera_x * 1.7)) - center_x
+
+        def pattern(world_x: int, salt: int) -> int:
+            value = (int(world_x) * 1103515245 + bottom_seed * 2654435761 + int(salt) * 97531) & 0x7FFFFFFF
+            return value
+
+        # The waterline and bobber remain spatially stable while the underwater
+        # terrain scrolls beneath the fighting fish. Foam and wave crests are
+        # deliberately grouped instead of filling the surface with one texture.
+        for x in range(width):
+            wave_phase = (x + int(elapsed * 5)) % 12
+            chars[0][x] = "≈" if wave_phase not in {0, 1, 7} else "~" if wave_phase == 7 else "⌁"
+            styles[0][x] = C.WATER_SHALLOW
+        bobber_x = max(4, min(width - 5, width // 6))
+        bobber_glyph = "●" if int(elapsed * 4) % 2 == 0 else "◉"
+        chars[0][bobber_x] = bobber_glyph
+        styles[0][bobber_x] = C.HOSTILE if float(fight.get("tension", 0.0) or 0.0) >= 82 else C.CROP_READY
+        if bobber_x > 0:
+            chars[0][bobber_x - 1] = "⌒"
+        if bobber_x + 1 < width:
+            chars[0][bobber_x + 1] = "⌒"
+
+        current = float(fight.get("current_strength", 0.0) or 0.0)
+        current_glyph = "›" if current >= 0 else "‹"
+        for y in range(2, height - 2):
+            for x in range(width):
+                world_x = world_origin + x
+                roll = pattern(world_x + y * 17 + int(elapsed * 2), y + 11) % 173
+                if roll == 0:
+                    chars[y][x] = "·"
+                elif habitat in {"River", "Ocean"} and abs(current) > 0.10 and roll in {7, 8}:
+                    chars[y][x] = current_glyph
+                    styles[y][x] = C.WATER_SHALLOW
+
+        # Distant silhouettes provide scale without competing with the hooked
+        # fish. Each habitat gets its own sparse visual language.
+        silhouette_row = max(3, min(height - 4, height // 3))
+        silhouette_count = 2 if habitat in {"Ocean", "Lake", "Underground"} else 1
+        used_silhouette_columns = set()
+        for silhouette_index in range(silhouette_count):
+            x = 7 + pattern(
+                world_origin + silhouette_index * 23,
+                131 + silhouette_index * 6,
+            ) % max(1, width - 15)
+            if any(abs(x - used) < 8 for used in used_silhouette_columns):
+                continue
+            used_silhouette_columns.add(x)
+            world_x = world_origin + x
+            y = silhouette_row + (pattern(world_x, 137) % max(1, height // 4))
+            if not (2 <= y < height - 3):
+                continue
+            distant = {
+                "Ocean": "‹·›",
+                "Lake": "<·>",
+                "River": "‹›",
+                "Pond": "◜◝",
+                "Underground": "◇",
+            }.get(habitat, "‹›")
+            if x + len(distant) >= width:
+                continue
+            for offset, glyph in enumerate(distant):
+                if chars[y][x + offset] == " ":
+                    chars[y][x + offset] = glyph
+                    styles[y][x + offset] = C.UI_MUTED
+
+        floor_row = height - 1
+        floor_chars = {
+            "River": ("▒", "·"),
+            "Lake": ("▄", "▁"),
+            "Pond": ("▂", "▁"),
+            "Ocean": ("░", "·"),
+            "Underground": ("▓", "▄"),
+        }.get(habitat, ("▒", "·"))
+        for x in range(width):
+            world_x = world_origin + x
+            floor_roll = (pattern(world_x, 71) >> 8) % 9
+            chars[floor_row][x] = floor_chars[1] if floor_roll == 0 else floor_chars[0]
+            styles[floor_row][x] = bottom_style
+            # A second contour row breaks up the former ruler-straight bed.
+            contour = pattern(world_x // 2, 73) % 7
+            if contour in {0, 1} and floor_row - 1 > 1:
+                chars[floor_row - 1][x] = "▁" if contour == 0 else "▂"
+                styles[floor_row - 1][x] = bottom_style
+            if pattern(world_x, 83) % 31 == 0:
+                chars[floor_row - 1][x] = {
+                    "Ocean": "◡", "Underground": "♦", "River": "●", "Lake": "○", "Pond": "·",
+                }.get(habitat, "●")
+                styles[floor_row - 1][x] = C.CRYSTAL if habitat == "Underground" else bottom_style
+            plant_roll = pattern(world_x, 97) % (19 if habitat in {"Pond", "River"} else 27)
+            if plant_roll == 0 and habitat != "Underground":
+                plant_height = 2 + pattern(world_x, 101) % max(2, min(4, height - 4))
+                for offset in range(1, plant_height + 1):
+                    yy = floor_row - offset
+                    if yy <= 1:
+                        break
+                    chars[yy][x] = "╿" if offset % 2 else "│"
+                    styles[yy][x] = C.CROP_READY if habitat != "Ocean" else C.WOOD
+
+        # Habitat landmarks make two fishing spots feel materially different.
+        landmark_x = 6 + pattern(world_origin // 3, 149) % max(1, width - 14)
+        if habitat == "Ocean" and floor_row >= 5:
+            for offset, glyph in enumerate("╲│╱"):
+                xx = landmark_x + offset
+                chars[floor_row - 1][xx] = glyph
+                styles[floor_row - 1][xx] = C.COAST
+        elif habitat == "Lake" and floor_row >= 5:
+            for offset, glyph in enumerate("▔╲__"):
+                xx = min(width - 1, landmark_x + offset)
+                chars[floor_row - 2][xx] = glyph
+                styles[floor_row - 2][xx] = C.WOOD
+        elif habitat == "River" and floor_row >= 5:
+            for offset, glyph in enumerate("●●○"):
+                xx = landmark_x + offset
+                chars[floor_row - 1][xx] = glyph
+                styles[floor_row - 1][xx] = C.STONE
+        elif habitat == "Pond" and floor_row >= 5:
+            chars[floor_row - 2][landmark_x] = "⚘"
+            styles[floor_row - 2][landmark_x] = C.CROP_READY
+        elif habitat == "Underground" and floor_row >= 5:
+            for offset, glyph in enumerate("◢♦◣"):
+                xx = landmark_x + offset
+                chars[floor_row - 1][xx] = glyph
+                styles[floor_row - 1][xx] = C.CRYSTAL
+
+        for bubble in fight.get("bubbles", []) or []:
+            if not isinstance(bubble, dict):
+                continue
+            x = int(round(center_x + (float(bubble.get("x", 0.0) or 0.0) - camera_x) * 1.7))
+            y = 1 + int(round(float(bubble.get("depth", 0.5) or 0.5) * max(1, height - 4)))
+            if 0 <= x < width and 1 <= y < floor_row:
+                chars[y][x] = str(bubble.get("glyph", "·"))[:1]
+                styles[y][x] = C.WATER_SHALLOW
+
+        fish_name = str(fight.get("fish_name", "Fish"))
+        direction = -1 if int(fight.get("fish_direction", 1) or 1) < 0 else 1
+        fish_art = fish_species_sprite(fish_name, direction)
+        fish_center = int(round(center_x + (fish_world_x - camera_x) * 1.7))
+        fish_left = max(1, min(width - len(fish_art) - 1, fish_center - len(fish_art) // 2))
+        fish_y = 1 + int(round(float(fight.get("fish_depth", 0.5) or 0.5) * max(1, height - 4)))
+        fish_y = max(2, min(floor_row - 2, fish_y))
+        hook_x = fish_left if direction >= 0 else fish_left + len(fish_art) - 1
+        line_points = bresenham_line(bobber_x, 0, hook_x, fish_y)
+        tension = float(fight.get("tension", 0.0) or 0.0)
+        line_style = C.HOSTILE if tension >= 78 else C.UI_SELECTED
+        for index, (line_x, line_y) in enumerate(line_points[1:-1], start=1):
+            if not (0 <= line_x < width and 0 <= line_y < floor_row):
+                continue
+            previous = line_points[index - 1]
+            following = line_points[index + 1]
+            chars[line_y][line_x] = fishing_line_glyph(previous, (line_x, line_y), following, True)
+            styles[line_y][line_x] = line_style
+
+        fish_style = fish_species_color(fish_name)
+        # A short wake makes bursts and recovery visually distinct even before
+        # the player reads the status banner.
+        wake_direction = -1 if direction >= 0 else 1
+        wake_length = 4 if str(fight.get("mode", "surge")) == "surge" else 2
+        for wake_index in range(1, wake_length + 1):
+            wake_x = fish_left + (0 if direction >= 0 else len(fish_art) - 1) + wake_direction * wake_index
+            if 1 <= wake_x < width - 1 and chars[fish_y][wake_x] == " ":
+                chars[fish_y][wake_x] = "°" if wake_index == 1 else "·"
+                styles[fish_y][wake_x] = C.WATER_SHALLOW
+        for offset, glyph in enumerate(fish_art):
+            x = fish_left + offset
+            if 0 <= x < width:
+                chars[fish_y][x] = glyph
+                styles[fish_y][x] = fish_style
+
+        # Small fixed labels orient the player without turning the scene into a
+        # chart. They sit at the far left, clear of the bobber and fish camera.
+        depth_labels = {
+            1: "SURF",
+            max(2, (floor_row - 1) // 2): "MID ",
+            max(3, floor_row - 2): "BED ",
+        }
+        for y, label in depth_labels.items():
+            if not (1 <= y < floor_row):
+                continue
+            for x, glyph in enumerate(label[:4]):
+                chars[y][x] = glyph
+                styles[y][x] = C.UI_MUTED
+
+        rendered: List[str] = []
+        for y in range(height):
+            pieces: List[str] = []
+            run_style = styles[y][0]
+            run_chars: List[str] = []
+            for x in range(width):
+                if styles[y][x] != run_style:
+                    pieces.append(colorize("".join(run_chars), run_style))
+                    run_chars = []
+                    run_style = styles[y][x]
+                run_chars.append(chars[y][x])
+            pieces.append(colorize("".join(run_chars), run_style))
+            rendered.append("".join(pieces))
+        return rendered
+
+    def advanced_fishing_fight_frame(self, fight: Dict[str, object]) -> str:
+        frame_width = max(54, min(86, terminal_width() - 2))
+        inner = frame_width - 2
+        mode = str(fight.get("mode", "surge"))
+        vigor = max(0.0, float(fight.get("vigor", 0.0) or 0.0))
+        vigor_max = max(1.0, float(fight.get("vigor_max", 1.0) or 1.0))
+        tension = max(0.0, float(fight.get("tension", 0.0) or 0.0))
+        distance = max(0.0, float(fight.get("distance", 0.0) or 0.0))
+        spool = max(1.0, float(fight.get("spool_limit", 1.0) or 1.0))
+        drag = max(0, min(2, int(fight.get("drag", 1) or 1)))
+        reeling = bool(fight.get("reeling", False))
+        result = str(fight.get("result", "active"))
+        if result == "landed":
+            mode_label, mode_style = "✓ LANDED — THE FIGHT IS WON", C.CROP_READY
+        elif result != "active":
+            mode_label, mode_style = "✕ LOST — THE FISH IS GONE", C.HOSTILE
+        elif mode == "surge":
+            maneuver_label = {
+                "dive": "DIVING", "rise": "RISING", "turn": "TURNING",
+                "shake": "THRASHING", "run": "RUNNING", "drift": "DRIFTING",
+            }.get(str(fight.get("maneuver", "run")), "SURGING")
+            mode_label, mode_style = f"▶ RELEASE NOW  •  FISH {maneuver_label}", C.HOSTILE
+        else:
+            mode_label, mode_style = "▶ REEL NOW  •  FISH RECOVERING", C.CROP_READY
+
+        def row(text: object = "", style: str = "") -> str:
+            fitted = fit_text(str(text), inner)
+            padded = fitted + " " * max(0, inner - visible_text_len(fitted))
+            body = colorize(padded, style) if style else padded
+            return colorize("│", C.UI_BORDER) + body + colorize("│", C.UI_BORDER)
+
+        title = " FISH ON! — ADVANCED FISHING "
+        lines = [colorize("┌" + title + "─" * max(0, inner - len(title)) + "┐", C.UI_BORDER + C.BOLD)]
+        fish_name = str(fight.get("fish_name", "Fish"))
+        lines.append(row(
+            f"{fish_name.upper()}  •  {fight.get('habitat', 'Open')} / {fight.get('depth', 'Open')} water  •  {fight.get('rod_name', 'Rod')}",
+            C.UI_TITLE,
+        ))
+        tackle = [str(fight.get(key, "None")) for key in ("lure", "bait")]
+        tackle = [value for value in tackle if value and value != "None"]
+        drag_choices = ["Loose", "Balanced", "Firm"]
+        drag_display = "  ".join(
+            f"[{label.upper()}]" if index == drag else label
+            for index, label in enumerate(drag_choices)
+        )
+        lines.append(row(
+            f"Behavior: {fight.get('behavior', 'Steady')} | "
+            f"Tackle: {', '.join(tackle) if tackle else 'bare hook'} | Drag: {drag_display}"
+        ))
+        lines.append(colorize("├" + "─" * inner + "┤", C.UI_BORDER))
+        lines.append(row(colorize(mode_label, mode_style)))
+
+        scene_height = max(8, min(13, terminal_height() - 16))
+        lines.extend(row(scene_row) for scene_row in self.advanced_fishing_underwater_rows(fight, inner, scene_height))
+        line_delta = float(fight.get("line_delta", 0.0) or 0.0)
+        line_motion = (
+            f"TAKING LINE +{line_delta:.1f}m/s" if line_delta > 0.05
+            else f"GAINING LINE {abs(line_delta):.1f}m/s" if line_delta < -0.05
+            else "LINE HOLDING"
+        )
+        lines.append(colorize("├" + "─" * inner + "┤", C.UI_BORDER))
+
+        meter_width = max(16, min(30, inner - 32))
+        line_style = C.HOSTILE if distance / spool >= 0.86 else C.UI_SELECTED
+        line_motion_style = C.HOSTILE if line_delta > 0.05 else C.CROP_READY if line_delta < -0.05 else C.UI_MUTED
+        lines.append(row(
+            "Line out    [" + self.fishing_fight_meter(distance, spool, meter_width, line_style) +
+            f"] {distance:4.1f}/{spool:4.1f}m  " + colorize(line_motion, line_motion_style)
+        ))
+        tension_style = C.HOSTILE if tension >= 78 else C.UI_SELECTED if tension >= 52 else C.CROP_READY
+        lines.append(row(
+            "Line tension[" + self.fishing_fight_meter(tension, 100.0, meter_width, tension_style) +
+            f"] {round(tension):>3}%"
+        ))
+        lines.append(row(
+            "Fish energy [" + self.fishing_fight_meter(vigor, vigor_max, meter_width, C.WATER) +
+            f"] {round(vigor):>3}/{round(vigor_max):<3}"
+        ))
+        reel_label = "REELING" if reeling else "RELEASED"
+        reel_style = C.UI_SELECTED if reeling else C.UI_MUTED
+        lines.append(row(
+            f"Reel: {colorize(reel_label, reel_style)}  •  Drag: {FISHING_DRAG_LABELS[drag]}  •  "
+            f"Fight time: {float(fight.get('elapsed', 0.0) or 0.0):4.1f}s"
+        ))
+        lines.append(colorize("├" + "─" * inner + "┤", C.UI_BORDER))
+        notice = str(fight.get("notice", "Watch the fish and protect the line."))
+        if result == "active" and tension >= 85.0:
+            notice = "The line is at its breaking point—release the reel!"
+        elif result == "active" and spool - distance <= 3.5:
+            notice = "You're almost out of line—use the drag and recover distance!"
+        lines.append(row(notice, mode_style))
+        lines.append(row("Hold F/Space/Z/Enter: reel  •  A/D or ←/→: drag  •  B/X/Esc/Q/Tab: let go"))
+        lines.append(row("Follow the action banner: release during a run, reel during recovery.", C.UI_MUTED))
+        lines.append(colorize("└" + "─" * inner + "┘", C.UI_BORDER + C.BOLD))
+        return "".join("\033[2K" + line + "\n" for line in lines)
+
+    def draw_advanced_fishing_fight(self, fight: Dict[str, object]) -> None:
+        frame = self.advanced_fishing_fight_frame(fight)
+        self.prepare_terminal_for_fast_draw()
+        try:
+            sys.stdout.write("\033[H" + frame + "\033[J")
+            sys.stdout.flush()
+        except Exception:
+            clear_screen()
+            print(frame, end="")
+
+    def play_advanced_fishing_fight(self, fish_name: str) -> Dict[str, object]:
+        rod_name = str(self.state.fishing_cast_rod or "Casting Rod")
+        rod = self.fishing_rod_profile(rod_name)
+        cast_distance = max(
+            abs(int(self.state.fishing_target_x) - int(self.state.player_x)),
+            abs(int(self.state.fishing_target_y) - int(self.state.player_y)),
+        )
+        fight_seed = self.hooked_fish_seed() + sum(ord(char) for char in fish_name + rod_name) * 97
+        habitat = self.fishing_water_habitat(
+            int(self.state.fishing_target_x), int(self.state.fishing_target_y)
+        )
+        fight = build_fishing_fight_state(
+            fish_name,
+            FISH_DATA.get(fish_name, {}),
+            rod_name,
+            rod,
+            str(self.state.fishing_cast_depth or "Open"),
+            cast_distance,
+            str(self.state.fishing_cast_lure or "None"),
+            str(self.state.fishing_cast_bait or "None"),
+            fight_seed,
+            habitat=habitat,
+        )
+        rng = random.Random(fight_seed ^ 0x5F3759DF)
+        reeling = False
+        reel_until = 0.0
+        drag = 1
+        frame_seconds = 0.10
+        last_step = time.monotonic()
+        append_debug_log(f"Advanced fishing fight started: {fish_name} with {rod_name}")
+        try:
+            while str(fight.get("result", "active")) == "active":
+                reeling = time.monotonic() < reel_until
+                fight["reeling"] = reeling
+                fight["drag"] = drag
+                self.draw_advanced_fishing_fight(fight)
+                key = normalize_key(read_key_timeout(frame_seconds))
+                if key in {"f", " ", "z", "\r", "\n"}:
+                    if not reeling:
+                        fight["notice"] = "You start reeling."
+                    reel_until = time.monotonic() + 0.18
+                elif key in {"a", "LEFT"}:
+                    drag = max(0, drag - 1)
+                    fight["notice"] = f"Drag set to {FISHING_DRAG_LABELS[drag]}."
+                elif key in {"d", "RIGHT"}:
+                    drag = min(2, drag + 1)
+                    fight["notice"] = f"Drag set to {FISHING_DRAG_LABELS[drag]}."
+                elif key in {"b", "x", "\x1b", "q", "\t"}:
+                    fight["result"] = "released"
+                    fight["notice"] = "You release the line and let the fish go."
+                    break
+                now = time.monotonic()
+                reeling = now < reel_until
+                elapsed = max(0.04, min(0.20, now - last_step))
+                last_step = now
+                advance_fishing_fight(fight, elapsed, reeling, drag, rng.random(), rod)
+            self.draw_advanced_fishing_fight(fight)
+            time.sleep(0.28)
+            return fight
+        finally:
+            append_debug_log(
+                f"Advanced fishing fight ended: {fish_name} result={fight.get('result', 'unknown')}"
+            )
+            self.invalidate_draw_cache()
 
     def reel_fishing_line(self):
         if not self.state.fishing_active:
@@ -38208,60 +39204,117 @@ class FarmGame(
             self.autosave_with_message("You reeled in too late. The fish got away.")
             return True
         if phase == "bite":
-            pool = self.state.fishing_pool or self.available_fish_here()
-            seed = (
-                int(self.state.wilderness_seed)
-                + self.state.year * 1000000
-                + self.state.month * 10000
-                + self.state.day * 100
-                + self.state.hour * 17
-                + self.state.minute * 3
-                + self.state.fishing_target_x * 43
-                + self.state.fishing_target_y * 19
-                + len(str(self.state.inventory))
+            fish_name = self.hooked_fish_name()
+            advanced = bool(
+                self.fishing_rod_profile(self.state.fishing_cast_rod).get("advanced_cast", False)
             )
-            rng = random.Random(seed)
-            fish_name = rng.choice(pool)
-            self.state.inventory[fish_name] = self.state.inventory.get(fish_name, 0) + 1
-            if hasattr(self, "record_quest_event"):
-                fish_tags = ["fish"]
-                if fish_name == "Old Boot":
-                    fish_tags = ["junk", "fishing"]
-                else:
-                    habitats = [
-                        str(value).lower()
-                        for value in FISH_DATA.get(fish_name, {}).get("habitats", []) or []
-                    ]
-                    if "ocean" in habitats:
-                        fish_tags.append("ocean")
-                    elif "underground" in habitats:
-                        fish_tags.append("underground")
-                    else:
-                        fish_tags.append("freshwater")
-                    fish_tags.extend(
-                        value for value in habitats
-                        if value not in fish_tags and value != "underground"
-                    )
-                self.record_quest_event(
-                    "fish", target_name=fish_name, target_id=fish_name, target_tags=fish_tags,
-                    amount=1, location=str(getattr(self.state, "location", "")),
-                    note=f"Caught {fish_name} while fishing.",
-                )
-            self.advance_time(10)
-            self.clear_fishing_state()
-            price = fish_sell_price(fish_name)
-            if fish_name == "Old Boot":
-                self.autosave_with_message("You reeled in an Old Boot. Not exactly dinner.")
-            else:
-                self.autosave_with_message(f"You reeled in {fish_name}! It can sell for ${price} or be cooked/eaten.")
+            if advanced and fish_name != "Old Boot":
+                fight = self.play_advanced_fishing_fight(fish_name)
+                result = str(fight.get("result", "released"))
+                if result == "landed":
+                    self.award_fishing_catch(fish_name, fight=fight)
+                    return True
+                self.advance_time(10 + min(8, int(float(fight.get("elapsed", 0.0) or 0.0) // 4)))
+                self.clear_fishing_state()
+                loss_message = {
+                    "line_broke": f"The {fish_name} snapped the line and escaped.",
+                    "spooled": f"The {fish_name} ran out the line and tore free.",
+                    "released": f"You let the {fish_name} go.",
+                }.get(result, f"The {fish_name} got away.")
+                self.autosave_with_message(loss_message)
+                return True
+            self.award_fishing_catch(fish_name)
             return True
         return False
+
+    def advanced_fishing_cast_mode(self, rod_name: str) -> None:
+        rod = self.fishing_rod_profile(rod_name)
+        cast_range = max(1, int(rod.get("range", 1)))
+        cursor_x, cursor_y = self.target_tile_pos()
+        player_x, player_y = int(self.state.player_x), int(self.state.player_y)
+        if not self.on_wilderness() and not self.in_active_bounds(cursor_x, cursor_y):
+            cursor_x, cursor_y = player_x, player_y
+        controls = (
+            f"CAST {rod_name}: WASD/Arrows/Num aim | F/Z/Enter cast | "
+            "3 bait | 4 lure | B/X/Esc/Q/Tab cancel"
+        )
+
+        while True:
+            distance = max(abs(int(cursor_x) - player_x), abs(int(cursor_y) - player_y))
+            water = self.water_tile_at(cursor_x, cursor_y)
+            depth = self.fishing_water_depth(cursor_x, cursor_y) if water else ""
+            habitat = self.fishing_water_habitat(cursor_x, cursor_y) if water else ""
+            supports_depth = not depth or depth in {
+                str(value) for value in rod.get("depths", []) or []
+            }
+            frozen = water and self.fishing_water_is_frozen(cursor_x, cursor_y)
+            status = (
+                f"{depth} {habitat} water"
+                if water else "not water"
+            )
+            if frozen:
+                status += " | frozen"
+            elif water and not supports_depth:
+                status += " | rod too light"
+            elif water:
+                status += " | valid cast"
+            detail = (
+                f"Cast target ({cursor_x},{cursor_y}) | range {distance}/{cast_range} | "
+                f"{status} | {self.fishing_tackle_summary()}"
+            )
+            self.state.message = detail
+            self.draw_with_look_cursor(
+                cursor_x, cursor_y, "Fishing Cast", controls, detail,
+            )
+            key = normalize_key(read_key())
+            if len(key) == 1 and key.isalpha():
+                key = key.lower()
+            if key in ["\t", "\x1b", "q", "x", "b"]:
+                self.set_message("Fishing cast cancelled.", log=False)
+                self.invalidate_draw_cache()
+                return
+            if key == "3":
+                self.cycle_fishing_bait(1)
+                continue
+            if key == "4":
+                self.cycle_fishing_lure(1)
+                continue
+            movement = movement_delta_for_key(key)
+            if movement and tuple(movement) != (0, 0):
+                next_x = int(cursor_x) + int(movement[0])
+                next_y = int(cursor_y) + int(movement[1])
+                if max(abs(next_x - player_x), abs(next_y - player_y)) > cast_range:
+                    self.set_message(f"The {rod_name} can cast up to {cast_range} tiles.", log=False)
+                    continue
+                if not self.on_wilderness() and not self.in_active_bounds(next_x, next_y):
+                    self.set_message("Keep the casting cursor inside the visible area.", log=False)
+                    continue
+                cursor_x, cursor_y = next_x, next_y
+                continue
+            if key in MENU_CONFIRM_KEYS or key == "f":
+                if not water:
+                    self.set_message("Move the casting cursor onto water.", log=False)
+                    continue
+                if frozen:
+                    self.set_message("That water is frozen solid.", log=False)
+                    continue
+                if not supports_depth:
+                    self.set_message(f"The {rod_name} cannot fish {depth.lower()} water.", log=False)
+                    continue
+                self.start_fishing_cast(cursor_x, cursor_y, rod_name)
+                self.invalidate_draw_cache()
+                return
+            self.set_message(controls, log=False)
 
     def use_fishing_rod(self, x: int, y: int):
         if self.state.fishing_active:
             self.reel_fishing_line()
             return
-        self.start_fishing_cast(x, y)
+        rod_name = str(self.state.selected_tool)
+        if bool(self.fishing_rod_profile(rod_name).get("advanced_cast", False)):
+            self.advanced_fishing_cast_mode(rod_name)
+            return
+        self.start_fishing_cast(x, y, rod_name)
 
     def use_utility_tool_at(self, tool: str, x: int, y: int) -> bool:
         """Handle direct non-farming tool actions. Return True when recognized."""
@@ -38399,7 +39452,7 @@ class FarmGame(
                 return
             self.set_message("Use the Pickaxe on cave rocks, ore, coal, clay, or crystals.")
             return
-        if tool == "Fishing Rod":
+        if self.is_fishing_rod(tool):
             if tile == "~":
                 self.start_fishing_cast(x, y)
             else:
@@ -38413,6 +39466,10 @@ class FarmGame(
             self.reel_fishing_line()
             return
         x, y = self.target_tile_pos()
+        tool = self.state.selected_tool
+        if self.is_fishing_rod(tool) and self.fishing_rod_profile(tool).get("advanced_cast"):
+            self.use_fishing_rod(x, y)
+            return
         if not self.in_active_bounds(x, y):
             chunk_x, chunk_y, local_x, local_y = self.wilderness_stream_resolve(x, y)
             dx = int(chunk_x) - int(self.state.wilderness_chunk_x)
@@ -38424,8 +39481,11 @@ class FarmGame(
                 return
             x, y = local_x, local_y
 
-        tool = self.state.selected_tool
         tile = self.active_map()[y][x]
+
+        if self.is_fishing_rod(tool):
+            self.use_fishing_rod(x, y)
+            return
 
         heritage_feature = self.route_heritage_feature_at(x, y)
         if heritage_feature and heritage_feature.get("kind") == "repair":
@@ -38447,9 +39507,6 @@ class FarmGame(
             self.interact_with_wilderness_seasonal_surface(x, y)
             return
 
-        if tool == "Fishing Rod":
-            self.use_fishing_rod(x, y)
-            return
         if tool == "Axe":
             if tile in ["T", "*"]:
                 self.chop_wilderness_wood(x, y)
@@ -38477,8 +39534,12 @@ class FarmGame(
         if self.state.fishing_active:
             self.reel_fishing_line()
             return
+        if self.is_fishing_rod() and self.fishing_rod_profile().get("advanced_cast"):
+            x, y = self.target_tile_pos()
+            self.use_fishing_rod(x, y)
+            return
         if self.on_mine():
-            if self.state.selected_tool == "Fishing Rod" or self.state.selected_tool in UTILITY_TOOL_SHOP_DATA:
+            if self.is_fishing_rod() or self.state.selected_tool in UTILITY_TOOL_SHOP_DATA:
                 self.use_selected_tool_direct()
             else:
                 self.use_mine_tool()
@@ -38561,7 +39622,7 @@ class FarmGame(
             self.use_watering_can(x, y)
         elif tool == "Fertilizer":
             self.use_fertilizer(x, y)
-        elif tool == "Fishing Rod":
+        elif self.is_fishing_rod(tool):
             self.use_fishing_rod(x, y)
         elif tool == "Axe":
             land_map = self.active_farm_work_map() if self.on_farm_work_land() else self.active_map()
@@ -38824,9 +39885,13 @@ class FarmGame(
                 amount=harvest_qty, location=str(getattr(self.state, "location", "")),
                 note=f"Harvested {quantity_item_phrase(item_name, harvest_qty)}.",
             )
-        self.remove_crop(x, y)
+        regrows = self.reset_crop_after_harvest(crop)
+        if not regrows:
+            self.remove_crop(x, y)
         self.set_farm_work_tile(x, y, ",")
         bonus_text = " Rowan's field review produced one extra." if harvest_qty > 1 else ""
+        if regrows:
+            bonus_text += f" The plant will produce again in {quantity_agreement(CROP_DATA[crop.name]['regrow_days'], 'day')}."
         if quality == "Normal":
             self.set_message(f"You harvested {quantity_item_phrase(crop.name, harvest_qty)}.{bonus_text}")
         else:
@@ -39336,6 +40401,7 @@ class FarmGame(
                 pack_price = self.backpack_upgrade_price()
                 main_items = [
                     MenuItem(label="Buy seeds", value="seeds", enabled=True, hint=f"${s.money}"),
+                    MenuItem(label="Fishing tackle", value="fishing_tackle", enabled=True, hint="rods, bait, lures"),
                     MenuItem(label="Buy combat supplies", value="combat_supplies", enabled=True, hint="HP/focus"),
                     MenuItem(label="Buy infrastructure", value="infrastructure", enabled=True, hint="farm items"),
                     MenuItem(
@@ -39371,6 +40437,10 @@ class FarmGame(
                     page = "seeds"
                     continue
 
+                if selected_main.value == "fishing_tackle":
+                    page = "fishing_tackle"
+                    continue
+
                 if selected_main.value == "infrastructure":
                     page = "infrastructure"
                     continue
@@ -39392,6 +40462,99 @@ class FarmGame(
                             s.shop_menu_suppressed_until_exit = True
                         return
                     continue
+
+            elif page == "fishing_tackle":
+                tackle_items: List[MenuItem] = []
+                for rod_name, data in FISHING_ROD_DATA.items():
+                    if rod_name == "Fishing Rod":
+                        continue
+                    owned = self.owns_tool(rod_name)
+                    price = int(data.get("price", 0))
+                    tackle_items.append(MenuItem(
+                        label=rod_name,
+                        value=f"rod:{rod_name}",
+                        enabled=not owned and s.money >= price,
+                        hint="owned" if owned else f"${price} | range {data.get('range', 1)}",
+                    ))
+                for lure_name, data in FISHING_LURE_DATA.items():
+                    if lure_name == "None":
+                        continue
+                    owned = lure_name in (s.owned_fishing_lures or [])
+                    price = int(data.get("price", 0))
+                    tackle_items.append(MenuItem(
+                        label=lure_name,
+                        value=f"lure:{lure_name}",
+                        enabled=not owned and s.money >= price,
+                        hint="owned" if owned else f"${price} reusable",
+                    ))
+                for bait_name, data in FISHING_BAIT_DATA.items():
+                    price = int(data.get("price", 0))
+                    tackle_items.append(MenuItem(
+                        label=bait_name,
+                        value=f"bait:{bait_name}",
+                        enabled=s.money >= price,
+                        hint=f"${price} each | owned {s.inventory.get(bait_name, 0)}",
+                    ))
+                tackle_items.append(MenuItem(label="Back", value=MENU_BACK, enabled=True))
+                tackle_choice = self.vertical_panel_select(
+                    "Fishing Tackle",
+                    tackle_items,
+                    LEFT_PANEL_WIDTH,
+                    LEFT_PANEL_HEIGHT,
+                    return_back=True,
+                )
+                if tackle_choice is None or tackle_choice.value == MENU_BACK:
+                    page = "main"
+                    continue
+                choice_value = str(tackle_choice.value)
+                kind, item_name = choice_value.split(":", 1)
+                data = {
+                    "rod": FISHING_ROD_DATA,
+                    "lure": FISHING_LURE_DATA,
+                    "bait": FISHING_BAIT_DATA,
+                }[kind][item_name]
+                price = int(data.get("price", 0))
+                details = [
+                    item_name.upper(), "", str(data.get("description", "")), "",
+                    f"Price: ${price}" + (" each" if kind == "bait" else ""),
+                ]
+                if kind == "rod":
+                    details.extend([
+                        f"Cast range: {data.get('range', 1)} tiles",
+                        f"Depths: {', '.join(str(value) for value in data.get('depths', []))}",
+                    ])
+                self.vertical_panel_view("Tackle Details", details, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
+                if kind == "bait":
+                    if self.buy_combat_supply_item(item_name, price, "Buy Fishing Bait"):
+                        s.equipped_fishing_bait = item_name
+                    continue
+                confirm = self.vertical_panel_select(
+                    f"Buy {item_name}",
+                    [
+                        MenuItem(label=f"Buy for ${price}", value="buy", enabled=s.money >= price),
+                        MenuItem(label="Back", value=MENU_BACK, enabled=True),
+                    ],
+                    LEFT_PANEL_WIDTH,
+                    LEFT_PANEL_HEIGHT,
+                    return_back=True,
+                )
+                if confirm is None or confirm.value == MENU_BACK:
+                    continue
+                s.money -= price
+                if kind == "rod":
+                    if item_name not in s.owned_tools:
+                        s.owned_tools.append(item_name)
+                    s.tool_levels[item_name] = 1
+                    self.select_tool_by_name(item_name)
+                    self.autosave_with_message(
+                        f"Bought the {item_name}. It is selected; press F to aim a cast, 3 for bait, and 4 for lures."
+                    )
+                else:
+                    if item_name not in s.owned_fishing_lures:
+                        s.owned_fishing_lures.append(item_name)
+                    s.equipped_fishing_lure = item_name
+                    self.autosave_with_message(f"Bought and equipped the reusable {item_name}.")
+                continue
 
             elif page == "infrastructure":
                 infra_items: List[MenuItem] = []
@@ -39479,7 +40642,7 @@ class FarmGame(
                     affordable = s.money >= data["seed_price"]
                     enabled = seasonal and affordable
                     if not seasonal:
-                        hint = f"{data['season']} only"
+                        hint = f"{crop_season_label(data)} only"
                     elif not affordable:
                         hint = "too $"
                     else:
@@ -40977,8 +42140,8 @@ class FarmGame(
         # Overnight crop growth.
         dead = []
         for key, crop in list(self.crops.items()):
-            # Real-season rule: crops outside their listed season die overnight.
-            if CROP_DATA[crop.name].get("season") != "Any" and CROP_DATA[crop.name]["season"] != s.season:
+            # Real-season rule: crops outside all of their valid seasons die overnight.
+            if not crop_valid_for_season(crop.name, s.season):
                 dead.append(key)
                 continue
 
@@ -41490,7 +42653,7 @@ class FarmGame(
             return
 
         if not self.crop_can_grow_now(name):
-            self.set_message(f"{name} grows in {CROP_DATA[name]['season']}, not {s.season}.")
+            self.set_message(f"{name} grows in {crop_season_label(name)}, not {s.season}.")
             return
 
         seed_item = self.seed_item_for_crop(name)
@@ -41560,8 +42723,7 @@ class FarmGame(
         return None
 
     def crop_can_grow_now(self, crop_name: str) -> bool:
-        season = CROP_DATA[crop_name].get("season")
-        return season == "Any" or season == self.state.season
+        return crop_valid_for_season(crop_name, self.state.season)
 
     def owned_seed_names(self) -> List[str]:
         """Crop names for seeds currently in inventory."""
@@ -46938,6 +48100,24 @@ class FarmGame(
             rows.extend(["", "Utility tools:"])
             for tool_name in utility_tools:
                 rows.append(f"- {tool_name}: {UTILITY_TOOL_SHOP_DATA[tool_name]['description']}")
+        fishing_rods = [name for name in self.state.available_tools if name in FISHING_ROD_DATA]
+        if fishing_rods:
+            rows.extend(["", "Fishing rods:"])
+            for rod_name in fishing_rods:
+                profile = FISHING_ROD_DATA[rod_name]
+                if profile.get("advanced_cast"):
+                    rows.append(
+                        f"- {rod_name}: range {profile.get('range', 1)} | "
+                        f"line {float(profile.get('line_strength', 1.0)):.2f} | "
+                        f"reel {float(profile.get('reel_power', 4.0)):.1f} | "
+                        f"control {float(profile.get('control', 1.0)):.2f}"
+                    )
+                    rows.append(
+                        f"  Depths: {', '.join(str(value) for value in profile.get('depths', []))} | fish-fighting minigame"
+                    )
+                else:
+                    rows.append(f"- {rod_name}: adjacent cast | simple catch")
+            rows.append(f"- {self.fishing_tackle_summary()} (3 bait / 4 lure)")
         self.vertical_panel_view("Tool Status", rows, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
         return MENU_BACK
 
@@ -46957,7 +48137,12 @@ class FarmGame(
         for tool_name in self.state.available_tools:
             description = basic_hints.get(
                 tool_name,
-                str(UTILITY_TOOL_SHOP_DATA.get(tool_name, {}).get("description", "direct world tool")),
+                str(
+                    FISHING_ROD_DATA.get(tool_name, {}).get(
+                        "description",
+                        UTILITY_TOOL_SHOP_DATA.get(tool_name, {}).get("description", "direct world tool"),
+                    )
+                ),
             )
             items.append(MenuItem(
                 label=(f"> {tool_name}" if tool_name == selected else tool_name),
@@ -46996,12 +48181,23 @@ class FarmGame(
         if item_name in artisan_prices:
             return artisan_prices[item_name]
         if item_name in FISH_DATA:
-            return fish_sell_price(item_name)
+            return int(round(fish_sell_price(item_name) * self.seasonal_market_multiplier(item_name)))
         crop_name, quality = parse_quality_item(item_name)
         if crop_name and quality:
-            return quality_sell_price(crop_name, quality)
+            return int(round(quality_sell_price(crop_name, quality) * self.seasonal_market_multiplier(item_name)))
         ordinary_price = int(ITEM_SELL_PRICES.get(item_name, 0))
         return ordinary_price if ordinary_price > 0 else self.container_item_sell_price(item_name)
+
+    def seasonal_market_multiplier(self, item_name: str) -> float:
+        """Reward preserving out-of-season goods without penalizing fresh ones."""
+        crop_name, _quality = parse_quality_item(str(item_name))
+        if crop_name and not crop_valid_for_season(crop_name, self.state.season):
+            return 1.15
+        fish_data = FISH_DATA.get(str(item_name), {})
+        fish_seasons = [str(value) for value in fish_data.get("seasons", []) or []]
+        if fish_seasons and "Any" not in fish_seasons and self.state.season not in fish_seasons:
+            return 1.10
+        return 1.0
 
     def shipping_protected_materials(self) -> set[str]:
         safe_resource_goods = {
@@ -47763,7 +48959,10 @@ class FarmGame(
         hearts_stats = self.state.tavern_hearts_stats
         solitaire_stats = self.state.tavern_solitaire_stats
         ur_stats = self.state.tavern_ur_stats
-        ready_jobs = sum(1 for job in self.today_bulletin_jobs() if self.can_complete_bulletin_job(job))
+        ready_jobs = sum(
+            1 for job in self.world_opportunities(("claimed_player",))
+            if str(self.quest_record(str(job.get("quest_id", ""))).get("status", "")) == "ready"
+        )
         ready_requests = sum(1 for request_id in self.resident_request_data() if self.resident_request_status(request_id) == "Ready")
         claim_count = len(self.state.owned_wilderness_claims) if isinstance(self.state.owned_wilderness_claims, dict) else 0
         seen_count = len(getattr(self.state, "combat_bestiary_seen", []) or [])
@@ -47812,7 +49011,7 @@ class FarmGame(
         lines.extend([
             "",
             "Memory aid:",
-            f"- Ready bulletin jobs: {ready_jobs}",
+            f"- Posted opportunities ready to turn in: {ready_jobs}",
             f"- Ready resident requests: {ready_requests}",
             f"- Owned land claims: {claim_count}",
             f"- Relationships tracked: {len(self.active_town_npcs())} active residents",
@@ -47948,22 +49147,6 @@ class FarmGame(
                     "legacy_source": "companion", "legacy_source_id": quest_id,
                     "legacy_owner_id": str(companion_id), "legacy_direct_turn_in": True,
                 })
-
-        for job in self.today_bulletin_jobs():
-            completed = bool(job.get("completed", False))
-            ready = completed or self.can_complete_bulletin_job(job)
-            snapshots.append({
-                "id": f"legacy:bulletin:{job.get('id')}", "title": str(job.get("title", "Bulletin Job")),
-                "category": "Town", "description": str(job.get("note", "")),
-                "status": "completed" if completed else "ready" if ready else "active",
-                "giver_name": "Town Bulletin Board",
-                "objectives": manual_objective(
-                    f"Deliver {quantity_item_phrase(job.get('item', 'requested goods'), int(job.get('qty', 1)))} to the physical town bulletin board.", ready
-                ),
-                "turn_in": {}, "rewards": {"money": int(job.get("reward", 0) or 0)},
-                "legacy_source": "bulletin", "legacy_source_id": str(job.get("id", "")),
-                "legacy_direct_turn_in": False,
-            })
 
         for contract in self.regional_contracts(("active", "completed")):
             contract_id = str(contract.get("id", "") or "")
@@ -48354,6 +49537,211 @@ class FarmGame(
             elif choice.value == "birthdays":
                 self.vertical_panel_view("Birthdays", self.journal_birthday_lines(), LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
 
+    def fishing_aquarium_species(self) -> set:
+        species = set()
+        states = getattr(self.state, "furniture_states", {}) or {}
+        if not isinstance(states, dict):
+            return species
+        journal = states.get("journal:fishkeeping", {})
+        if isinstance(journal, dict):
+            species.update(str(value) for value in journal.get("species", []) or [])
+        for record in states.values():
+            if not isinstance(record, dict):
+                continue
+            tank = record.get("aquarium", {})
+            if not isinstance(tank, dict):
+                continue
+            species.update(str(value) for value in tank.get("known_species", []) or [])
+            species.update(
+                str(fish.get("species", ""))
+                for fish in tank.get("individuals", []) or []
+                if isinstance(fish, dict)
+            )
+        return {name for name in species if name in FISH_DATA and name != "Old Boot"}
+
+    def ensure_fishing_journal_records(self) -> Dict[str, Dict[str, object]]:
+        records = getattr(self.state, "fishing_records", None)
+        if not isinstance(records, dict):
+            records = {}
+            self.state.fishing_records = records
+        known_species = {
+            str(name) for name, quantity in self.state.inventory.items()
+            if str(name) in FISH_DATA and str(name) != "Old Boot" and int(quantity or 0) > 0
+        }
+        known_species.update(self.fishing_aquarium_species())
+        for record_id in self.museum_donated_record_ids():
+            if str(record_id).startswith("fishing:"):
+                known_species.add(str(record_id).split(":", 1)[1])
+        for species in known_species:
+            records.setdefault(species, {
+                "count": 0,
+                "best_size": "unmeasured",
+                "first_date": "Known before journal records",
+                "last_date": "",
+                "first_habitat": "",
+                "first_depth": "",
+                "first_biome": "",
+                "last_rod": "",
+            })
+        return records
+
+    def active_regional_angler_request_lines(self) -> List[str]:
+        rows = []
+        poi_state = getattr(self.state, "wilderness_poi_state", {}) or {}
+        if not isinstance(poi_state, dict):
+            return rows
+        for record in poi_state.values():
+            if not isinstance(record, dict) or str(record.get("kind", "")) != "fishing_settlement":
+                continue
+            request = record.get("angler_request", {})
+            if not isinstance(request, dict) or not request.get("accepted") or request.get("completed"):
+                continue
+            fish_name = str(request.get("fish", "Fish"))
+            quantity = max(1, int(request.get("quantity", 1) or 1))
+            carried = int(self.state.inventory.get(fish_name, 0) or 0)
+            rows.append(
+                f"- {record.get('angler_name', 'Local angler')} at {record.get('name', 'a harbor')}: "
+                f"{quantity_item_phrase(fish_name, quantity)} ({min(carried, quantity)}/{quantity}), "
+                f"reward {int(request.get('reward', 0) or 0)}g"
+            )
+        return sorted(rows)
+
+    def fishing_journal_overview_lines(self) -> List[str]:
+        records = self.ensure_fishing_journal_records()
+        catchable = {name for name, fish in FISH_DATA.items() if not fish.get("junk")}
+        discovered = catchable.intersection(records)
+        total_catches = sum(max(0, int(record.get("count", 0) or 0)) for record in records.values())
+        trophies = sum(1 for record in records.values() if str(record.get("best_size", "")) == "large")
+        aquarium_species = self.fishing_aquarium_species()
+        habitat_counts = {
+            habitat: sum(1 for name in discovered if species_habitat(name, FISH_DATA) == habitat)
+            for habitat in ("Freshwater", "Saltwater", "Underground")
+        }
+        requests = self.active_regional_angler_request_lines()
+        return [
+            "FISHING JOURNAL",
+            "",
+            f"Species recorded: {len(discovered)}/{len(catchable)}",
+            f"Catches recorded since this journal began: {total_catches}",
+            f"Large specimens landed: {trophies}",
+            f"Species kept or previously observed in aquariums: {len(aquarium_species)}",
+            "",
+            "DISCOVERY BY AQUARIUM HABITAT",
+            f"- Freshwater: {habitat_counts['Freshwater']}",
+            f"- Saltwater: {habitat_counts['Saltwater']}",
+            f"- Underground: {habitat_counts['Underground']}",
+            "",
+            "ACTIVE ANGLER REQUESTS",
+            *(requests or ["- None. Speak with anglers at wilderness harbors for local work."]),
+            "",
+            "Catch a species, acquire a preserved specimen, donate one, or keep one in an aquarium to record it.",
+            "Detailed entries list habitat, depth, season, time, preferred tackle, personal records, and aquarium requirements.",
+        ]
+
+    def fishing_journal_species_lines(self, fish_name: str) -> List[str]:
+        records = self.ensure_fishing_journal_records()
+        record = records.get(str(fish_name), {})
+        data = FISH_DATA.get(str(fish_name), {})
+        biome_names = [
+            str(BIOME_IDENTITY_DATA.get(str(value), {}).get("name", value))
+            for value in data.get("biomes", []) or []
+        ]
+        tackle = fish_tackle_traits(str(fish_name), data)
+        aquarium_species = self.fishing_aquarium_species()
+        count = max(0, int(record.get("count", 0) or 0))
+        rows = [
+            str(fish_name).upper(),
+            "",
+            str(data.get("description", "No field description has been recorded.")),
+            "",
+            f"Water: {', '.join(str(value) for value in data.get('habitats', []) or ['Unknown'])}",
+            f"Depth: {', '.join(fish_depth_preferences(str(fish_name), data))}",
+            f"Regions: {', '.join(biome_names) if biome_names else 'not region-restricted'}",
+            f"Seasons: {', '.join(str(value) for value in data.get('seasons', []) or ['Any'])}",
+            f"Weather: {', '.join(str(value) for value in data.get('weather', []) or ['Any'])}",
+            f"Time: {data.get('time', 'Any')}",
+        ]
+        if data.get("water_features"):
+            rows.append(f"Ocean water: {', '.join(str(value) for value in data.get('water_features', []))}")
+        rows.extend([
+            f"Preferred bait: {', '.join(tackle.get('baits', [])) or 'none known'}",
+            f"Preferred lures: {', '.join(tackle.get('lures', [])) or 'none known'}",
+            f"Aquarium: {species_habitat(str(fish_name), FISH_DATA)}; {'recorded in your collection' if fish_name in aquarium_species else 'not yet kept'}",
+            "",
+            "PERSONAL RECORD",
+            f"Catches recorded: {count}",
+            f"Best measured size: {record.get('best_size', 'unmeasured')}",
+            f"First recorded: {record.get('first_date', 'unknown') or 'unknown'}",
+            f"First water: {record.get('first_biome', '') or record.get('first_habitat', '') or 'unknown'}"
+            + (f", {record.get('first_depth')} depth" if record.get("first_depth") else ""),
+            f"Most recent rod: {record.get('last_rod', '') or 'unknown'}",
+            f"Base sale value: {fish_sell_price(str(fish_name))}g",
+        ])
+        return rows
+
+    def show_fishing_journal_species_menu(self, habitat: str = "") -> None:
+        records = self.ensure_fishing_journal_records()
+        species = sorted(
+            name for name in records
+            if name in FISH_DATA and name != "Old Boot"
+            and (not habitat or species_habitat(name, FISH_DATA) == habitat)
+        )
+        if not species:
+            self.vertical_panel_view(
+                f"{habitat or 'Fishing'} Records",
+                ["No species in this section have been recorded yet."],
+                LEFT_PANEL_WIDTH,
+                LEFT_PANEL_HEIGHT,
+            )
+            return
+        while True:
+            items = [
+                MenuItem(
+                    label=name,
+                    value=name,
+                    enabled=True,
+                    hint=(
+                        f"{int(records[name].get('count', 0) or 0)} caught | "
+                        f"best {records[name].get('best_size', 'unmeasured')}"
+                    ),
+                )
+                for name in species
+            ]
+            items.append(MenuItem(label="Back", value=MENU_BACK, enabled=True))
+            choice = self.vertical_panel_select(
+                f"{habitat or 'All'} Fish Records", items,
+                LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT, return_back=True,
+            )
+            if choice is None or choice.value == MENU_BACK:
+                return
+            self.vertical_panel_view(
+                str(choice.value), self.fishing_journal_species_lines(str(choice.value)),
+                LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT,
+            )
+
+    def show_fishing_journal_menu(self) -> None:
+        while True:
+            records = self.ensure_fishing_journal_records()
+            items = [
+                MenuItem(label="Journal overview", value="overview", enabled=True, hint=f"{len(records)} species recorded"),
+                MenuItem(label="Freshwater records", value="Freshwater", enabled=True, hint="ponds, lakes, and rivers"),
+                MenuItem(label="Saltwater records", value="Saltwater", enabled=True, hint="coasts, currents, and reefs"),
+                MenuItem(label="Underground records", value="Underground", enabled=True, hint="caves and mine pools"),
+                MenuItem(label="Aquarium collection", value="aquarium", enabled=True, hint="living tanks and observed variants"),
+                MenuItem(label="Back", value=MENU_BACK, enabled=True),
+            ]
+            choice = self.vertical_panel_select(
+                "Fishing Journal", items, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT, return_back=True,
+            )
+            if choice is None or choice.value == MENU_BACK:
+                return
+            if choice.value == "overview":
+                self.vertical_panel_view("Fishing Journal", self.fishing_journal_overview_lines(), LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
+            elif choice.value == "aquarium":
+                self.show_aquarium_collection()
+            else:
+                self.show_fishing_journal_species_menu(str(choice.value))
+
     def show_journal_records_menu(self):
         while True:
             items = [
@@ -48363,6 +49751,7 @@ class FarmGame(
                 MenuItem(label="Family records", value="family", enabled=True, hint="household overview"),
                 MenuItem(label="Dynasty records", value="dynasty", enabled=True, hint=f"generation {self.state.player_generation}"),
                 MenuItem(label="Field research", value="fieldwork", enabled=True, hint=f"level {self.excavation_level()}"),
+                MenuItem(label="Fishing journal", value="fishing", enabled=True, hint=f"{len(self.ensure_fishing_journal_records())} species recorded"),
                 MenuItem(label="Tavern game records", value="tavern_games", enabled=True, hint="cards and board games"),
                 MenuItem(label="Bestiary records", value="bestiary", enabled=True, hint="seen and defeated"),
                 MenuItem(label="Combat reports", value="combat", enabled=True, hint="recent results"),
@@ -48374,6 +49763,9 @@ class FarmGame(
                 return MENU_BACK
             if choice.value == "regional":
                 self.show_regional_journal_menu()
+                continue
+            if choice.value == "fishing":
+                self.show_fishing_journal_menu()
                 continue
             views = {
                 "claims": ("Land Records", self.journal_land_claim_lines),
@@ -48529,10 +49921,12 @@ class FarmGame(
                 "",
                 "Seed info:",
                 f"Plants: {seed_crop}",
-                f"Season: {crop.get('season')}",
+                f"Seasons: {crop_season_label(crop)}",
                 f"Growth days: {crop.get('growth_days')}",
                 f"Base crop value: ${crop.get('sell_price')}",
             ])
+            if int(crop.get("regrow_days", 0) or 0) > 0:
+                lines.append(f"Regrows after harvest: {quantity_agreement(crop['regrow_days'], 'day')}")
 
         if item_name in FISH_DATA:
             data = FISH_DATA[item_name]
@@ -48541,12 +49935,24 @@ class FarmGame(
                 "Fish info:",
                 f"Locations: {', '.join(data.get('locations', []))}",
                 f"Habitats: {', '.join(data.get('habitats', []))}",
+                f"Depths: {', '.join(fish_depth_preferences(item_name, data))}",
                 f"Seasons: {', '.join(data.get('seasons', []))}",
                 f"Weather: {', '.join(data.get('weather', []))}",
                 f"Time: {data.get('time', 'Any')}",
             ])
+            biome_names = [
+                str(BIOME_IDENTITY_DATA.get(str(biome_id), {}).get("name", biome_id))
+                for biome_id in data.get("biomes", []) or []
+            ]
+            if biome_names:
+                lines.append(f"Regions: {', '.join(biome_names)}")
             if data.get("water_features"):
                 lines.append(f"Ocean water: {', '.join(data.get('water_features', []))}")
+            tackle = fish_tackle_traits(item_name, data)
+            if tackle.get("baits"):
+                lines.append(f"Preferred bait: {', '.join(tackle['baits'])}")
+            if tackle.get("lures"):
+                lines.append(f"Preferred lures: {', '.join(tackle['lures'])}")
             if data.get("description"):
                 lines.extend(["", str(data.get("description"))])
             if not data.get("junk", False):
@@ -48561,9 +49967,15 @@ class FarmGame(
                 "Crop info:",
                 f"Crop: {crop_name}",
                 f"Quality: {quality}",
-                f"Season: {crop.get('season')}",
+                f"Seasons: {crop_season_label(crop)}",
                 f"Base sell price: ${crop.get('sell_price')}",
             ])
+            if int(crop.get("regrow_days", 0) or 0) > 0:
+                lines.append(f"Regrows after harvest: {quantity_agreement(crop['regrow_days'], 'day')}")
+
+        market_multiplier = self.seasonal_market_multiplier(item_name)
+        if market_multiplier > 1.0:
+            lines.append(f"Seasonal shipping premium: +{int(round((market_multiplier - 1.0) * 100))}%")
 
         if item_name in INFRASTRUCTURE_DATA:
             data = INFRASTRUCTURE_DATA[item_name]
@@ -49528,6 +50940,7 @@ class FarmGame(
         print(f"  {self.gameplay_binding_label('interact')} / Enter          General interaction / place held object / open shipping bin")
         print(f"  {self.gameplay_binding_label('previous_tool')} / {self.gameplay_binding_label('next_tool'):<14} Cycle selected tool")
         print("  1 / 2              Cycle through owned seeds")
+        print("  3 / 4              Cycle carried fishing bait / owned reusable lures")
         print("  R                  Area sow selected seed around the player")
         print(f"  {self.gameplay_binding_label('inspect'):<18} Inspect target tile")
         print("  T                  Toggle targeting: front tile / standing tile")
@@ -49709,6 +51122,10 @@ class FarmGame(
             self.cycle_selected_seed(-1)
         elif key == "2":
             self.cycle_selected_seed(1)
+        elif key == "3":
+            self.cycle_fishing_bait(1)
+        elif key == "4":
+            self.cycle_fishing_lure(1)
         elif key == "q":
             self.cycle_tool(-1)
         elif key == "r":

@@ -27,7 +27,7 @@ from ascii_farmstead_town_builder import (
 )
 
 
-PROCEDURAL_POPULATION_VERSION = 3
+PROCEDURAL_POPULATION_VERSION = 4
 PROCEDURAL_AGE_GROUPS = ("Child", "Teen", "Adult", "Elder")
 PROCEDURAL_SEXES = ("Female", "Male")
 PROCEDURAL_ROUTINE_PHASES = (
@@ -55,6 +55,64 @@ PROCEDURAL_PERSONALITY_TRAITS = (
     "Calm",
 )
 PROCEDURAL_COLOR_NAMES = ("White", "Green", "Blue", "Yellow", "Purple", "Red", "Cyan")
+
+PROCEDURAL_UPBRINGINGS = (
+    "a household where everyone learned at least one practical trade",
+    "a family that moved often enough to make packing an ordinary skill",
+    "a close neighborhood where news arrived before formal invitations",
+    "a quiet home where work was discussed at the table and finished before dark",
+    "a crowded household that taught patience, privacy, and how to share responsibility",
+    "a roadside home accustomed to travelers, repairs, and plans changing with the weather",
+    "a small working community where favors were remembered longer than prices",
+    "a family that treated books, tools, and good meals as equally useful forms of preparation",
+)
+
+PROCEDURAL_FORMATIVE_EVENTS = (
+    "helping neighbors recover after a severe storm",
+    "watching a familiar business close when its supply route failed",
+    "being trusted with an important household responsibility earlier than expected",
+    "spending a season learning work from an older relative",
+    "taking a long journey that made ordinary routines feel valuable",
+    "seeing a preventable accident change how the whole community approached its work",
+    "helping welcome a family that arrived with almost nothing",
+    "discovering that a patient repair could matter more than a dramatic new project",
+)
+
+PROCEDURAL_SETTLING_REASONS = (
+    "wanted work that would have a visible effect on the people nearby",
+    "was looking for a place where a household could put down lasting roots",
+    "followed an opportunity that seemed uncertain but genuinely useful",
+    "wanted more room, quieter roads, and neighbors who still knew one another",
+    "came to help build services the region had been missing",
+    "preferred the risks of a growing town to the feeling of being unnecessary elsewhere",
+    "arrived for temporary work and found more reasons to remain than to leave",
+    "wanted to be present while the town was still deciding what kind of place it would become",
+)
+
+PROCEDURAL_HOBBIES_BY_ROLE: Dict[str, Tuple[str, ...]] = {
+    "Mayor": ("walking every public road", "reading local histories", "planning shared meals"),
+    "Clerk": ("letter writing", "logic games", "collecting unusual stationery"),
+    "Well Keeper": ("stonework", "weather watching", "quiet fishing"),
+    "Shopkeeper": ("cooking", "window displays", "hearing travelers' stories"),
+    "Stockkeeper": ("woodworking", "puzzles", "repairing old containers"),
+    "Carpenter": ("wood carving", "sketching buildings", "walking through old ruins"),
+    "Carpenter Apprentice": ("whittling", "climbing", "drawing ambitious floor plans"),
+    "Doctor": ("gardening", "medical history", "slow walks after work"),
+    "Nurse": ("baking", "needlework", "keeping in touch by letter"),
+    "Sheriff": ("target practice", "route maps", "cards at the inn"),
+    "Deputy": ("running", "camp cooking", "learning unfamiliar trails"),
+    "Librarian": ("local history", "book repair", "collecting folktales"),
+    "Archivist": ("genealogy", "mapmaking", "restoring damaged documents"),
+    "Innkeeper": ("cards", "recipe collecting", "remembering travelers' names"),
+    "Cook": ("foraging", "recipe experiments", "hosting crowded suppers"),
+    "Merchant": ("board games", "collecting regional crafts", "studying old trade routes"),
+    "Mechanic": ("tinkering", "salvaging old machines", "drawing impractical inventions"),
+    "Artisan": ("sketching", "music", "collecting natural dyes"),
+    "Gardener": ("birdwatching", "flower arranging", "saving seeds"),
+    "Student": ("exploring shortcuts", "games", "collecting interesting stones"),
+    "Retiree": ("gardening", "cards", "telling stories only when asked"),
+    "Settler": ("fishing", "home repairs", "walking beyond the last familiar road"),
+}
 
 
 FEMALE_GIVEN_NAMES = (
@@ -965,18 +1023,19 @@ def sanitize_procedural_request(value: object) -> Dict[str, object]:
         return {}
     request_id = str(value.get("id", "") or "").strip()
     item = str(value.get("item", "") or "").strip()
-    if not request_id or not item:
+    quest_id = str(value.get("quest_id", "") or "").strip()
+    if not request_id or (not item and not quest_id):
         return {}
-    status = str(value.get("status", "active") or "active")
-    if status not in {"active", "completed"}:
-        status = "active"
+    status = str(value.get("status", "active") or "active").lower()
+    if status not in {"offered", "active", "ready", "completed", "abandoned"}:
+        status = "active" if item else "offered"
     try:
         quantity = max(1, min(99, int(value.get("quantity", 1))))
         money = max(0, min(99999, int(value.get("reward_money", 0))))
         relationship = max(0, min(25, int(value.get("reward_relationship", 0))))
     except Exception:
         return {}
-    return {
+    record = {
         "id": request_id,
         "title": str(value.get("title", "Resident Request") or "Resident Request")[:80],
         "description": str(value.get("description", "") or "")[:300],
@@ -986,7 +1045,13 @@ def sanitize_procedural_request(value: object) -> Dict[str, object]:
         "reward_relationship": relationship,
         "created_day": str(value.get("created_day", "") or ""),
         "status": status,
+        "quest_id": quest_id,
+        "request_type": str(value.get("request_type", "delivery") or "delivery")[:40],
+        "offer_text": str(value.get("offer_text", value.get("description", "")) or "")[:500],
+        "objective_summary": str(value.get("objective_summary", "") or "")[:300],
+        "cycle_key": str(value.get("cycle_key", "") or "")[:40],
     }
+    return record
 
 
 def sanitize_procedural_settlement_populations(value: object) -> Dict[str, Dict[str, object]]:
@@ -1239,6 +1304,20 @@ def sanitize_procedural_settlement_populations(value: object) -> Dict[str, Dict[
                 "goal": str(raw_resident.get("goal", "Build a stable life in the settlement.")),
                 "rumor": str(raw_resident.get("rumor", "The settlement changes a little every week.")),
                 "friend_secret": str(raw_resident.get("friend_secret", "They are still deciding what home means here.")),
+                "birthplace": str(raw_resident.get("birthplace", "another community in the region") or "another community in the region"),
+                "upbringing": str(raw_resident.get("upbringing", "a household that valued practical work") or "a household that valued practical work"),
+                "formative_event": str(raw_resident.get("formative_event", "taking responsibility for work that affected other people") or "taking responsibility for work that affected other people"),
+                "reason_for_settling": str(raw_resident.get("reason_for_settling", "wanted to build a stable life here") or "wanted to build a stable life here"),
+                "arrival_story": str(raw_resident.get("arrival_story", "I came here because the town still had room for useful work.") or "I came here because the town still had room for useful work."),
+                "hobbies": [
+                    str(value)
+                    for value in (
+                        raw_resident.get("hobbies", [])
+                        if isinstance(raw_resident.get("hobbies"), list)
+                        else []
+                    )
+                    if str(value or "").strip()
+                ][:6],
                 "likes": [
                     str(item)
                     for item in (
@@ -1328,6 +1407,16 @@ def sanitize_procedural_settlement_populations(value: object) -> Dict[str, Dict[
                     if str(request_id or "").strip()
                 ))[-20:],
                 "last_request_day": str(raw_resident.get("last_request_day", "") or ""),
+                "last_request_cycle": str(raw_resident.get("last_request_cycle", "") or ""),
+                "recent_request_types": [
+                    str(value)
+                    for value in (
+                        raw_resident.get("recent_request_types", [])
+                        if isinstance(raw_resident.get("recent_request_types"), list)
+                        else []
+                    )
+                    if str(value or "").strip()
+                ][-6:],
                 "runtime_x": int(raw_resident.get("runtime_x", -1) or -1),
                 "runtime_y": int(raw_resident.get("runtime_y", -1) or -1),
                 "runtime_location": str(raw_resident.get("runtime_location", "") or ""),
@@ -1605,6 +1694,51 @@ class ProceduralNpcBuilder:
                 traits.append(trait)
         return traits
 
+    def generated_life_profile(
+        self,
+        plan: Dict[str, object],
+        origin_key: str,
+        role: str,
+        age_group: str,
+        traits: Iterable[str],
+    ) -> Dict[str, object]:
+        """Give every generated resident a stable past beyond their current job."""
+        rng = self.deterministic_rng(plan, f"life-profile:{origin_key}:{role}")
+        geography = plan.get("geography", {}) if isinstance(plan.get("geography"), dict) else {}
+        region = str(geography.get("region_name", "the surrounding region") or "the surrounding region")
+        settlement = str(plan.get("name", "this town") or "this town")
+        trait_list = [str(value) for value in traits if str(value or "").strip()]
+        upbringing = PROCEDURAL_UPBRINGINGS[rng.randrange(len(PROCEDURAL_UPBRINGINGS))]
+        formative_event = PROCEDURAL_FORMATIVE_EVENTS[rng.randrange(len(PROCEDURAL_FORMATIVE_EVENTS))]
+        settling_reason = PROCEDURAL_SETTLING_REASONS[rng.randrange(len(PROCEDURAL_SETTLING_REASONS))]
+        if str(age_group) in {"Child", "Teen"}:
+            birthplace = settlement
+            arrival_story = f"I was born around {settlement}, so the older residents' arrival stories feel like family history to me."
+        else:
+            birthplace_options = (
+                f"a farmstead along the roads of {region}",
+                f"a smaller community elsewhere in {region}",
+                f"a household that traveled between the market towns of {region}",
+                f"the rural edge of {region}",
+                "a roadside settlement several days from here",
+            )
+            birthplace = birthplace_options[rng.randrange(len(birthplace_options))]
+            arrival_story = f"I came to {settlement} because I {settling_reason}."
+        hobbies = list(PROCEDURAL_HOBBIES_BY_ROLE.get(role, PROCEDURAL_HOBBIES_BY_ROLE["Settler"]))
+        rng.shuffle(hobbies)
+        if "Curious" in trait_list and "learning unfamiliar local history" not in hobbies:
+            hobbies.append("learning unfamiliar local history")
+        if "Musical" in trait_list and "music" not in hobbies:
+            hobbies.append("music")
+        return {
+            "birthplace": birthplace,
+            "upbringing": upbringing,
+            "formative_event": formative_event,
+            "reason_for_settling": settling_reason,
+            "arrival_story": arrival_story,
+            "hobbies": hobbies[:4],
+        }
+
     def generated_job_profile(
         self,
         plan: Dict[str, object],
@@ -1786,6 +1920,13 @@ class ProceduralNpcBuilder:
             age_group,
             traits,
         )
+        life_profile = self.generated_life_profile(
+            plan,
+            origin_key,
+            role,
+            age_group,
+            traits,
+        )
         resident = {
             "id": resident_id,
             "origin_key": origin_key,
@@ -1829,6 +1970,7 @@ class ProceduralNpcBuilder:
             "goal": str(preferences.get("goal", ROLE_PREFERENCE_DATA["Settler"]["goal"])),
             "rumor": self.generated_rumor(plan, role, workplace),
             "friend_secret": self.generated_secret(role, traits),
+            **life_profile,
             "likes": list(preferences.get("likes", ()))[:4],
             "dislikes": list(preferences.get("dislikes", ()))[:2],
             "dialogue_tags": list(dict.fromkeys([
@@ -1853,6 +1995,8 @@ class ProceduralNpcBuilder:
             "active_request": {},
             "completed_request_ids": [],
             "last_request_day": "",
+            "last_request_cycle": "",
+            "recent_request_types": [],
             "runtime_x": -1,
             "runtime_y": -1,
             "runtime_location": "",
@@ -2322,6 +2466,14 @@ class ProceduralNpcBuilder:
                     "active_request",
                     "completed_request_ids",
                     "last_request_day",
+                    "last_request_cycle",
+                    "recent_request_types",
+                    "birthplace",
+                    "upbringing",
+                    "formative_event",
+                    "reason_for_settling",
+                    "arrival_story",
+                    "hobbies",
                     "runtime_x",
                     "runtime_y",
                     "runtime_location",

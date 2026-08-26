@@ -473,6 +473,15 @@ DEFAULT_TIME_SPEED = "Brisk"
 
 SEASONS = ["Spring", "Summer", "Fall", "Winter"]
 
+# Shared seasonal rules. Keep presentation and mechanical timing together so
+# HUD lighting, world rendering, reports, and tutorials cannot disagree.
+SEASON_PROFILE_DATA = {
+    "Spring": {"sunrise": 6, "sunset": 19, "summary": "Mild, rainy days bring fresh growth and rising water."},
+    "Summer": {"sunrise": 5, "sunset": 21, "summary": "Long bright days favor warm-water fishing and summer crops."},
+    "Fall": {"sunrise": 6, "sunset": 18, "summary": "Cool, breezy days bring harvests, leaves, and late fruit."},
+    "Winter": {"sunrise": 7, "sunset": 17, "summary": "Short snowy days freeze freshwater and favor hardy crops."},
+}
+
 WILDERNESS_CLAIM_PRICE = 8500
 
 WILDERNESS_CLAIM_SYMBOL = "D"
@@ -586,23 +595,51 @@ LEGACY_CLAIM_TYPE_TO_FARM_TYPE = {
     "Mixed Claim": "meadow",
 }
 
+FESTIVAL_DATA = {
+    "spring_seed_fair": {
+        "name": "Spring Seed Fair", "month": 3, "day": 7, "season": "Spring",
+        "location": "North Market Street",
+        "description": "A small seed fair celebrating the first serious planting week.",
+        "reward_items": {"Turnip Seeds": 5, "Carrot Seeds": 3},
+        "money": 0, "stamina": 20, "friendship": 3,
+    },
+    "summer_river_picnic": {
+        "name": "Summer River Picnic", "month": 6, "day": 14, "season": "Summer",
+        "location": "Central Park",
+        "description": "A hot-weather picnic with fish, berries, and cold drinks.",
+        "reward_items": {"Woodland Salad": 1, "Berries": 3},
+        "money": 0, "stamina": 35, "friendship": 3,
+    },
+    "fall_harvest_market": {
+        "name": "Fall Harvest Market", "month": 9, "day": 21, "season": "Fall",
+        "location": "Market Promenade",
+        "description": "A harvest market with mushrooms, honey, and late-season goods.",
+        "reward_items": {"Honey": 1, "Cave Mushroom": 2},
+        "money": 200, "stamina": 20, "friendship": 4,
+    },
+    "winter_lantern_night": {
+        "name": "Winter Lantern Night", "month": 12, "day": 28, "season": "Winter",
+        "location": "Civic Boulevard",
+        "description": "A quiet lantern festival for the end of the year.",
+        "reward_items": {"Coal": 3, "Cave Herbs": 2},
+        "money": 300, "stamina": 30, "friendship": 5,
+    },
+}
+
 CALENDAR_EVENTS = {
     (1, 1): ["New Year's Day"],
     (2, 14): ["Friendship Day"],
     (3, 1): ["Spring begins"],
-    (3, 10): ["Planting Festival"],
     (4, 22): ["Flower Market"],
     (5, 31): ["Spring ends"],
     (6, 1): ["Summer begins"],
-    (6, 21): ["Longest Day Fair"],
+    (6, 21): ["Longest Day"],
     (7, 4): ["Firefly Night"],
     (8, 31): ["Summer ends"],
     (9, 1): ["Fall begins"],
-    (9, 15): ["Harvest Fair"],
     (10, 31): ["Pumpkin Night"],
     (11, 30): ["Fall ends"],
     (12, 1): ["Winter begins"],
-    (11, 24): ["Snowlight Eve"],
     (12, 31): ["Year's End"],
 }
 
@@ -611,7 +648,8 @@ TOOLS = ["Hoe", "Seeds", "Watering Can", "Fertilizer", "Fishing Rod"]
 STARTING_OWNED_TOOLS = ("Axe", "Pickaxe")
 
 OPTIONAL_TOOL_ORDER = [
-    "Axe", "Pickaxe", "Hammer", "Shovel", "Lockpick", "Grooming Brush", "Broom", "Animal Lead",
+    "Axe", "Pickaxe", "Casting Rod", "Lake Rod", "Ocean Rod", "Hammer", "Shovel",
+    "Lockpick", "Grooming Brush", "Broom", "Animal Lead",
 ]
 
 TOWN_NPC_DEFINITIONS = [
@@ -7311,6 +7349,128 @@ UTILITY_TOOL_SHOP_DATA = {
     },
 }
 
+# The original Fishing Rod remains the always-owned, adjacent-tile starter rod.
+# Every built-in rod uses the casting cursor and fish-fighting minigame. The rods
+# remain separate selected tools so they coexist with old saves and cycle with Q/E.
+FISHING_ROD_DATA = {
+    "Fishing Rod": {
+        "price": 0,
+        "range": 1,
+        "advanced_cast": True,
+        "depths": ["Shallow", "Normal", "Deep"],
+        "bite_bonus": 0.0,
+        "window_bonus": 0.0,
+        "line_strength": 0.85,
+        "reel_power": 4.0,
+        "control": 1.0,
+        "description": "A simple starter rod with a one-tile cast. It uses the full casting and fish-fighting system.",
+    },
+    "Casting Rod": {
+        "price": 650,
+        "range": 4,
+        "advanced_cast": True,
+        "depths": ["Shallow", "Normal"],
+        "bite_bonus": 0.04,
+        "window_bonus": 0.10,
+        "line_strength": 1.0,
+        "reel_power": 4.8,
+        "control": 1.24,
+        "description": "A responsive short-range rod with excellent tension control for ponds, rivers, and near-shore water.",
+    },
+    "Lake Rod": {
+        "price": 1350,
+        "range": 7,
+        "advanced_cast": True,
+        "depths": ["Shallow", "Normal", "Deep"],
+        "bite_bonus": 0.08,
+        "window_bonus": 0.22,
+        "line_strength": 1.28,
+        "reel_power": 5.6,
+        "control": 1.15,
+        "description": "A balanced long rod with a strong line for deep lake channels and broad rivers.",
+    },
+    "Ocean Rod": {
+        "price": 2600,
+        "range": 10,
+        "advanced_cast": True,
+        "depths": ["Shallow", "Normal", "Deep"],
+        "bite_bonus": 0.12,
+        "window_bonus": 0.38,
+        "line_strength": 1.62,
+        "reel_power": 6.5,
+        "control": 1.03,
+        "description": "Heavy saltwater tackle with powerful retrieval for reefs, currents, and deep open ocean.",
+    },
+}
+
+FISHING_LURE_DATA = {
+    "None": {"price": 0, "description": "Fish without a reusable lure."},
+    "Surface Popper": {
+        "price": 280,
+        "depths": ["Shallow"],
+        "habitats": ["Pond", "Lake", "River"],
+        "description": "A splashing surface lure for active fish near banks and weed beds.",
+    },
+    "Spinner Lure": {
+        "price": 420,
+        "depths": ["Shallow", "Normal"],
+        "habitats": ["Lake", "River"],
+        "description": "A flashing freshwater lure favored by trout, bass, pike, and other hunters.",
+    },
+    "Reef Jig": {
+        "price": 560,
+        "depths": ["Shallow", "Normal"],
+        "habitats": ["Ocean"],
+        "features": ["Reef"],
+        "description": "A compact saltwater jig designed for coral shelves and reef fish.",
+    },
+    "Bright Spoon": {
+        "price": 720,
+        "depths": ["Normal", "Deep"],
+        "habitats": ["Lake", "River", "Ocean"],
+        "description": "A heavy reflective lure for deeper water, strong current, and large predators.",
+    },
+    "Glow Lure": {
+        "price": 900,
+        "depths": ["Normal", "Deep"],
+        "habitats": ["Lake", "Ocean", "Underground"],
+        "description": "A reusable luminous lure for night fishing, caves, and dark deep water.",
+    },
+}
+
+FISHING_BAIT_DATA = {
+    "Worm Bait": {
+        "price": 12,
+        "depths": ["Shallow", "Normal", "Deep"],
+        "habitats": ["Pond", "Lake", "River"],
+        "description": "Reliable freshwater bait, especially for bottom-feeders.",
+    },
+    "Insect Bait": {
+        "price": 16,
+        "depths": ["Shallow", "Normal"],
+        "habitats": ["Pond", "Lake", "River"],
+        "description": "Light bait for minnows, sunfish, trout, and other near-surface fish.",
+    },
+    "Minnow Bait": {
+        "price": 28,
+        "depths": ["Normal", "Deep"],
+        "habitats": ["Lake", "River", "Ocean"],
+        "description": "Live-style bait that attracts larger predatory fish.",
+    },
+    "Shellfish Bait": {
+        "price": 34,
+        "depths": ["Shallow", "Normal", "Deep"],
+        "habitats": ["Ocean"],
+        "description": "Saltwater bait for reef fish and bottom-feeding ocean catches.",
+    },
+    "Cave Grub": {
+        "price": 40,
+        "depths": ["Shallow", "Normal", "Deep"],
+        "habitats": ["Underground"],
+        "description": "Pale cave bait that draws fish from underground pools.",
+    },
+}
+
 ORE_SHOP_DATA = {
     "Stone": {"price": 8, "description": "Basic building and crafting material."},
     "Coal": {"price": 25, "description": "Fuel and forging material."},
@@ -7325,6 +7485,11 @@ RESOURCE_ITEMS = [
     "Mixed Seeds",
     "Animal Feed",
     "Explorer Raft",
+    "Worm Bait",
+    "Insect Bait",
+    "Minnow Bait",
+    "Shellfish Bait",
+    "Cave Grub",
     "Wild Herbs",
     "Cave Mushroom",
     "Wild Honey",
@@ -8300,6 +8465,54 @@ FISH_DATA = {
     "Old Boot": {"price": 1, "stamina": 0, "locations": ["Farm", "Wilderness", "Coast", "Mine"], "habitats": ["Pond", "Lake", "River", "Ocean", "Underground"], "seasons": ["Spring", "Summer", "Fall", "Winter"], "weather": ["Any"], "time": "Any", "weight": 2, "junk": True},
 }
 
+# Regional catches use the detailed persistent biome at the exact cast point.
+# Every entry also carries explicit depth data so it remains predictable as
+# shorelines, rivers, lakes, and oceans cross biome boundaries.
+BIOME_FISH_DATA = {
+    "Meadow Darter": {"price": 70, "stamina": 7, "locations": ["Wilderness"], "habitats": ["River", "Lake"], "depths": ["Shallow"], "biomes": ["meadow"], "seasons": ["Spring", "Summer", "Fall"], "weather": ["Sunny", "Cloudy"], "time": "Day", "weight": 4, "description": "A flower-bright little fish that hunts insects along sunny meadow banks."},
+    "Golden Tench": {"price": 155, "stamina": 16, "locations": ["Wilderness"], "habitats": ["Lake"], "depths": ["Normal", "Deep"], "biomes": ["meadow"], "seasons": ["Summer", "Fall"], "weather": ["Any"], "time": "Any", "weight": 2, "description": "A heavy gold-green lake fish that feeds beneath meadow water lilies."},
+    "Birchstream Trout": {"price": 135, "stamina": 14, "locations": ["Wilderness"], "habitats": ["River"], "depths": ["Shallow", "Normal"], "biomes": ["birch_grove"], "seasons": ["Spring", "Fall"], "weather": ["Sunny", "Cloudy"], "time": "Morning", "weight": 3, "description": "A pale-spotted trout found in clear streams beneath birch roots."},
+    "Silver Burbot": {"price": 210, "stamina": 20, "locations": ["Wilderness"], "habitats": ["Lake"], "depths": ["Deep"], "biomes": ["birch_grove"], "seasons": ["Fall", "Winter"], "weather": ["Any"], "time": "Night", "weight": 2, "description": "A cold-water bottom fish that leaves deep birch lakes after dusk."},
+    "Pinewater Char": {"price": 165, "stamina": 17, "locations": ["Wilderness"], "habitats": ["River", "Lake"], "depths": ["Normal"], "biomes": ["pine_forest"], "seasons": ["Spring", "Fall", "Winter"], "weather": ["Cloudy", "Rain", "Snow"], "time": "Morning", "weight": 3, "description": "A dark-backed char adapted to shaded evergreen water."},
+    "Deepwater Cisco": {"price": 230, "stamina": 21, "locations": ["Wilderness"], "habitats": ["Lake"], "depths": ["Deep"], "biomes": ["pine_forest"], "seasons": ["Winter", "Spring"], "weather": ["Any"], "time": "Any", "weight": 2, "description": "A silvery schooling fish from the coldest depths of pine-country lakes."},
+    "Fern Perch": {"price": 125, "stamina": 13, "locations": ["Wilderness"], "habitats": ["River", "Lake"], "depths": ["Shallow", "Normal"], "biomes": ["old_growth"], "seasons": ["Spring", "Summer"], "weather": ["Any"], "time": "Day", "weight": 3, "description": "A green-striped perch that hides beside submerged roots and ferny banks."},
+    "Timber Catfish": {"price": 245, "stamina": 23, "locations": ["Wilderness"], "habitats": ["River", "Lake"], "depths": ["Deep"], "biomes": ["old_growth"], "seasons": ["Summer", "Fall"], "weather": ["Rain", "Storm"], "time": "Any", "weight": 1, "description": "A broad old catfish that shelters beneath drowned timber."},
+    "Prairie Shiner": {"price": 85, "stamina": 8, "locations": ["Wilderness"], "habitats": ["River", "Lake"], "depths": ["Shallow"], "biomes": ["prairie"], "seasons": ["Spring", "Summer", "Fall"], "weather": ["Sunny", "Cloudy"], "time": "Day", "weight": 4, "description": "A bright schooling fish flashing through warm prairie shallows."},
+    "Plains Paddlefish": {"price": 300, "stamina": 27, "locations": ["Wilderness"], "habitats": ["River", "Lake"], "depths": ["Deep"], "biomes": ["prairie"], "seasons": ["Spring", "Summer"], "weather": ["Rain", "Cloudy"], "time": "Morning", "weight": 1, "description": "A rare filter-feeder cruising the deepest channels beneath open plains."},
+    "Heather Grayling": {"price": 150, "stamina": 15, "locations": ["Wilderness"], "habitats": ["River"], "depths": ["Normal"], "biomes": ["moorland"], "seasons": ["Spring", "Fall"], "weather": ["Cloudy", "Rain"], "time": "Morning", "weight": 3, "description": "A violet-finned river fish native to cool moorland runs."},
+    "Mist Eel": {"price": 235, "stamina": 22, "locations": ["Wilderness"], "habitats": ["Lake"], "depths": ["Deep"], "biomes": ["moorland"], "seasons": ["Fall", "Winter"], "weather": ["Cloudy", "Rain"], "time": "Night", "weight": 1, "description": "A slate eel that rises from deep moorland water beneath fog and rain."},
+    "Bog Lamprey": {"price": 120, "stamina": 12, "locations": ["Wilderness"], "habitats": ["River", "Lake"], "depths": ["Shallow", "Normal"], "biomes": ["bog"], "seasons": ["Spring", "Fall"], "weather": ["Rain", "Cloudy"], "time": "Any", "weight": 3, "description": "A primitive fish that threads through tannin-dark bog channels."},
+    "Peat Pike": {"price": 250, "stamina": 24, "locations": ["Wilderness"], "habitats": ["Lake"], "depths": ["Deep"], "biomes": ["bog"], "seasons": ["Summer", "Fall"], "weather": ["Rain", "Storm"], "time": "Day", "weight": 1, "description": "A dark ambush predator lurking under floating mats of peat."},
+    "Reed Killifish": {"price": 75, "stamina": 7, "locations": ["Wilderness"], "habitats": ["River"], "depths": ["Shallow"], "biomes": ["floodplain"], "seasons": ["Spring", "Summer", "Fall"], "weather": ["Any"], "time": "Day", "weight": 5, "description": "A tiny floodplain fish darting between cattails and flooded grass."},
+    "River Buffalo": {"price": 220, "stamina": 22, "locations": ["Wilderness"], "habitats": ["River", "Lake"], "depths": ["Normal", "Deep"], "biomes": ["floodplain"], "seasons": ["Summer", "Fall"], "weather": ["Rain", "Cloudy"], "time": "Any", "weight": 2, "description": "A powerful deep-bodied fish feeding in broad silty channels."},
+    "Snowmelt Dace": {"price": 95, "stamina": 9, "locations": ["Wilderness"], "habitats": ["River"], "depths": ["Shallow"], "biomes": ["alpine_meadow"], "seasons": ["Spring", "Summer"], "weather": ["Sunny", "Cloudy"], "time": "Morning", "weight": 4, "description": "A quick alpine fish living where clear snowmelt crosses flower meadows."},
+    "Alpine Char": {"price": 260, "stamina": 24, "locations": ["Wilderness"], "habitats": ["Lake"], "depths": ["Deep"], "biomes": ["alpine_meadow"], "seasons": ["Fall", "Winter"], "weather": ["Cloudy", "Snow"], "time": "Morning", "weight": 1, "description": "A cold-loving char from deep lakes above the tree line."},
+    "Stonefin Sculpin": {"price": 110, "stamina": 11, "locations": ["Wilderness"], "habitats": ["River"], "depths": ["Shallow", "Normal"], "biomes": ["rocky_valley"], "seasons": ["Spring", "Summer", "Fall", "Winter"], "weather": ["Any"], "time": "Any", "weight": 3, "description": "A squat bottom fish camouflaged against stony valley streams."},
+    "Canyon Trout": {"price": 205, "stamina": 20, "locations": ["Wilderness"], "habitats": ["River", "Lake"], "depths": ["Normal", "Deep"], "biomes": ["rocky_valley"], "seasons": ["Spring", "Fall"], "weather": ["Rain", "Cloudy"], "time": "Morning", "weight": 2, "description": "A strong trout that holds beneath ledges in rocky channels."},
+    "Arroyo Pupfish": {"price": 90, "stamina": 8, "locations": ["Wilderness"], "habitats": ["River", "Lake"], "depths": ["Shallow"], "biomes": ["scrubland"], "seasons": ["Spring", "Summer"], "weather": ["Sunny"], "time": "Day", "weight": 4, "description": "A hardy little fish surviving in warm, isolated scrubland pools."},
+    "Desert Sucker": {"price": 175, "stamina": 17, "locations": ["Wilderness"], "habitats": ["River", "Lake"], "depths": ["Normal", "Deep"], "biomes": ["scrubland"], "seasons": ["Summer", "Fall"], "weather": ["Any"], "time": "Any", "weight": 2, "description": "A resilient bottom-feeder from permanent desert waterways."},
+    "Dune Tilapia": {"price": 130, "stamina": 12, "locations": ["Wilderness"], "habitats": ["Lake"], "depths": ["Shallow", "Normal"], "biomes": ["dune_desert"], "seasons": ["Spring", "Summer", "Fall"], "weather": ["Sunny"], "time": "Day", "weight": 3, "description": "A heat-tolerant basin fish found where dune water remains year-round."},
+    "Sand Basin Gar": {"price": 280, "stamina": 25, "locations": ["Wilderness"], "habitats": ["Lake"], "depths": ["Deep"], "biomes": ["dune_desert"], "seasons": ["Summer", "Fall"], "weather": ["Sunny", "Cloudy"], "time": "Night", "weight": 1, "description": "A long desert predator haunting the deepest sand-ringed basins."},
+    "Red Mesa Catfish": {"price": 215, "stamina": 21, "locations": ["Wilderness"], "habitats": ["River", "Lake"], "depths": ["Normal", "Deep"], "biomes": ["badlands"], "seasons": ["Summer", "Fall"], "weather": ["Rain", "Storm"], "time": "Any", "weight": 2, "description": "A rust-colored catfish stirred from badland channels by runoff."},
+    "Canyon Chub": {"price": 105, "stamina": 10, "locations": ["Wilderness"], "habitats": ["River"], "depths": ["Shallow"], "biomes": ["badlands"], "seasons": ["Spring", "Summer", "Fall"], "weather": ["Any"], "time": "Day", "weight": 4, "description": "A compact chub schooling below red-rock riffles."},
+    "Oasis Cichlid": {"price": 145, "stamina": 14, "locations": ["Wilderness"], "habitats": ["Lake"], "depths": ["Shallow", "Normal"], "biomes": ["oasis"], "seasons": ["Spring", "Summer", "Fall", "Winter"], "weather": ["Sunny", "Cloudy"], "time": "Day", "weight": 4, "description": "A jewel-colored fish guarding nests among oasis stones."},
+    "Datefin Barb": {"price": 185, "stamina": 18, "locations": ["Wilderness"], "habitats": ["Lake"], "depths": ["Normal", "Deep"], "biomes": ["oasis"], "seasons": ["Spring", "Summer", "Fall"], "weather": ["Any"], "time": "Morning", "weight": 2, "description": "A copper-finned oasis fish feeding beneath overhanging palms."},
+    "Spruce Trout": {"price": 160, "stamina": 16, "locations": ["Wilderness"], "habitats": ["River"], "depths": ["Shallow", "Normal"], "biomes": ["taiga"], "seasons": ["Spring", "Summer", "Fall"], "weather": ["Cloudy", "Rain"], "time": "Morning", "weight": 3, "description": "A cold stream trout patterned like the shadows beneath spruce boughs."},
+    "Boreal Pike": {"price": 285, "stamina": 26, "locations": ["Wilderness"], "habitats": ["Lake"], "depths": ["Deep"], "biomes": ["taiga"], "seasons": ["Fall", "Winter"], "weather": ["Snow", "Cloudy"], "time": "Day", "weight": 1, "description": "A large northern predator waiting below dark taiga lakes."},
+    "Icewater Smelt": {"price": 120, "stamina": 11, "locations": ["Wilderness"], "habitats": ["River", "Lake"], "depths": ["Shallow", "Normal"], "biomes": ["glacier"], "seasons": ["Winter", "Spring"], "weather": ["Snow", "Cloudy"], "time": "Any", "weight": 4, "description": "A translucent schooling fish from glacial meltwater."},
+    "Glacier Char": {"price": 310, "stamina": 28, "locations": ["Wilderness"], "habitats": ["Lake"], "depths": ["Deep"], "biomes": ["glacier"], "seasons": ["Winter"], "weather": ["Snow", "Cloudy"], "time": "Morning", "weight": 1, "description": "A rare blue-white char from the black depths beneath glacier ice."},
+    "Mudflat Goby": {"price": 95, "stamina": 9, "locations": ["Coast"], "habitats": ["Ocean"], "depths": ["Shallow"], "biomes": ["tidal_flat"], "water_features": ["Open Coast"], "seasons": ["Spring", "Summer", "Fall", "Winter"], "weather": ["Any"], "time": "Day", "weight": 5, "description": "A small goby resting in tidal pools and wet sand channels."},
+    "Shelf Skate": {"price": 260, "stamina": 24, "locations": ["Coast"], "habitats": ["Ocean"], "depths": ["Normal", "Deep"], "biomes": ["tidal_flat"], "water_features": ["Open Coast", "Current"], "seasons": ["Spring", "Fall", "Winter"], "weather": ["Cloudy", "Rain"], "time": "Any", "weight": 2, "description": "A broad skate gliding over the continental shelf beyond tidal flats."},
+    "Archerfish": {"price": 140, "stamina": 13, "locations": ["Coast"], "habitats": ["Ocean"], "depths": ["Shallow"], "biomes": ["mangrove"], "water_features": ["Open Coast", "Reef"], "seasons": ["Spring", "Summer", "Fall"], "weather": ["Rain", "Cloudy"], "time": "Day", "weight": 4, "description": "A sharp-eyed fish hunting insects among mangrove roots."},
+    "Mangrove Snapper": {"price": 245, "stamina": 22, "locations": ["Coast"], "habitats": ["Ocean"], "depths": ["Normal", "Deep"], "biomes": ["mangrove"], "water_features": ["Open Coast", "Reef"], "seasons": ["Summer", "Fall"], "weather": ["Any"], "time": "Day", "weight": 2, "description": "A bronze snapper that matures in the channels beyond mangrove roots."},
+    "Reef Butterflyfish": {"price": 175, "stamina": 15, "locations": ["Coast"], "habitats": ["Ocean"], "depths": ["Shallow"], "biomes": ["tropical_isle"], "water_features": ["Reef"], "seasons": ["Spring", "Summer", "Fall", "Winter"], "weather": ["Sunny", "Cloudy"], "time": "Day", "weight": 4, "description": "A disk-shaped reef fish patterned in brilliant tropical colors."},
+    "Cobalt Jack": {"price": 320, "stamina": 28, "locations": ["Coast"], "habitats": ["Ocean"], "depths": ["Normal", "Deep"], "biomes": ["tropical_isle"], "water_features": ["Current", "Open Coast"], "seasons": ["Spring", "Summer", "Fall"], "weather": ["Sunny", "Cloudy"], "time": "Day", "weight": 1, "description": "A muscular blue jack racing through warm offshore currents."},
+    "Grotto Tetra": {"price": 105, "stamina": 10, "locations": ["Mine"], "habitats": ["Underground"], "depths": ["Shallow"], "seasons": ["Spring", "Summer", "Fall", "Winter"], "weather": ["Any"], "time": "Any", "weight": 4, "description": "A translucent tetra gathering in shallow, mineral-lit grotto pools."},
+    "Limestone Loach": {"price": 175, "stamina": 17, "locations": ["Mine"], "habitats": ["Underground"], "depths": ["Normal"], "seasons": ["Spring", "Summer", "Fall", "Winter"], "weather": ["Any"], "time": "Any", "weight": 3, "description": "A pale bottom fish hidden among limestone shelves."},
+    "Abyssal Cavefish": {"price": 350, "stamina": 30, "locations": ["Mine"], "habitats": ["Underground"], "depths": ["Deep"], "seasons": ["Spring", "Summer", "Fall", "Winter"], "weather": ["Any"], "time": "Night", "weight": 1, "description": "A powerful eyeless fish from the deepest underground water."},
+}
+FISH_DATA.update(BIOME_FISH_DATA)
+
 FISH_ITEMS = set(FISH_DATA.keys())
 
 MINE_MAX_FLOOR = 40
@@ -8356,6 +8569,7 @@ CROP_DATA = {
         "seed_price": 80,
         "sell_price": 160,
         "season": "Spring",
+        "regrow_days": 4,
     },
     "Cabbage": {
         "symbol_growing": "c",
@@ -8364,6 +8578,7 @@ CROP_DATA = {
         "seed_price": 70,
         "sell_price": 180,
         "season": "Spring",
+        "seasons": ["Spring", "Fall"],
     },
     "Carrot": {
         "symbol_growing": "r",
@@ -8372,6 +8587,7 @@ CROP_DATA = {
         "seed_price": 30,
         "sell_price": 85,
         "season": "Spring",
+        "seasons": ["Spring", "Fall"],
     },
     "Pea": {
         "symbol_growing": "e",
@@ -8380,6 +8596,7 @@ CROP_DATA = {
         "seed_price": 45,
         "sell_price": 125,
         "season": "Spring",
+        "regrow_days": 3,
     },
     "Lettuce": {
         "symbol_growing": "l",
@@ -8406,6 +8623,7 @@ CROP_DATA = {
         "seed_price": 60,
         "sell_price": 150,
         "season": "Summer",
+        "regrow_days": 4,
     },
     "Corn": {
         "symbol_growing": "n",
@@ -8414,6 +8632,8 @@ CROP_DATA = {
         "seed_price": 90,
         "sell_price": 240,
         "season": "Summer",
+        "seasons": ["Summer", "Fall"],
+        "regrow_days": 5,
     },
     "Watermelon": {
         "symbol_growing": "w",
@@ -8430,6 +8650,7 @@ CROP_DATA = {
         "seed_price": 50,
         "sell_price": 140,
         "season": "Summer",
+        "regrow_days": 3,
     },
     "Cucumber": {
         "symbol_growing": "u",
@@ -8438,6 +8659,7 @@ CROP_DATA = {
         "seed_price": 45,
         "sell_price": 130,
         "season": "Summer",
+        "regrow_days": 3,
     },
     "Pumpkin": {
         "symbol_growing": "k",
@@ -8446,6 +8668,7 @@ CROP_DATA = {
         "seed_price": 100,
         "sell_price": 300,
         "season": "Summer",
+        "seasons": ["Summer", "Fall"],
     },
     "Blueberry": {
         "symbol_growing": "b",
@@ -8454,6 +8677,7 @@ CROP_DATA = {
         "seed_price": 85,
         "sell_price": 220,
         "season": "Summer",
+        "regrow_days": 4,
     },
     "Melon": {
         "symbol_growing": "q",
@@ -8488,6 +8712,7 @@ CROP_DATA = {
         "seed_price": 55,
         "sell_price": 160,
         "season": "Fall",
+        "regrow_days": 3,
     },
     "Beet": {
         "symbol_growing": "v",
@@ -8520,6 +8745,7 @@ CROP_DATA = {
         "seed_price": 85,
         "sell_price": 230,
         "season": "Fall",
+        "regrow_days": 4,
     },
     "Artichoke": {
         "symbol_growing": "j",
@@ -8538,6 +8764,7 @@ CROP_DATA = {
         "seed_price": 40,
         "sell_price": 115,
         "season": "Winter",
+        "seasons": ["Fall", "Winter"],
     },
     "Kale": {
         "symbol_growing": "2",
@@ -8546,6 +8773,7 @@ CROP_DATA = {
         "seed_price": 35,
         "sell_price": 105,
         "season": "Winter",
+        "seasons": ["Fall", "Winter"],
     },
     "Parsnip": {
         "symbol_growing": "3",
@@ -8570,6 +8798,8 @@ CROP_DATA = {
         "seed_price": 50,
         "sell_price": 145,
         "season": "Winter",
+        "seasons": ["Spring", "Winter"],
+        "regrow_days": 3,
     },
     "Frostroot": {
         "symbol_growing": "6",
@@ -8601,6 +8831,7 @@ CROP_DATA = {
         "seed_price": 0,
         "sell_price": 750,
         "season": "Any",
+        "regrow_days": 5,
     },
 
 }
@@ -8613,10 +8844,8 @@ MONTH_NAMES = [
 WEEKDAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 
 SEASON_DESCRIPTIONS = {
-    "Spring": "Mild and rainy. Great for new crops.",
-    "Summer": "Hot and sunny. Crops dry out more often.",
-    "Fall": "Cool and breezy. Last growing season before winter.",
-    "Winter": "Cold and snowy. Hardy winter crops can survive.",
+    season: str(profile["summary"])
+    for season, profile in SEASON_PROFILE_DATA.items()
 }
 
 SEASON_WEATHER_TABLES = {
@@ -8705,6 +8934,7 @@ __all__ = [
     'TIME_SPEED_REAL_SECONDS',
     'DEFAULT_TIME_SPEED',
     'SEASONS',
+    'SEASON_PROFILE_DATA',
     'WILDERNESS_CLAIM_PRICE',
     'WILDERNESS_CLAIM_SYMBOL',
     'WILDERNESS_SURVEY_PREVIEW_SYMBOL',
@@ -8713,6 +8943,7 @@ __all__ = [
     'FARM_CLAIM_TYPE_ORDER',
     'LEGACY_CLAIM_TYPE_TO_FARM_TYPE',
     'CALENDAR_EVENTS',
+    'FESTIVAL_DATA',
     'TOOLS',
     'OPTIONAL_TOOL_ORDER',
     'STARTING_OWNED_TOOLS',
@@ -8744,6 +8975,9 @@ __all__ = [
     'TOOL_UPGRADE_DATA',
     'BASE_TOOL_SHOP_DATA',
     'UTILITY_TOOL_SHOP_DATA',
+    'FISHING_ROD_DATA',
+    'FISHING_LURE_DATA',
+    'FISHING_BAIT_DATA',
     'ORE_SHOP_DATA',
     'RESOURCE_ITEMS',
     'CRAFTABLE_ITEMS',
@@ -8759,6 +8993,7 @@ __all__ = [
     'WILDERNESS_BIOME_NAMES',
     'WILDERNESS_BIOME_DESCRIPTIONS',
     'FISH_DATA',
+    'BIOME_FISH_DATA',
     'FISH_ITEMS',
     'MINE_MAX_FLOOR',
     'MINE_NODE_SYMBOLS',

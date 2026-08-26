@@ -48,7 +48,9 @@ class C:
     DESERT = "\033[38;5;173m"
     TUNDRA = "\033[38;5;255m"
     COAST = "\033[38;5;38m"
-    WATER_DEEP = "\033[38;5;31m"
+    WATER_SHALLOW = "\033[38;5;117m"
+    WATER_NORMAL = "\033[38;5;39m"
+    WATER_DEEP = "\033[38;5;25m"
     UI_TITLE = "\033[38;5;229;1m"
     UI_BORDER = "\033[38;5;244m"
     UI_SELECTED = "\033[38;5;220;1m"
@@ -352,6 +354,13 @@ LOADED_STATE_DEFAULTS = {
     "fishing_end_at": 0.0,
     "fishing_will_bite": True,
     "fishing_pool": [],
+    "fishing_cast_rod": "Fishing Rod",
+    "fishing_cast_depth": "",
+    "fishing_cast_lure": "None",
+    "fishing_cast_bait": "None",
+    "owned_fishing_lures": [],
+    "equipped_fishing_lure": "None",
+    "equipped_fishing_bait": "None",
     "location": "Farm",
     "facing": "DOWN",
     "tool_target_mode": "FRONT",
