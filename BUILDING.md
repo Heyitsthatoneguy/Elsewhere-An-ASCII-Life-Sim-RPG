@@ -25,8 +25,8 @@ project and Python licenses, launches the packaged executable with `--version`
 and an isolated `--self-check`, and creates:
 
 ```text
-dist\Elsewhere-1.0.1-windows-x64.zip
-dist\Elsewhere-1.0.1-windows-x64.zip.sha256
+dist\Elsewhere-1.1.0-windows-x64.zip
+dist\Elsewhere-1.1.0-windows-x64.zip.sha256
 ```
 
 Use `-SkipTests` only when iterating locally; public builds should always run

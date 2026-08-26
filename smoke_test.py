@@ -119,7 +119,7 @@ def visible_terminal_len(text: object) -> int:
 def main() -> int:
     assert support.GAME_TITLE == "Elsewhere: an ASCII Life-Sim RPG"
     assert support.GAME_SHORT_TITLE == "Elsewhere"
-    assert support.GAME_VERSION == "1.0.1"
+    assert support.GAME_VERSION == "1.1.0"
     assert support.movement_delta_for_key("NUM7") == (-1, -1)
     assert support.movement_delta_for_key("NUM8") == (0, -1)
     assert support.movement_delta_for_key("NUM3") == (1, 1)

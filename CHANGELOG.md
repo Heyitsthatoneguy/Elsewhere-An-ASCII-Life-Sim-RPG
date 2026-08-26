@@ -1,5 +1,51 @@
 # Changelog
 
+## 1.1.0
+
+- Added persistent world opportunities that seed a new game with useful work and
+  continue refreshing at bounded intervals. The same quests appear on appropriate
+  notice boards, in the Quest Log, and through the requesting NPC's dialogue.
+- Added autonomous adventuring parties for the minority of NPCs inclined toward
+  field work. They form groups with suitable friends, travel through the real
+  world, gather resources, make deliveries, visit residents, face danger, and
+  return to the quest giver instead of resolving work through an abstract timer.
+  Their success creates grounded competition while preserving player-accepted
+  quests, and generated wilderness towns participate in the same system.
+- Rebuilt fishing around visible shallow, normal, and deep water; distinct rods,
+  bait, and reusable lures; a cursor-based cast; a rendered line and bobber; and a
+  scrolling fish-fighting minigame with drag, tension, spool, burst, recovery, and
+  species-specific movement. The starter rod now uses the complete system with a
+  one-tile range, while purchased tackle provides meaningful reach and strength.
+- Added 41 biome-specific fish across rivers, ponds, lakes, coasts, deserts,
+  wetlands, forests, highlands, tundra, and underground water. New catches have
+  depth and tackle preferences, aquarium-compatible artwork and colors, museum
+  information, persistent catch records, and Fishing Journal entries. Developed
+  harbors now support tackle exchanges, local reports, anglers, and catch requests.
+- Completed the seasonal systems pass with season-specific daylight, environmental
+  presentation, festivals, crop-season rules and regrowth, market premiums,
+  routines, help text, calendar integration, and consistent frozen-water behavior.
+- Repaired guided journeys and related NPC pathfinding. The real NPC now leaves
+  their routine, follows a physical route across chunks and interiors, recognizes
+  arrival at buildings and other destinations, supports early cancellation, and
+  returns to ordinary life without creating a duplicate follower or teleporting.
+- Expanded generated resident histories, occupations, request dialogue, seasonal
+  activity, storm conversation, follower observations, and contextual ambient
+  speech. Dialogue now has more grounded material to draw from and avoids repeating
+  one generic weather or witnessed-event line.
+- Improved aquarium fish presentation and movement, including a broader species
+  color palette and a fix for fish settling at the bottom and ceasing to swim.
+- Upgraded Checkers and Chess opponents with difficulty-aware search, move ordering,
+  tactical evaluation, stronger endgame play, and more deliberate legal choices.
+- Optimized dungeon fog and first-entry rendering. Explored and currently visible
+  tiles are now calculated once per frame, and room geometry uses the resolved map
+  directly. In profiling, the first dungeon frame improved from about 99 ms to
+  21 ms and subsequent frames from about 55 ms to 7–8 ms without changing room,
+  door, trap, or line-of-sight behavior.
+- Added broad regression coverage for world opportunities, physical NPC parties,
+  fishing balance and visuals, regional species, seasons, guide completion,
+  dialogue variety, board-game AI, aquarium movement, save normalization, and
+  one-snapshot-per-frame dungeon exploration. Existing 1.0.x saves remain supported.
+
 ## 1.0.1
 
 - Fixed follower and bystander dialogue that could expose raw event fragments,
