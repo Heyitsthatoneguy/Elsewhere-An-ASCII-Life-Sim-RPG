@@ -154,6 +154,6 @@ See:
 - `THIRD_PARTY_NOTICES.md`
 
 Some portions of the project were created with generative AI assistance from
-OpenAI Codex.
+OpenAI Codex and Claude.
 
 Release builders should see `BUILDING.md`.
