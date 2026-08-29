@@ -49,6 +49,7 @@ import ascii_farmstead_solitaire as solitaire
 import ascii_farmstead_cards as playing_cards
 import ascii_farmstead_ur as royal_ur
 import ascii_farmstead_game_tables as game_tables
+import ascii_farmstead_cooking as cooking
 import ascii_farmstead_helpers as helpers
 import ascii_farmstead_inventory as inventory
 import ascii_farmstead_random_loot as random_loot
@@ -58,6 +59,7 @@ import ascii_farmstead_route_hamlets as route_hamlets
 import ascii_farmstead_route_leisure as route_leisure
 import ascii_farmstead_route_heritage as route_heritage
 import ascii_farmstead_minigame_ui as minigame_ui
+import ascii_farmstead_mega_skills as mega_skills
 import ascii_farmstead_npcs as npcs
 import ascii_farmstead_dialogue as dialogue_system
 import ascii_farmstead_relationship_dialogue as relationship_dialogue
@@ -67,6 +69,7 @@ import ascii_farmstead_town_builder as town_builder
 import ascii_farmstead_npc_builder as npc_builder
 import ascii_farmstead_npc_dialogue as npc_dialogue
 import ascii_farmstead_dialogue_library as dialogue_library
+import ascii_farmstead_dialogue_registers as dialogue_registers
 import ascii_farmstead_procedural_interiors as procedural_interiors
 import ascii_farmstead_procedural_furnishing as procedural_furnishing
 import ascii_farmstead_procedural_towns as procedural_towns
@@ -119,7 +122,7 @@ def visible_terminal_len(text: object) -> int:
 def main() -> int:
     assert support.GAME_TITLE == "Elsewhere: an ASCII Life-Sim RPG"
     assert support.GAME_SHORT_TITLE == "Elsewhere"
-    assert support.GAME_VERSION == "1.1.0"
+    assert support.GAME_VERSION == "1.1.1"
     assert support.movement_delta_for_key("NUM7") == (-1, -1)
     assert support.movement_delta_for_key("NUM8") == (0, -1)
     assert support.movement_delta_for_key("NUM3") == (1, 1)
@@ -210,6 +213,64 @@ def main() -> int:
     )
     assert data.RESIDENT_REQUEST_DATA
     assert data.COMPANION_QUEST_DATA
+    assert len(data.COOKING_RECIPES) >= 26
+    assert cooking.recipe_mastery_profile(0)["label"] == "Learning"
+    assert cooking.recipe_mastery_profile(3)["label"] == "Familiar"
+    assert cooking.recipe_mastery_profile(8)["label"] == "Skilled"
+    assert cooking.recipe_mastery_profile(16)["label"] == "Mastered"
+    assert cooking.mastery_bonus_servings(7, 1) == 1
+    assert cooking.mastery_bonus_servings(15, 1) == 1
+    assert cooking.cooking_time_minutes(
+        3, kitchen_required=True, station_bonus=0, total_batches=0,
+    ) == 33
+    # The threshold tuples are the single source of truth for both tracks: the
+    # labels, tiers, next_count and time reductions are all derived from them.
+    # Each threshold must enter its tier exactly at the boundary, and one step
+    # below it must still be the previous tier.
+    assert cooking.RECIPE_MASTERY_THRESHOLDS == (0, 3, 8, 16)
+    assert cooking.COOKING_LEVEL_THRESHOLDS == (0, 10, 30, 75, 150)
+    for _index, _threshold in enumerate(cooking.RECIPE_MASTERY_THRESHOLDS):
+        assert cooking.recipe_mastery_profile(_threshold)["tier"] == _index
+        if _index:
+            assert cooking.recipe_mastery_profile(_threshold - 1)["tier"] == _index - 1
+    for _index, _threshold in enumerate(cooking.COOKING_LEVEL_THRESHOLDS):
+        assert cooking.cooking_level_profile(_threshold)["level"] == _index
+        if _index:
+            assert cooking.cooking_level_profile(_threshold - 1)["level"] == _index - 1
+    assert cooking.recipe_mastery_profile(0)["next_count"] == 3
+    assert cooking.recipe_mastery_profile(16)["next_count"] is None
+    assert cooking.cooking_level_profile(150)["next_count"] is None
+    # cooking a batch in two sittings must pay the same as cooking it in one
+    assert all(
+        cooking.mastery_bonus_servings(0, _a + _b)
+        == cooking.mastery_bonus_servings(0, _a) + cooking.mastery_bonus_servings(_a, _b)
+        for _a in range(0, 20) for _b in range(0, 20)
+    )
+    flexible_pantry = {"Turnip": 2, "Silver Carrot": 1, "Wild Apple": 1, "Duck Egg": 1}
+    assert inventory.inventory_ingredient_quantity(flexible_pantry, "Any Vegetable") == 3
+    assert inventory.ingredient_accepts_item("Any Vegetable", "Silver Carrot")
+    assert inventory.ingredient_accepts_item("Any Fruit", "Wild Apple")
+    assert inventory.ingredient_accepts_item("Any Egg", "Duck Egg")
+    assert inventory.consume_ingredient(flexible_pantry, "Any Vegetable", 2) == 2
+    assert flexible_pantry["Turnip"] == 0
+
+    cooking_game = FarmGame()
+    cooking_game.state.house_upgrades.append("Kitchen Addition")
+    cooking_game.state.learned_recipe_ids.append("Seasonal Stir-Fry")
+    cooking_game.state.inventory["Turnip"] = 9
+    cooking_game.state.inventory["Wild Herbs"] = 3
+    cooking_times = []
+    cooking_messages = []
+    cooking_game.advance_time = lambda minutes: cooking_times.append(int(minutes))
+    cooking_game.autosave_with_message = lambda message: cooking_messages.append(str(message))
+    assert cooking_game.max_cookable_batches("Seasonal Stir-Fry", limit=10) == 3
+    assert cooking_game.cook_recipe("Seasonal Stir-Fry", batches=3)
+    assert cooking_game.state.cooking_recipe_counts["Seasonal Stir-Fry"] == 3
+    assert cooking_game.state.cooking_total_batches == 3
+    assert cooking_game.state.inventory["Seasonal Stir-Fry"] == 3
+    assert cooking_times == [33]
+    assert "Familiar" in cooking_messages[-1]
+    assert cooking_game.food_buff_for_item("Seasonal Stir-Fry")["charges"] == 9
     assert ui.clean_text_entry("A deliberately long custom description", "", 180) == "A deliberately long custom description"
     assert len(ui.clean_text_entry("x" * 80, "", 24)) == 24
 
@@ -4082,7 +4143,11 @@ def main() -> int:
     assert data.FISHING_ROD_DATA["Fishing Rod"]["advanced_cast"]
     assert data.FISHING_ROD_DATA["Fishing Rod"]["range"] == 1
     assert data.FISHING_ROD_DATA["Casting Rod"]["advanced_cast"]
-    assert data.FISHING_ROD_DATA["Casting Rod"]["depths"] == ["Shallow", "Normal"]
+    all_fishing_depths = {"Shallow", "Normal", "Deep"}
+    assert all(
+        set(rod_data.get("depths", [])) == all_fishing_depths
+        for rod_data in data.FISHING_ROD_DATA.values()
+    )
     starter_cursor_game = FarmGame()
     starter_cursor_game.state.selected_tool_index = starter_cursor_game.state.available_tools.index("Fishing Rod")
     starter_cursor_requests = []
@@ -4285,7 +4350,12 @@ def main() -> int:
             break
     assert smart_marlin["result"] == "landed"
     assert float(smart_marlin["elapsed"]) >= 25.0
-    assert int(smart_marlin["cycle_count"]) >= 5
+    # A trophy must still cost more than a single reel. The cycle count is low
+    # because each phase is now about five seconds rather than one and a half:
+    # a catch is roughly four phases, so two runs is the trophy floor. The
+    # invariant is unchanged in spirit -- the fish has to break away and run
+    # again before it can be landed.
+    assert int(smart_marlin["cycle_count"]) >= 2
     starter_fight = fishing_system.build_fishing_fight_state(
         "Pond Minnow", data.FISH_DATA["Pond Minnow"], "Fishing Rod",
         data.FISHING_ROD_DATA["Fishing Rod"], "Shallow", 1,
@@ -7890,6 +7960,12 @@ def main() -> int:
     )
     progression_record = procedural_town_game.npc_progression_record(progression_probe)
     assert progression_record["level"] == 1
+    assert (
+        procedural_town_game.npc_adventure_spoken_outcome(
+            "returned injured after withdrawing from a threat beyond their preparation"
+        )
+        == "returned injured after withdrawing from a threat beyond safe preparation"
+    )
     procedural_town_game.award_npc_adventure_xp(progression_probe, 300)
     assert progression_record["level"] >= 3
     assert progression_record["gear_tier"] >= 1
@@ -7970,6 +8046,7 @@ def main() -> int:
         "resident_trips"
     ]["resident:test"]
     assert saved_progression["level"] == progression_record["level"]
+    assert saved_progression["inclination_revision"] == progression_record["inclination_revision"]
     assert len(saved_progression["history"][0]) == 240
     assert saved_trip["trip_kind"] == "regional_adventure"
     assert saved_trip["danger"] == 100
@@ -9280,6 +9357,22 @@ def main() -> int:
         for lines in stage.values()
     ) >= 64
     assert sum(len(lines) for lines in relationship_dialogue.SPOUSE_HOUSEHOLD_LINES.values()) >= 64
+    assert set(relationship_dialogue.SPOUSE_STAGE_LINES) == {
+        "newlywed", "parents", "empty_nest", "enduring",
+    }
+    for _stage, _subjects in relationship_dialogue.SPOUSE_STAGE_LINES.items():
+        assert set(_subjects) == set(relationship_dialogue.SPOUSE_HOUSEHOLD_LINES), _stage
+        assert all(len(_lines) >= 4 for _lines in _subjects.values()), _stage
+    assert relationship_dialogue.spouse_stage_group(0.5, 0) == "newlywed"
+    assert relationship_dialogue.spouse_stage_group(9.0, 0) == "enduring"
+    assert relationship_dialogue.spouse_stage_group(9.0, 2) == "parents"
+    assert relationship_dialogue.spouse_stage_group(9.0, 2, 2) == "parents"
+    # grown children leave an emptier house, not a childless marriage
+    assert relationship_dialogue.spouse_stage_group(9.0, 2, 0) == "empty_nest"
+    assert relationship_dialogue.spouse_stage_group(9.0, 0, 0) == "enduring"
+    assert relationship_dialogue.spouse_stage_group(None, None) == "newlywed"
+    # an unknown stage must still produce a line, from the stage-neutral pool
+    assert relationship_dialogue.spouse_household_line("home", {}, "seed", "widowed")
     assert sum(
         len(lines)
         for stage in relationship_dialogue.CHILD_HOUSEHOLD_LINES.values()
@@ -11261,12 +11354,146 @@ def main() -> int:
     assert thoughtful_response["effect"] == 2
     assert FarmGame.town_npc_conversation_menu.__module__ == "ascii_farmstead_dialogue"
     expanded_lines = dialogue_library.expanded_dialogue_catalog()
-    assert dialogue_library.EXPANDED_DIALOGUE_LINE_COUNT == 15000
+    # 25 profiles x 12 topics x (14 register bodies + 5 observations x 10 lenses).
+    assert dialogue_library.EXPANDED_DIALOGUE_LINE_COUNT == 19200
     assert len(dialogue_library.VOICE_PROFILES) == 25
     assert len(dialogue_library.DIALOGUE_LIBRARY_TOPICS) == 12
     assert all(len(dialogue_library.TOPIC_PATTERNS[topic]) == 10 for topic in dialogue_library.DIALOGUE_LIBRARY_TOPICS)
-    assert len(expanded_lines) == 15000
-    assert len(set(expanded_lines.values())) == 15000
+    assert len(expanded_lines) == 19200
+    # Placeholders such as {interest}, {material}, {place} and {task} hold lowercase
+    # phrases ("ore, edge geometry, and better tool designs"), so no template may open
+    # a sentence with one. This caught 46 rendered lines; keep it at zero.
+    _lower_opener = re.compile(r"(?:^|(?<=[.!?])\s+)[a-z]")
+    _openers = [
+        _line for _line in expanded_lines.values()
+        if _lower_opener.search(dialogue_system.naturalize_spoken_dialogue(_line))
+    ]
+    assert not _openers, _openers[:3]
+
+    # Agreement the template cannot see: a joined name list is singular with one
+    # child, and a raw count is 1 as often as it is 5. Every count-varying
+    # placeholder has an agreement key beside it (children_are, property_label,
+    # claim_label, automation_label); this keeps that a rule rather than a habit.
+    _agreement_hits = []
+    for _module_path in sorted(Path(__file__).parent.glob("ascii_farmstead_*.py")):
+        try:
+            _tree = ast.parse(_module_path.read_text(encoding="utf-8-sig"))
+        except (SyntaxError, UnicodeDecodeError):
+            continue
+        for _node in ast.walk(_tree):
+            if not isinstance(_node, ast.Constant) or not isinstance(_node.value, str):
+                continue
+            if "{" not in _node.value or chr(10) in _node.value:
+                continue        # multi-line strings are docstrings, not spoken text
+            for _warning in helpers.agreement_warnings(_node.value):
+                _agreement_hits.append("%s:%d %s" % (_module_path.name, _node.lineno, _warning))
+    assert not _agreement_hits, _agreement_hits[:4]
+
+    # Every spoken line is authored uncontracted and contracted at display time,
+    # so an illegal contraction can only be introduced by that pass. This is the
+    # check that "do you've a few minutes to spare?" trips.
+    _contraction_hits = []
+    for _module_path in sorted(Path(__file__).parent.glob("ascii_farmstead_*.py")):
+        try:
+            _tree = ast.parse(_module_path.read_text(encoding="utf-8-sig"))
+        except (SyntaxError, UnicodeDecodeError):
+            continue
+        for _node in ast.walk(_tree):
+            if not isinstance(_node, ast.Constant) or not isinstance(_node.value, str):
+                continue
+            if len(_node.value.split()) < 3 or chr(10) in _node.value:
+                continue
+            _spoken = dialogue_system.naturalize_spoken_dialogue(_node.value)
+            for _warning in helpers.overcontraction_warnings(_spoken):
+                _contraction_hits.append(
+                    "%s:%d %s" % (_module_path.name, _node.lineno, _warning)
+                )
+    assert not _contraction_hits, _contraction_hits[:4]
+    assert helpers.overcontraction_warnings("I'VE a horse.")
+    assert not helpers.overcontraction_warnings("I'VE already been there.")
+
+    # Activity phrases are shown third-person and spoken first-person after a
+    # plain "their " -> "my " swap, so they must carry no other third-person
+    # marker. The safe style is pronoun-free.
+    _person_hits = []
+    for _module_path in sorted(Path(__file__).parent.glob("ascii_farmstead_*.py")):
+        try:
+            _tree = ast.parse(_module_path.read_text(encoding="utf-8-sig"))
+        except (SyntaxError, UnicodeDecodeError):
+            continue
+        for _node in ast.walk(_tree):
+            if not isinstance(_node, ast.Dict):
+                continue
+            for _key, _value in zip(_node.keys, _node.values):
+                if not isinstance(_key, ast.Constant) or _key.value not in {
+                    "activity", "social_activity", "runtime_activity",
+                }:
+                    continue
+                if not isinstance(_value, ast.Constant) or not isinstance(_value.value, str):
+                    continue
+                for _warning in helpers.first_person_warnings(_value.value):
+                    _person_hits.append(
+                        "%s:%d %s" % (_module_path.name, _node.lineno, _warning)
+                    )
+    assert not _person_hits, _person_hits[:4]
+    # Global uniqueness across profiles is deliberately not required: profiles
+    # sharing a register share sentence bodies, and two tradespeople both saying
+    # "Right. Back to it." is ordinary speech. Requiring it is what forced every
+    # line to open with the speaker's vantage clause. What must hold is that no
+    # single speaker ever repeats itself.
+    for _profile in dialogue_library.VOICE_PROFILES:
+        _own = [
+            line for key, line in expanded_lines.items()
+            if key.split(":", 1)[0] == _profile["id"]
+        ]
+        assert len(_own) == len(set(_own)), _profile["id"]
+    # Every profile must map to a register, and every register must cover every
+    # topic: a gap silently falls back to the shared bodies, which is exactly
+    # the uniform voice the registers exist to remove.
+    assert set(dialogue_registers.PROFILE_REGISTERS) == {
+        profile["id"] for profile in dialogue_library.VOICE_PROFILES
+    }
+    for _register in set(dialogue_registers.PROFILE_REGISTERS.values()):
+        assert set(dialogue_registers.REGISTER_TOPIC_PATTERNS[_register]) == set(
+            dialogue_library.DIALOGUE_LIBRARY_TOPICS
+        )
+        assert set(dialogue_registers.REGISTER_TOPIC_OBSERVATIONS[_register]) == set(
+            dialogue_library.DIALOGUE_LIBRARY_TOPICS
+        )
+    # No authored line may be written twice, in any register or any lens set.
+    _authored = [
+        line
+        for _reg in dialogue_registers.REGISTER_TOPIC_PATTERNS
+        for _rows in dialogue_registers.REGISTER_TOPIC_PATTERNS[_reg].values()
+        for line in _rows
+    ] + [
+        line
+        for _reg in dialogue_registers.REGISTER_TOPIC_OBSERVATIONS
+        for _rows in dialogue_registers.REGISTER_TOPIC_OBSERVATIONS[_reg].values()
+        for line in _rows
+    ] + [
+        line
+        for _rows in dialogue_registers.REGISTER_LENSES.values()
+        for line in _rows
+    ] + [
+        line
+        for _reg in dialogue_registers.REGISTER_TOPIC_LENSES
+        for _rows in dialogue_registers.REGISTER_TOPIC_LENSES[_reg].values()
+        for line in _rows
+    ]
+    assert len(_authored) == len(set(_authored)) == 1290
+    # Every register carries its own closing tails, including for greeting and
+    # farewell; a gap falls back to a shared set and reintroduces the doubled
+    # sign-offs those per-register tails exist to remove.
+    assert all(
+        len(_rows) == 10
+        for _rows in dialogue_registers.REGISTER_LENSES.values()
+    )
+    assert all(
+        set(dialogue_registers.REGISTER_TOPIC_LENSES[_register]) == {"greeting", "farewell"}
+        and all(len(_rows) == 10 for _rows in dialogue_registers.REGISTER_TOPIC_LENSES[_register].values())
+        for _register in set(dialogue_registers.PROFILE_REGISTERS.values())
+    )
     assert all(line and "{" not in line and "}" not in line and "\n" not in line for line in expanded_lines.values())
     assert dialogue_library.dialogue_profile_for_role("Blacksmith")["id"] == "smith"
     assert dialogue_library.dialogue_profile_for_role("Librarian")["id"] == "archive"
@@ -11284,6 +11511,46 @@ def main() -> int:
     assert dialogue_system.naturalize_spoken_dialogue(
         "It has. The clear weather changed my plans."
     ) == "It has. The clear weather changed my plans."
+    # Every spoken line in the game passes through the naturalizer, so a
+    # careless edit to its table or guards mis-speaks the whole script at once.
+    # Each row is a grammatical sentence with its one correct rendering; the
+    # unchanged rows are the ones a guard has to protect.
+    for _plain, _spoken in (
+        # perfect tense contracts, possessive "have" does not
+        ("I have seen it.", "I've seen it."),
+        ("They have already left.", "They've already left."),
+        ("I have a horse.", "I have a horse."),
+        ("We have three fields.", "We have three fields."),
+        ("She has a plan.", "She has a plan."),
+        # "have to" is a modal, never "'ve to"
+        ("I have to go now.", "I have to go now."),
+        ("You have to let me finish.", "You have to let me finish."),
+        ("She has to decide today.", "She has to decide today."),
+        # a copula closing the clause keeps its full form
+        ("It is.", "It is."),
+        ("You are.", "You are."),
+        ("There is.", "There is."),
+        ("It is ready.", "It's ready."),
+        ("You are ready.", "You're ready."),
+        ("There is a problem.", "There's a problem."),
+        # an interrogative with a bare "it" cannot contract, but idiom can
+        ("What is it?", "What is it?"),
+        ("Where is it?", "Where is it?"),
+        ("Who is it?", "Who is it?"),
+        ("What is it now?", "What is it now?"),
+        ("What is it like?", "What's it like?"),
+        ("What is the plan?", "What's the plan?"),
+        ("Who is that?", "Who's that?"),
+        # a subject stranded after a comparative stays expanded
+        ("You are better at this than I am.", "You're better at this than I am."),
+        # ordinary cases that must keep working
+        ("I will go.", "I'll go."),
+        ("I would go.", "I'd go."),
+        ("I cannot go.", "I can't go."),
+        ("I do not know.", "I don't know."),
+        ("That is enough.", "That's enough."),
+    ):
+        assert dialogue_system.naturalize_spoken_dialogue(_plain) == _spoken, (_plain, _spoken)
     smith_library_line = game.dialogue_library_line(first_npc | {"role": "Blacksmith"}, "work", "smoke")
     archive_library_line = game.dialogue_library_line(first_npc | {"role": "Librarian"}, "work", "smoke")
     assert smith_library_line != archive_library_line
@@ -11527,6 +11794,44 @@ def main() -> int:
     assert listener_packet["source_name"] == "Nora"
     assert listener_packet["source_kind"] == "hearsay"
     assert int(listener_packet["confidence"]) < int(source_packet["confidence"])
+    rumor_actor = {
+        "id": "rumor_audit", "name": "Pax", "role": "Innkeeper",
+        "personality": "Reserved", "relationship": 0,
+    }
+    rumor_truth = "You defeated the cave lurker near the mine."
+    rumor_wrong = "You needed help defeating the cave lurker near the mine."
+    rumor_packet = game.dialogue_add_knowledge(
+        rumor_actor, "procedural", rumor_wrong,
+        knowledge_id="rumor-audit-1", original_text=rumor_truth,
+        distorted=True, confidence=46,
+    )
+    assert game.dialogue_distorted_player_rumors(rumor_actor, "procedural")
+    assert game.dialogue_correct_knowledge(
+        rumor_actor, "procedural", "rumor-audit-1",
+    )
+    assert rumor_packet["text"] == rumor_truth
+    assert rumor_packet["corrected"] and not rumor_packet["distorted"]
+    # An old copy circulating elsewhere cannot undo a firsthand correction.
+    game.dialogue_add_knowledge(
+        rumor_actor, "procedural", rumor_wrong,
+        knowledge_id="rumor-audit-1", original_text=rumor_truth,
+        distorted=True, confidence=28,
+    )
+    assert rumor_packet["text"] == rumor_truth
+    assert rumor_packet["corrected"] and not rumor_packet["distorted"]
+    assert not game.dialogue_distorted_player_rumors(rumor_actor, "procedural")
+    assert (
+        game.dialogue_player_rumor_first_person(
+            "You were proud of your work."
+        )
+        == "I was proud of my work."
+    )
+    rumor_variants = {
+        game.dialogue_drift_rumor(rumor_truth, f"rumor-seed-{index}")
+        for index in range(40)
+    }
+    assert rumor_variants
+    assert all("nest of the" not in line for line in rumor_variants)
     mood_actor = {
         "id": "mood_actor", "name": "Vale", "role": "Miner",
         "personality": "Calm", "relationship": 0,
@@ -16682,11 +16987,13 @@ def main() -> int:
     reward_a = random_loot.add_random_reward_items(
         reward_state_a, {"Ruin Scrap": 1}, "reward-smoke", 18,
         gear_chance=1.0, consumable_chance=1.0, valuable_chance=1.0,
+        game_table_chance=1.0,
         quality_bonus=3,
     )
     reward_b = random_loot.add_random_reward_items(
         reward_state_b, {"Ruin Scrap": 1}, "reward-smoke", 18,
         gear_chance=1.0, consumable_chance=1.0, valuable_chance=1.0,
+        game_table_chance=1.0,
         quality_bonus=3,
     )
     assert reward_a == reward_b
@@ -16695,6 +17002,7 @@ def main() -> int:
     assert reward_a[reward_gear_name] == 1
     assert any(name in reward_a for name in random_loot.RANDOM_CONSUMABLES)
     assert any(name in reward_a for name in random_loot.RANDOM_VALUABLES)
+    assert any(name in reward_a for name in game_tables.GAME_TABLE_BY_FURNITURE)
     assert fang_profile["weapon_range_max"] == 2
 
     gated_gear_game = FarmGame()
@@ -19559,6 +19867,41 @@ def main() -> int:
     assert len(dungeon_rooms) >= 2
     explored_before_doors = set(dungeon_game.dungeon_explored_tiles())
     assert (dungeon_game.state.player_x, dungeon_game.state.player_y) in explored_before_doors
+
+    # Exploration and visibility state must remain floor-scoped.  Older builds
+    # discarded the F<n> prefix while loading explored coordinates, causing
+    # deeper floors to inherit every previously explored tile and render far
+    # more work than their own fog of war required.
+    combat_record = dungeon_game.dungeon_roguelike_record()
+    original_explored_values = list(combat_record["explored_tiles"])
+    foreign_floor = int(dungeon_game.state.current_dungeon_floor) + 1
+    foreign_position = (67, 27)
+    combat_record["explored_tiles"].append(
+        dungeon_game.dungeon_feature_key(*foreign_position, floor=foreign_floor)
+    )
+    dungeon_game.state.current_dungeon_floor = foreign_floor
+    dungeon_game._dungeon_explored_cache_signature = None
+    assert dungeon_game.dungeon_explored_tiles() == {foreign_position}
+    dungeon_game.dungeon_store_floor_positions("explored_tiles", {(66, 26)})
+    assert any(
+        value.startswith(f"F{foreign_floor}:")
+        for value in combat_record["explored_tiles"]
+    )
+    dungeon_game.state.current_dungeon_floor = 1
+    dungeon_game._dungeon_explored_cache_signature = None
+    assert foreign_position not in dungeon_game.dungeon_explored_tiles()
+    combat_record["explored_tiles"] = original_explored_values
+    dungeon_game._dungeon_explored_cache_signature = None
+
+    dungeon_game.dungeon_current_visible_tiles()
+    current_visibility_signature = dungeon_game._dungeon_visibility_cache_signature
+    combat_record["door_states"][f"F{foreign_floor}:4,4"] = True
+    combat_record["revealed_rooms"].append(f"F{foreign_floor}:5,5")
+    dungeon_game.dungeon_current_visible_tiles()
+    assert dungeon_game._dungeon_visibility_cache_signature == current_visibility_signature
+    combat_record["door_states"].pop(f"F{foreign_floor}:4,4", None)
+    combat_record["revealed_rooms"].remove(f"F{foreign_floor}:5,5")
+
     concealed_room_position = next(
         (
             position
@@ -19969,6 +20312,27 @@ def main() -> int:
         if enemy.get("boss")
     )
     assert final_guardian["final_boss"] is True
+    skill_book = mega_game.mega_dungeon_skill_book_reward(mega_key)
+    assert skill_book in mega_skills.MEGA_DUNGEON_SKILL_BOOKS
+    assert mega_game.mega_dungeon_skill_book_reward(mega_key) == skill_book
+    _reward_money, final_rewards = mega_game.wilderness_dungeon_boss_reward(mega_key, mega_max_floor)
+    assert final_rewards.get(skill_book) == 1
+    learned_skill = str(mega_skills.MEGA_DUNGEON_SKILL_BOOKS[skill_book]["skill"])
+    mega_game.save = lambda *args, **kwargs: True
+    mega_game.state.inventory[skill_book] = 2
+    assert mega_game.learn_mega_skill_book(skill_book)
+    assert mega_game.learn_mega_skill_book(skill_book)
+    mega_progress = mega_game.combat_progress_for_key("player")
+    assert mega_progress["book_skill_ranks"][learned_skill] == 2
+    assert skill_book in mega_game.mega_skill_library()
+    assert learned_skill in mega_game.dungeon_known_skill_names()
+    assert mega_game.dungeon_skill_rank(learned_skill) == 2
+    assert learned_skill in {skill.name for skill in mega_game.player_ability_menu_skills()}
+    mega_progress["book_skill_ranks"] = {}
+    mega_progress["book_study_counts"] = {}
+    assert mega_game.learn_mega_skill_book(skill_book, from_library=True)
+    assert mega_progress["book_skill_ranks"][learned_skill] == 1
+    assert mega_game.mega_skill_library()[skill_book] == 2
     mega_game.return_from_wilderness_dungeon("")
     mega_game.enter_wilderness_dungeon(*mega_entrance)
     assert mega_game.state.current_dungeon_floor == first_checkpoint
@@ -21954,6 +22318,7 @@ def main() -> int:
     assert gather_work["status"] == "resolved" and gather_work["resolved_by"] == "npc_party"
     assert party["gathered"] >= party["quantity"]
     assert any("Gathered 1" in line for line in party["history"])
+    assert all("physically completed" not in line.lower() for line in party["history"])
     sanitized_opportunities = GameState(
         world_opportunity_state=npc_work_state
     ).world_opportunity_state

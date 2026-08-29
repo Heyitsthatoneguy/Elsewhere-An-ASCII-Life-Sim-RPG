@@ -22,13 +22,15 @@ from ascii_farmstead_data import (
     TOWN_BUILDING_DATA,
 )
 from ascii_farmstead_dialogue_library import contextual_dialogue_line
-from ascii_farmstead_helpers import quantity_agreement, quantity_item_phrase
+from ascii_farmstead_helpers import clause_from_sentence, kinship_term, name_list, pronouns_for_sex, quantity_agreement, quantity_item_phrase
 from ascii_farmstead_npc_builder import FEMALE_GIVEN_NAMES, MALE_GIVEN_NAMES, SURNAMES
 from ascii_farmstead_relationship_dialogue import (
     child_household_line,
     romance_flirt_response,
     romance_status_line,
     spouse_household_line,
+    child_stage_group,
+    spouse_stage_group,
 )
 from ascii_farmstead_custom_story import (
     apply_custom_dialogue_override,
@@ -185,7 +187,7 @@ STORY_AFTERMATH_PROFILES: Dict[str, Dict[str, str]] = {
     },
     "personal": {
         "summary": "A small deliberate change became part of the routine instead of fading after one ambitious day.",
-        "activity": "protecting the deliberate change they added to their routine",
+        "activity": "protecting the deliberate change that is now part of the routine",
         "follow_up": "The change has lasted. I do not have to remind myself to keep it up anymore.",
     },
 }
@@ -271,17 +273,110 @@ _SPOKEN_CONTRACTIONS_REQUIRING_CONTINUATION = {
 }
 
 
+# "I've seen it" is the perfect tense and reads naturally; "I've time", "do
+# you've it" and "you've to let me finish" are not English at all. The
+# contraction needs a past participle after it, so the rule is written as a
+# requirement rather than a list of exclusions: a participle this table misses
+# merely leaves the full form standing, while an exclusion it misses puts a
+# broken sentence in front of the player.
+#
+# Regular participles are caught by the -ed suffix. There is deliberately no
+# -en suffix rule, because "children", "kitchen" and "garden" would satisfy it
+# and "I've children" is exactly the error being prevented.
+_PERFECT_ADVERBS: Tuple[str, ...] = (
+    "never", "already", "always", "just", "still", "ever", "only", "often",
+    "recently", "finally", "nearly", "almost", "barely", "hardly", "simply",
+    "actually", "certainly", "probably", "truly", "really", "since", "long",
+)
+_IRREGULAR_PARTICIPLES: Tuple[str, ...] = (
+    "been", "seen", "gone", "done", "had", "got", "gotten", "made", "taken",
+    "given", "come", "found", "said", "told", "known", "become", "left", "put",
+    "kept", "heard", "brought", "thought", "run", "won", "lost", "met", "read",
+    "written", "spoken", "eaten", "forgotten", "chosen", "driven", "ridden",
+    "fallen", "grown", "drawn", "flown", "worn", "torn", "sworn", "borne",
+    "shown", "sown", "blown", "thrown", "begun", "drunk", "sung", "sunk",
+    "rung", "hung", "held", "felt", "meant", "sent", "spent", "built", "burnt",
+    "learnt", "dealt", "slept", "swept", "crept", "leapt", "dreamt", "paid",
+    "laid", "sold", "stood", "understood", "caught", "taught", "fought",
+    "sought", "bought", "cost", "cut", "hit", "let", "set", "shut", "split",
+)
+_PERFECT_TENSE_GUARD = r"(?=\s+(?:(?:%s)\s+)*(?:%s|\w+ed)\b)" % (
+    "|".join(_PERFECT_ADVERBS),
+    "|".join(_IRREGULAR_PARTICIPLES),
+)
+
+
+_FIRST_PERSON_SUBJECT = re.compile(r"(?:\w+[ ,]+){0,2}I\b")
+
+
+def _as_spoken_intent(text: object) -> str:
+    """Give a bare role goal a speaker.
+
+    Role definitions store goals as imperatives ("Keep records clear enough
+    that no resident disappears between ledgers") because they read well as a
+    profile line and after an explicit lead-in such as "What I want,
+    honestly?". Delivered as a plain answer to "what do you want from life"
+    they become orders, so a missing subject is supplied here rather than
+    rewriting data that other callers rely on.
+    """
+    line = " ".join(str(text or "").split())
+    if not line or _FIRST_PERSON_SUBJECT.match(line):
+        return line
+    head = line.rstrip(".")
+    return f"I want to {head[:1].lower()}{head[1:]}."
+
+
+def _as_spoken_sentence(fragment: object, frame: str) -> str:
+    """Return a phrase as something an NPC can actually say aloud.
+
+    Background fields arrive in two shapes. Authored world profiles store a
+    complete first-person sentence ("I grew up in a busy household."), while
+    the procedural town builder stores a bare phrase ("a household where
+    everyone learned a trade") intended to be embedded. Concatenating the
+    second kind produced lowercase run-ons with no verb, so a phrase gets a
+    frame and a sentence is left alone.
+    """
+    text = " ".join(str(fragment or "").split())
+    if not text:
+        return ""
+    if text[:1].isupper() and text[-1:] in ".!?":
+        return text
+    return frame.format(text.rstrip("."))
+
+
 def naturalize_spoken_dialogue(text: object) -> str:
     """Use ordinary contractions in game-authored spoken dialogue."""
     line = str(text or "")
     for expanded, contracted in _SPOKEN_CONTRACTIONS:
         continuation_guard = (
-            r"(?!\s*(?:[.!?\u2026]|$))"
+            r"(?!\s*(?:[.!?,;\u2026]|$))"
             if expanded in _SPOKEN_CONTRACTIONS_REQUIRING_CONTINUATION
             else ""
         )
+        preceding_guard = ""
+        if expanded in _SPOKEN_CONTRACTIONS_REQUIRING_CONTINUATION:
+            # "better at this than I am at that" keeps its full form; a
+            # subject contraction stranded after a comparative reads as a
+            # mistake rather than as natural speech.
+            preceding_guard += r"(?<!\bthan )(?<!\bas )"
+        if expanded.casefold().endswith((" have", " has")):
+            continuation_guard += _PERFECT_TENSE_GUARD
+        if expanded.casefold() == "it has":
+            # In "living it has been simpler" the pronoun belongs to the
+            # verb before it, so "it" is an object here and cannot take the
+            # contraction the way a subject "it has" would.
+            preceding_guard += r"(?<!ing )"
+        if expanded.casefold() in {"what is", "who is", "where is"}:
+            # "What's it like?" is ordinary speech, but "What's it?" and
+            # "What's it now?" are not English -- the interrogative is the
+            # complement and "it" is the subject, so there is nothing for the
+            # contraction to lean on once the clause closes. Block only that
+            # shape: a bare "it" (optionally plus a closing adverb) ending it.
+            continuation_guard += (
+                r"(?!\s+it(?:\s+(?:now|then|again|this\s+time))?\s*(?:[.!?,;…]|$))"
+            )
         line = re.sub(
-            rf"\b{re.escape(expanded)}\b(?!['â€™]){continuation_guard}",
+            rf"{preceding_guard}\b{re.escape(expanded)}\b(?!['â€™]){continuation_guard}",
             contracted,
             line,
         )
@@ -1043,18 +1138,46 @@ class DialogueFlowMixin:
         period = str(self.town_time_period() if hasattr(self, "town_time_period") else "day")
         if repeated_today:
             repeat_pools = {
-                "professional": ("Was there something else I can help with?", "Welcome back. What else did you need?"),
-                "warm": ("Back again? Good. What did you forget to ask?", "Oh, hello again! What is it?"),
-                "skeptical": ("You are back already. What changed?", "Another question? Go ahead."),
-                "blunt": ("Again? What is it?", "You came back quickly. Speak."),
-                "reserved": ("Hello again. Was there something else?", "You are back. I am listening."),
-                "wary": ("What do you need this time?", "You again. Keep it brief."),
-                "hostile": ("We already spoke. What now?", "Make this quick."),
-                "neutral": ("Did you need something else?", "Was there something you forgot to ask?"),
+                "professional": (
+                    "Was there something else I can help with?", "Welcome back. What else did you need?",
+                    "Something else, then? Go ahead.", "Still here. What else do you need?",
+                ),
+                "warm": (
+                    "Back again? Good. What did you forget to ask?", "Oh, hello again! What is it?",
+                    "You are back, and I do not mind at all.", "Twice in one day. I must be good company.",
+                ),
+                "skeptical": (
+                    "You are back already. What changed?", "Another question? Go ahead.",
+                    "Back so soon. Did the answer not hold?", "Something you thought of after leaving?",
+                ),
+                "blunt": (
+                    "Again? What is it?", "You came back quickly. Speak.",
+                    "Still here. Get to it.", "More, then. Fine.",
+                ),
+                "reserved": (
+                    "Hello again. Was there something else?", "You are back. I am listening.",
+                    "Yes? I have not moved.", "Something else came to you, then.",
+                ),
+                "wary": (
+                    "What do you need this time?", "You again. Keep it brief.",
+                    "Twice now. What is this about?", "You keep coming back. Why?",
+                ),
+                "hostile": (
+                    "We already spoke. What now?", "Make this quick.",
+                    "Still here?", "You are pushing it.",
+                ),
+                "neutral": (
+                    "Did you need something else?", "Was there something you forgot to ask?",
+                    "Something else, then?", "Back again. Go on.",
+                ),
             }
-            return _stable_pick(
+            # Seeded on the conversation count as well as the day: without it an
+            # NPC gives the identical greeting every time you reopen the
+            # conversation, which is the repetition players actually notice.
+            return _cycling_pick(
                 f"{self.dialogue_day_key()}:{actor.get('id')}:again",
                 repeat_pools[demeanor],
+                actor.get("dialogue_count", 0),
             )
         if first_meeting:
             first_pools = {
@@ -1106,25 +1229,92 @@ class DialogueFlowMixin:
         tier = self.dialogue_familiarity_label(actor, kind)
         if tier in {"Close", "Trusted"}:
             pools = {
-                "warm": ("There you are! I am glad you stopped.", "Good, I was hoping I would see you."),
-                "blunt": ("There you are. I can speak plainly with you.", "Good. You are someone I do not have to perform for."),
-                "reserved": ("I'm glad you came by.", "It is good to see someone familiar."),
-                "skeptical": ("I trust you enough to skip the polite version.", "Good. I wanted your honest opinion."),
+                "warm": (
+                    "There you are! I am glad you stopped.", "Good, I was hoping I would see you.",
+                    "You have a talent for arriving when I want the company.",
+                    "There you are. The day improves.",
+                ),
+                "blunt": (
+                    "There you are. I can speak plainly with you.",
+                    "Good. You are someone I do not have to perform for.",
+                    "You. Good. I have been saving the honest version.",
+                    "There you are. No need for the polite opening.",
+                ),
+                "reserved": (
+                    "I'm glad you came by.", "It is good to see someone familiar.",
+                    "You are welcome here, and I do not say that often.",
+                    "Good. I did not want to spend the whole day quiet.",
+                ),
+                "skeptical": (
+                    "I trust you enough to skip the polite version.",
+                    "Good. I wanted your honest opinion.",
+                    "You I can talk to without measuring every word.",
+                    "There you are. I have been wanting a straight answer from someone.",
+                ),
             }
             base = _stable_pick(
                 f"{self.dialogue_day_key()}:{actor.get('id')}:close:{demeanor}",
-                pools.get(demeanor, ("There you are. It is good to see you.", "I was hoping our paths would cross.")),
+                pools.get(demeanor, (
+                    "There you are. It is good to see you.",
+                    "I was hoping our paths would cross.",
+                    "Good. I would rather talk to you than most people today.",
+                    "There you are. That is the day starting properly.",
+                )),
             )
         else:
+            # The first greeting of the day, from every acquaintance, for the
+            # whole game. Every NPC starts out "neutral", so a two-line pool
+            # here meant the entire town shared two sentences.
             pools = {
-                "professional": (f"Good {period}. How can I help?", "Welcome back. What did you need?"),
-                "warm": ("Hello again! How have you been?", "There you are. It is good to see a familiar face."),
-                "skeptical": ("Hello again. What is on your mind?", "You have another question, I assume."),
-                "blunt": ("There you are. What is it?", "Hello. Speak plainly and we will get along."),
-                "reserved": ("Hello again.", "Good to see you. Was there something you wanted to discuss?"),
-                "wary": ("What do you want?", "I suppose we can speak for a moment."),
-                "hostile": ("What is it now?", "I have little patience for this, but speak."),
-                "neutral": (f"Good {period}.", "Hello again. Was there something you needed?"),
+                "professional": (
+                    f"Good {period}. How can I help?", "Welcome back. What did you need?",
+                    f"Good {period}. What brings you by?",
+                    "You caught me between tasks. What do you need?",
+                    "Hello. I have a moment if you do.",
+                ),
+                "warm": (
+                    "Hello again! How have you been?",
+                    "There you are. It is good to see a familiar face.",
+                    "There you are! I was thinking about the last time we talked.",
+                    "Hello! You always turn up at a reasonable hour.",
+                    "Good to see you. Come on, then, what is it?",
+                ),
+                "skeptical": (
+                    "Hello again. What is on your mind?", "You have another question, I assume.",
+                    "Back again. What is it this time?",
+                    "Hello. I will hear you out.",
+                    "You have that look about you. Go on.",
+                ),
+                "blunt": (
+                    "There you are. What is it?", "Hello. Speak plainly and we will get along.",
+                    "You again. What do you need?",
+                    "Hello. Make it useful.",
+                    "Right. What is it?",
+                ),
+                "reserved": (
+                    "Hello again.", "Good to see you. Was there something you wanted to discuss?",
+                    "Hello. I am here.",
+                    "Good to see you. Take your time.",
+                    "You found me. What is it?",
+                ),
+                "wary": (
+                    "What do you want?", "I suppose we can speak for a moment.",
+                    "You are back. Say your piece.",
+                    "Hello. I am listening, for now.",
+                    "What do you need from me?",
+                ),
+                "hostile": (
+                    "What is it now?", "I have little patience for this, but speak.",
+                    "You again.",
+                    "Say it and go.",
+                    "I have nothing new for you.",
+                ),
+                "neutral": (
+                    f"Good {period}.", "Hello again. Was there something you needed?",
+                    "Hello. What can I do for you?",
+                    "Good to see you. What is it?",
+                    f"Good {period}. Go on, then.",
+                ),
             }
             base = _stable_pick(
                 f"{self.dialogue_day_key()}:{actor.get('id')}:greeting:{demeanor}", pools[demeanor]
@@ -1189,9 +1379,82 @@ class DialogueFlowMixin:
             if isinstance(partner, dict):
                 rumor = str(partner.get("rumor", "") or self.town_npc_dialogue_data(partner).get("rumor", ""))
                 if rumor and not any(item.get("text") == rumor for item in heard):
-                    heard.append({"text": rumor, "source": str(partner.get("name", "a neighbor")), "day": self.dialogue_day_key()})
+                    heard.append({
+                        "text": rumor,
+                        "source": str(partner.get("name", "a neighbor")),
+                        # Named sources get a real pronoun when the rumour is
+                        # retold; anything without a record falls back to they.
+                        "source_sex": self.npc_sex(partner) if hasattr(self, "npc_sex") else "",
+                        "day": self.dialogue_day_key(),
+                    })
         actor["heard_rumors"] = heard[-8:]
         return actor["heard_rumors"]
+
+    def dialogue_disclosure_callback(self, actor: Dict[str, object], kind: str) -> str:
+        """Bring up something the player shared on an earlier day.
+
+        Disclosures have always been recorded and persisted, but the only thing
+        that ever read them back was a check to avoid repeating a reaction, so
+        an NPC remembered what you told them and then never mentioned it again.
+        Witnessed events and overheard knowledge both already have callbacks;
+        this gives the player's own confidences the same treatment.
+        """
+        slot = self.dialogue_social_slot(actor, kind)
+        today = self.dialogue_day_key()
+        earlier = [
+            row for row in (slot.get("disclosures") or [])
+            if isinstance(row, dict)
+            and str(row.get("subject", ""))
+            and str(row.get("day", "")) != today
+        ]
+        if not earlier:
+            return ""
+        subject = str(earlier[-1].get("subject", ""))
+        pools = {
+            "background": (
+                "You told me where you came from. I have thought about it since.",
+                "I remember what you said about where you grew up. It explains a few things.",
+                "You mentioned your background last time. I did not press then, but I was interested.",
+            ),
+            "deeds": (
+                "You mentioned what you have been getting done. People have started noticing, if you had not.",
+                "I keep thinking about the work you described. It was not a small thing.",
+                "You told me what you finished. I hope somebody thanked you properly.",
+            ),
+            "travels": (
+                "You were telling me about your travels. Did the route hold?",
+                "I have been picturing the places you described. I do not get out that far.",
+                "You mentioned where you had been. Go carefully next time.",
+            ),
+            "loot": (
+                "You showed me what you were carrying. I am still curious where it came from.",
+                "That gear you described has stayed in my head.",
+                "You mentioned what you had found. That is rare to see around here.",
+            ),
+            "companions": (
+                "You told me about the people traveling with you. I hope they are still with you.",
+                "How are the ones you were traveling with? You spoke well of them.",
+                "You mentioned your companions. Good company is worth more than good weather.",
+            ),
+            "family": (
+                "You told me about your household. I have wondered how they are.",
+                "How is your family? You spoke about them last time.",
+                "You mentioned your household. That kind of thing stays with me.",
+            ),
+            "ancestry": (
+                "You told me about your line. That is more history than most people carry.",
+                "I have thought about what you said about the family before you. It is a lot to inherit.",
+                "You mentioned your ancestry. It explains the way you go about things.",
+            ),
+        }
+        lines = pools.get(subject)
+        if not lines:
+            return ""
+        # An occasional callback reads as memory; every conversation reads as a
+        # stuck record. Fire on roughly one day in three.
+        if _stable_index(f"{today}:{actor.get('id')}:disclosure-callback", 3):
+            return ""
+        return _stable_pick(f"{today}:{actor.get('id')}:disclosure:{subject}", lines)
 
     def dialogue_chitchat(self, actor: Dict[str, object], kind: str) -> str:
         witnessed = self.dialogue_witness_callback(actor, kind, "conversation")
@@ -1200,6 +1463,9 @@ class DialogueFlowMixin:
         mood_line = self.dialogue_mood_context_line(actor, kind)
         if mood_line:
             return mood_line
+        recalled = self.dialogue_disclosure_callback(actor, kind)
+        if recalled:
+            return recalled
         if kind == "child":
             subject = _stable_pick(
                 f"{self.dialogue_day_key()}:{actor.get('id')}:child-chitchat",
@@ -1222,6 +1488,7 @@ class DialogueFlowMixin:
                 subject,
                 self.dialogue_household_content_context(actor, kind),
                 f"{self.dialogue_day_key()}:{actor.get('id')}:smalltalk",
+                self.dialogue_spouse_stage(),
             )
         rumors = self.dialogue_refresh_routine_rumors(actor, kind)
         own_rumor = str(actor.get("rumor", ""))
@@ -1242,7 +1509,11 @@ class DialogueFlowMixin:
                 "local talk", "something they witnessed around town",
                 "something they personally witnessed",
             }:
-                return f"I was speaking with {source}. They mentioned that {text[:1].lower() + text[1:]}{uncertainty}"
+                teller = pronouns_for_sex(packet.get("source_sex"))
+                return (
+                    f"I was speaking with {source}. {teller['subject'].capitalize()} mentioned "
+                    f"that {text[:1].lower() + text[1:]}{uncertainty}"
+                )
             if source in {"something they witnessed around town", "something they personally witnessed"}:
                 return text
             return f"People have been talking. {text}"
@@ -1312,13 +1583,14 @@ class DialogueFlowMixin:
                 "plans",
                 self.dialogue_household_content_context(actor, kind),
                 f"{self.dialogue_day_key()}:{actor.get('id')}:agenda",
+                self.dialogue_spouse_stage(),
             )
         activity = self.dialogue_activity(actor, kind).replace("their ", "my ")
         if kind == "authored" and hasattr(self, "town_npc_work_insight"):
             insight = self.town_npc_work_insight(actor)
         else:
             insight = str(actor.get("goal", "I am trying to keep today's work from becoming tomorrow's problem."))
-        insight = _first_person(insight, name)
+        insight = _as_spoken_intent(_first_person(insight, name))
         if not self.dialogue_activity_matches_role(actor, activity):
             return insight or f"I'm a {self.dialogue_actor_role(actor).lower()}."
         if insight and insight.casefold() not in activity.casefold():
@@ -1620,9 +1892,22 @@ class DialogueFlowMixin:
             return "I spend most of my time traveling. I don't have a hometown I speak for on every road."
         return "I live nearby, though I don't know you well enough to give you my whole history yet."
 
+    def dialogue_kinship_context(self, actor: Dict[str, object]) -> Dict[str, str]:
+        """Kinship words for a romance line: what each side is to the other."""
+        player_sex = str(getattr(self.state, "player_sex", "") or "")
+        actor_sex = self.npc_sex(actor) if hasattr(self, "npc_sex") else ""
+        return {
+            "player_kin": kinship_term("spouse", player_sex),
+            "speaker_kin": kinship_term("spouse", actor_sex),
+        }
+
     def dialogue_personal_history_answer(self, actor: Dict[str, object], kind: str) -> str:
-        upbringing = str(actor.get("upbringing", "") or "").strip()
-        turning_point = str(actor.get("formative_event", "") or "").strip()
+        upbringing = _as_spoken_sentence(
+            actor.get("upbringing", ""), "I grew up in {}."
+        )
+        turning_point = _as_spoken_sentence(
+            actor.get("formative_event", ""), "What shaped me was {}."
+        )
         if upbringing or turning_point:
             return " ".join(part for part in (upbringing, turning_point) if part)
         return self.dialogue_library_line(actor, "personal", "history")
@@ -1630,13 +1915,27 @@ class DialogueFlowMixin:
     def dialogue_ambition_answer(self, actor: Dict[str, object], kind: str) -> str:
         ambition = str(actor.get("ambition") or actor.get("goal") or "").strip()
         if ambition:
-            return _first_person(ambition, self.dialogue_actor_name(actor))
+            return _as_spoken_intent(_first_person(ambition, self.dialogue_actor_name(actor)))
         return self.dialogue_library_line(actor, "personal", "ambition")
 
     def dialogue_private_answer(self, actor: Dict[str, object], kind: str) -> str:
         relationship = self.dialogue_relationship_points(actor, kind)
         if relationship < 60:
-            return "I have private thoughts, but privacy stops meaning anything if I surrender it on request."
+            # Declining is still a conversation. Both answers past this
+            # threshold already rotate; without this the refusal is the same
+            # sentence every time until relationship reaches 60, which for most
+            # NPCs is the whole game.
+            guarded = (
+                "I have private thoughts, but privacy stops meaning anything if I surrender it on request.",
+                "Ask me again when we know each other better. I do not think you mean anything by it, but that answer is not free yet.",
+                "There are things I keep to myself. That is not suspicion of you, it is how I stay recognizable to myself.",
+                "Not yet. I like the question more than I want to admit, which is exactly why I am not answering it.",
+                "I would rather earn the kind of conversation where that has an answer than hand one over now.",
+                "Some of me stays behind a door. You are welcome to keep knocking.",
+            )
+            return _stable_pick(
+                f"{self.dialogue_day_key()}:{actor.get('id')}:private-guarded", guarded
+            )
         actor_id = str(actor.get("id", ""))
         romantic = bool(
             actor_id == str(getattr(self.state, "spouse_npc_id", "") or "")
@@ -1688,7 +1987,7 @@ class DialogueFlowMixin:
         spouse = str(actor.get("spouse_name", ""))
         children = [str(value) for value in actor.get("children_names", []) or []]
         if spouse or children:
-            parts = ([f"I'm married to {spouse}"] if spouse else []) + ([f"our children are {', '.join(children)}"] if children else [])
+            parts = ([f"I'm married to {spouse}"] if spouse else []) + ([f"our {'child is' if len(children) == 1 else 'children are'} {', '.join(children)}"] if children else [])
             return "; ".join(parts) + "."
         family_story = str(actor.get("family_story", "") or "").strip()
         if family_story:
@@ -1717,11 +2016,28 @@ class DialogueFlowMixin:
                 errand = self.errand_for_npc(actor)
                 if isinstance(errand, dict):
                     if errand.get("completed"):
-                        return "You already helped with what I needed today. Ask again tomorrow."
+                        return _stable_pick(
+                            f"{self.dialogue_day_key()}:{actor.get('id')}:errand-done",
+                            (
+                                "You already helped with what I needed today. Ask again tomorrow.",
+                                "You have covered what I needed today. Come back tomorrow.",
+                                "That is settled, thanks to you. Ask again tomorrow.",
+                                "Nothing more today, since you handled it. Tomorrow is another matter.",
+                            ),
+                        )
                     qty = int(errand.get("qty", 1) or 1)
                     phrase = quantity_item_phrase(errand.get("item", "supplies"), qty)
                     return f"I could use {phrase}. Bring the full amount when you have it, and we can settle the work properly."
-            return "I don't have a specific job for you right now."
+            return _stable_pick(
+                f"{self.dialogue_day_key()}:{actor.get('id')}:no-work",
+                (
+                    "I don't have a specific job for you right now.",
+                    "Nothing that needs another pair of hands today. Ask again.",
+                    "Not at the moment. When something comes up, you will be the one I think of.",
+                    "No work to hand out today. That is a good sign, mostly.",
+                    "Nothing right now. Check back when the season turns, if not before.",
+                ),
+            )
         activity = self.dialogue_activity(actor, kind).replace("their ", "my ").strip().rstrip(".")
         if (
             activity
@@ -1861,7 +2177,7 @@ class DialogueFlowMixin:
                     "type": "procedural_quest", "id": str(request.get("id", "")),
                     "quest_id": quest_id, "quest_record": quest,
                     "title": str(request.get("title", "Resident Request")),
-                    "summary": summary.rstrip("."), "record": request,
+                    "summary": clause_from_sentence(summary), "record": request,
                     "prompt": str(request.get("offer_text") or request.get("description") or summary),
                     "promise": status == "offered", "deadline": "until the request is completed",
                     "ready": status == "ready",
@@ -2259,13 +2575,34 @@ class DialogueFlowMixin:
         return "I haven't heard anything reliable enough to repeat."
 
     def dialogue_companion_answer(self, actor: Dict[str, object]) -> str:
+        # Every branch here used to be a single fixed sentence, so asking twice
+        # returned the same words for the rest of the game.
+        seed = f"{self.dialogue_day_key()}:{actor.get('id')}:companions"
         follower_ids = list(getattr(self.state, "travel_follower_ids", []) or [])
         if follower_ids and hasattr(self, "travel_follower_data"):
-            names = [str(self.travel_follower_data(follower_id).get("name", "a companion")) for follower_id in follower_ids]
-            return f"I can see you're traveling with {', '.join(names)}. How long have you been on the road together?"
+            names = name_list([
+                str(self.travel_follower_data(follower_id).get("name", "a companion"))
+                for follower_id in follower_ids
+            ])
+            return _stable_pick(seed, (
+                f"I can see you are traveling with {names}. How long have you been on the road together?",
+                f"You have {names} with you. A route is easier with somebody to disagree with.",
+                f"Traveling with {names}, then. Company changes which roads are sensible.",
+                f"You and {names} look like you have been walking a while. Rest if you need it.",
+            ))
         if self.dialogue_actor_role(actor) in {"Traveler", "Ranger", "Hunter", "Wayfarer"}:
-            return "I sometimes travel with other people when a route is dangerous or the work needs more hands."
-        return "It looks like you're traveling alone today."
+            return _stable_pick(seed, (
+                "I sometimes travel with other people when a route is dangerous or the work needs more hands.",
+                "I take company when the road earns it. Most days it does not.",
+                "I have walked with others when the season made it sensible. I have also walked alone and preferred it.",
+                "It depends on the route. Some of them are not worth doing without a second pair of eyes.",
+            ))
+        return _stable_pick(seed, (
+            "It looks like you are traveling alone today.",
+            "Nobody with you today, then. That suits some people.",
+            "You are on your own out here. I hope that is by choice.",
+            "Just you today. The road is quieter that way, for better or worse.",
+        ))
 
     def dialogue_social_key(self, actor: Dict[str, object], kind: str) -> str:
         return f"{kind}:{actor.get('id') or actor.get('name') or 'npc'}"
@@ -2411,6 +2748,9 @@ class DialogueFlowMixin:
         source_kind: str = "firsthand",
         confidence: int = 100,
         knowledge_id: str = "",
+        original_text: str = "",
+        distorted: bool = False,
+        corrected: bool = False,
     ) -> Dict[str, object]:
         clean = " ".join(str(text or "").split())[:240]
         if not clean:
@@ -2432,12 +2772,216 @@ class DialogueFlowMixin:
             "confidence": max(10, min(100, int(confidence))),
             "day": self.dialogue_day_key(),
             "location": self.world_dialogue_location_label() if hasattr(self, "world_dialogue_location_label") else str(getattr(self.state, "location", "Elsewhere")),
+            "distorted": bool(distorted),
+            "corrected": bool(corrected),
         }
+        if original_text:
+            packet["original_text"] = " ".join(str(original_text).split())[:240]
         if existing is not None:
+            # A firsthand correction is authoritative for this listener.  An
+            # older uncorrected copy may still circulate elsewhere, but hearing
+            # it again must not overwrite what the player already clarified.
+            if bool(existing.get("corrected")) and not bool(packet.get("corrected")):
+                return existing
             existing.update(packet)
             return existing
         slot["knowledge"] = (list(slot["knowledge"]) + [packet])[-16:]
         return packet
+
+    # A rumour about the player is recorded second person ("You defeated the
+    # cave lurker near the mine.") and until now travelled word-perfect, only
+    # losing confidence. These swaps are what actually gets misremembered
+    # between one telling and the next: the verb. Each pair keeps the sentence
+    # grammatical while changing what it claims, so the player has something
+    # worth correcting rather than a vaguer version of the truth.
+    RUMOR_VERB_DRIFT: Dict[str, Tuple[str, ...]] = {
+        "defeated": ("chased off", "barely escaped from", "needed help defeating"),
+        "rescued": ("were paid to rescue", "nearly failed to rescue", "only helped rescue"),
+        "extinguished": ("watched someone put out", "accidentally started"),
+        "cleared": ("helped clear", "paid somebody to clear", "claimed to have cleared"),
+        "repaired": ("replaced", "patched", "were shown how to repair"),
+        "built": ("paid somebody to build", "helped somebody build", "claimed credit for building"),
+        "crafted": ("bought", "were given", "traded for"),
+        "completed": ("half finished", "took credit for completing", "needed help completing"),
+        "discovered": ("were told about", "walked past", "claimed to find"),
+        "helped": ("were paid to help", "watched somebody help", "promised to help"),
+    }
+
+    def dialogue_drift_rumor(self, text: object, seed: str) -> str:
+        """Garble a second-person rumour the way retelling actually garbles one.
+
+        Returns "" when nothing sensible can be changed, so the caller keeps the
+        accurate wording rather than inventing a distortion.
+        """
+        line = " ".join(str(text or "").split())
+        if not line.lower().startswith("you "):
+            return ""
+        rest = line[4:]
+        for past, replacements in self.RUMOR_VERB_DRIFT.items():
+            if not rest.lower().startswith(past + " ") and rest.lower() != past + ".":
+                continue
+            swapped = _stable_pick(f"{seed}:drift:{past}", replacements)
+            if not swapped:
+                return ""
+            tail = rest[len(past):]
+            return f"You {swapped}{tail}"
+        return ""
+
+    def dialogue_player_rumor_first_person(self, text: object) -> str:
+        """Convert an authored second-person player rumor into player speech."""
+        line = " ".join(str(text or "").split())
+        if not line:
+            return ""
+        openings = (
+            (r"^You are\b", "I am"),
+            (r"^You were\b", "I was"),
+            (r"^You have\b", "I have"),
+            (r"^You had\b", "I had"),
+            (r"^You do\b", "I do"),
+            (r"^You did\b", "I did"),
+            (r"^You\b", "I"),
+        )
+        for pattern, replacement in openings:
+            converted, count = re.subn(pattern, replacement, line, count=1, flags=re.I)
+            if count:
+                line = converted
+                break
+        line = re.sub(r"\byourself\b", "myself", line, flags=re.I)
+        line = re.sub(r"\byours\b", "mine", line, flags=re.I)
+        line = re.sub(r"\byour\b", "my", line, flags=re.I)
+        return line
+
+    def dialogue_knowledge_is_about_player(self, packet: object) -> bool:
+        """A packet the player can speak to: recorded about them, in second person."""
+        if not isinstance(packet, dict):
+            return False
+        return " ".join(str(packet.get("text", "")).split()).lower().startswith("you ")
+
+    def dialogue_distorted_player_rumors(
+        self, actor: Dict[str, object], kind: str
+    ) -> List[Dict[str, object]]:
+        """Packets this NPC holds that are wrong about the player and still fixable."""
+        slot = self.dialogue_social_slot(actor, kind)
+        return [
+            row for row in slot.get("knowledge", []) or []
+            if isinstance(row, dict)
+            and row.get("distorted")
+            and not row.get("corrected")
+            and str(row.get("original_text", ""))
+            and self.dialogue_knowledge_is_about_player(row)
+        ]
+
+    def dialogue_correct_knowledge(
+        self, actor: Dict[str, object], kind: str, packet_id: str
+    ) -> Dict[str, object]:
+        """Set the record straight: restore the firsthand wording and re-raise confidence.
+
+        The corrected packet keeps travelling, so the fix spreads the same way
+        the error did instead of stopping with the one person who was told.
+        """
+        slot = self.dialogue_social_slot(actor, kind)
+        packet = next(
+            (row for row in slot.get("knowledge", []) or []
+             if isinstance(row, dict) and str(row.get("id", "")) == str(packet_id)),
+            None,
+        )
+        if not packet:
+            return {}
+        original = str(packet.get("original_text", "") or "")
+        if not original:
+            return {}
+        packet["text"] = original
+        packet["distorted"] = False
+        packet["corrected"] = True
+        packet["source_kind"] = "corrected"
+        packet["source_name"] = str(getattr(self.state, "player_name", "the player"))
+        packet["confidence"] = 95
+        return packet
+
+    def dialogue_handle_rumor_correction(
+        self, actor: Dict[str, object], kind: str, transcript: List[Dict[str, str]]
+    ) -> bool:
+        """Let the player set straight a garbled rumour about themselves.
+
+        Only reachable when this NPC is actually holding a distorted packet, so
+        the option never appears as decoration.
+        """
+        wrong = self.dialogue_distorted_player_rumors(actor, kind)
+        if not wrong:
+            return True
+        options: List[DialogueOption] = [
+            (
+                str(row.get("id", "")),
+                str(row.get("text", "")),
+                "They heard this from %s." % str(row.get("source_name", "someone")),
+            )
+            for row in wrong[-4:]
+        ]
+        options.append(("back", "Leave it for now", "Let the story stand as they heard it."))
+        chosen = self.dialogue_choose(
+            actor, "What did they get wrong?", "the record", options, transcript
+        )
+        if not chosen or chosen == "back":
+            return True
+        packet = next(
+            (row for row in wrong if str(row.get("id", "")) == chosen), None
+        )
+        if not packet:
+            return True
+        garbled = str(packet.get("text", ""))
+        truth = str(packet.get("original_text", ""))
+        spoken_truth = self.dialogue_player_rumor_first_person(truth)
+        if not self.dialogue_say(
+            self.dialogue_player_speaker(),
+            "That is not quite how it went. %s" % spoken_truth,
+            "you",
+            transcript,
+        ):
+            return False
+        corrected = self.dialogue_correct_knowledge(actor, kind, chosen)
+        if not corrected:
+            return True
+        demeanor = self.dialogue_demeanor(actor, kind)
+        reactions = {
+            "professional": (
+                "Then I have been repeating it wrong. I will say so next time it comes up.",
+                "Noted, and corrected. I would rather carry the accurate version.",
+            ),
+            "warm": (
+                "Oh, I am glad you said something. I have been telling it the other way.",
+                "Thank you for putting me right. I would hate to have kept spreading that.",
+            ),
+            "skeptical": (
+                "That is a better story than the one going round, which makes me believe it.",
+                "I did wonder. The version I had did not quite hang together.",
+            ),
+            "blunt": (
+                "Right. I had it wrong. It will not happen twice.",
+                "Good. I would rather be corrected than repeat nonsense.",
+            ),
+            "reserved": (
+                "Thank you. I will keep the accurate version.",
+                "I appreciate you telling me. I do not like passing on what I cannot vouch for.",
+            ),
+            "wary": (
+                "Perhaps. I will hold your version alongside the one I was given.",
+                "You would say that either way. Still, I will remember you said it.",
+            ),
+            "hostile": (
+                "If you say so. I am not the one who started it.",
+                "Fine. Take it up with whoever told me.",
+            ),
+            "neutral": (
+                "Then I had it wrong. I will pass on the version you gave me.",
+                "That is worth knowing. I will not repeat the other one.",
+            ),
+        }
+        line = _stable_pick(
+            "%s:%s:rumor-correction:%s" % (self.dialogue_day_key(), actor.get("id"), chosen),
+            reactions.get(demeanor, reactions["neutral"]),
+        )
+        self.dialogue_set_mood(actor, kind, "thoughtful", "the story going round about you", 1, 2)
+        return self.dialogue_say(actor, line, "response", transcript)
 
     def dialogue_propagate_knowledge(
         self,
@@ -2460,15 +3004,40 @@ class DialogueFlowMixin:
         if not packet:
             return False
         confidence = max(20, int(packet.get("confidence", 60) or 60) - 18)
+        text = str(packet.get("text", ""))
+        original = str(packet.get("original_text", "") or text)
+        distorted = bool(packet.get("distorted"))
+        # Once a retelling has lost enough confidence it starts losing accuracy
+        # too, but only for rumours about the player -- those are the ones the
+        # player is in a position to correct. A packet already put right stays
+        # right as it travels on.
+        if (
+            not packet.get("corrected")
+            and confidence < 60
+            and self.dialogue_knowledge_is_about_player(packet)
+        ):
+            # Seeded on the hop as well as the packet, so a later telling
+            # garbles differently rather than repeating the same mistake. Each
+            # variant is derived from the firsthand wording, so retellings stay
+            # single-step wrong instead of compounding into nonsense.
+            drifted = self.dialogue_drift_rumor(
+                original, "%s:%d" % (str(packet.get("id", "")), confidence)
+            )
+            if drifted and drifted != text:
+                text = drifted
+                distorted = True
         self.dialogue_add_knowledge(
             listener,
             listener_kind,
-            str(packet.get("text", "")),
+            text,
             subject=str(packet.get("subject", "local news")),
             source_name=self.dialogue_actor_name(source_actor),
             source_kind="hearsay" if str(packet.get("source_kind")) != "public" else "public",
             confidence=confidence,
             knowledge_id=str(packet.get("id", "")),
+            original_text=original,
+            distorted=distorted,
+            corrected=bool(packet.get("corrected")),
         )
         return True
 
@@ -4068,46 +4637,98 @@ class DialogueFlowMixin:
         hour = int(getattr(self.state, "hour", 12) or 12)
         if kind in {"companion", "spouse", "child"}:
             return self.dialogue_companion_ambient_line(actor, kind)
+        # These branches sit in front of the demeanor pools below, so a single
+        # fixed line here means every NPC in town says the same sentence for a
+        # whole rainy day. Seed per-NPC so weather does not flatten character.
+        weather_seed = f"{self.dialogue_day_key()}:{actor.get('id', name)}:ambient-weather"
         if "storm" in weather:
-            return "That storm is making every route and errand harder to judge."
+            return _stable_pick(weather_seed, (
+                "That storm is making every route and errand harder to judge.",
+                "Half the day's plans went out with that wind.",
+                "I keep listening for something to come loose on the roof.",
+                "Storms like this sort out who prepared and who improvised.",
+                "Nothing beyond the door is worth the walk while it is blowing like that.",
+            ))
         if any(word in weather for word in ("rain", "drizzle", "shower")):
-            return "The rain has changed which paths people are using today."
+            return _stable_pick(weather_seed, (
+                "The rain has changed which paths people are using today.",
+                "Everything takes twice as long once the ground goes soft.",
+                "I have given up on staying dry and started on staying useful.",
+                "Rain does the watering and ruins the walking. Fair trade, most days.",
+                "You can tell who owns decent boots on a day like this.",
+            ))
         if any(word in weather for word in ("snow", "blizzard")):
-            return "Fresh snow makes it easy to see who has already passed this way."
+            return _stable_pick(weather_seed, (
+                "Fresh snow makes it easy to see who has already passed this way.",
+                "The cold sharpens everything, including tempers.",
+                "Snow makes the whole place quieter than it has any right to be.",
+                "I am counting on the path staying passable until evening.",
+                "Everything looks tidier under snow. It is lying to you.",
+            ))
         if self.dialogue_is_on_duty(actor, kind):
-            return f"I'm {activity}. Let me know if you need something connected to my work."
+            return _stable_pick(f"{weather_seed}:duty", (
+                f"I am {activity}. Let me know if you need something connected to my work.",
+                f"I am in the middle of {activity}. Say what you need and I will fit it in.",
+                f"Busy with {activity}, but I can talk while my hands work.",
+                f"I have {activity} to finish today. Ask if you need something from me.",
+            ))
         if hour >= 21 or hour < 6:
-            return "It is late enough that every light and familiar voice matters."
+            return _stable_pick(f"{weather_seed}:late", (
+                "It is late enough that every light and familiar voice matters.",
+                "Late hours make strangers either welcome or worrying. You are the first one.",
+                "I should be asleep. So should most people still out here.",
+                "Nothing good starts this late, but a good deal of it finishes.",
+                "The town is honest at this hour. Nobody is performing for anyone.",
+            ))
         demeanor = self.dialogue_demeanor(actor, kind)
         pools = {
             "warm": (
                 "Good to see someone else out and about.",
                 f"I've been {activity}; it has been an interesting day for it.",
+                "You picked a decent moment to say hello.",
+                f"I am {activity}, but there is always room for a bit of company.",
             ),
             "professional": (
                 f"I'm {activity}; the day's work is still moving.",
                 "The local routine has been busier than it looks.",
+                "If you need something specific, I can point you the right way.",
+                f"I have {activity} to finish, and then the day loosens up.",
             ),
             "skeptical": (
                 "The roads have been busy. I'm keeping an eye on who uses them.",
                 f"I've been {activity}. Not everything around here is as simple as it looks.",
+                "People have been asking a great many questions lately. Yours are welcome to be different.",
+                "I notice things. That is habit, not suspicion.",
             ),
             "blunt": (
                 f"I'm {activity}. Standing around will not finish it.",
                 "If you need something, say it plainly.",
+                "Say what you came to say.",
+                f"I am {activity}. That is the whole report.",
             ),
             "reserved": (
                 f"I've been {activity}. Quiet work suits me.",
                 "You notice more when nobody expects you to speak.",
+                "I am here most days, if you need something.",
+                "I do not mind company. I just do not fill silences.",
             ),
             "wary": (
                 "I don't know you well enough to explain what I'm doing.",
                 "Keep to the open path and we will have no trouble.",
+                "You are welcome to pass. That is as far as I go today.",
+                "I would rather know who I am talking to first.",
             ),
-            "hostile": ("Keep moving.", "I have nothing to say to you."),
+            "hostile": (
+                "Keep moving.",
+                "I have nothing to say to you.",
+                "Do not make this a conversation.",
+                "Whatever it is, no.",
+            ),
             "neutral": (
                 f"I've been {activity}.",
                 f"People around {self.world_dialogue_location_label()} are settling into today's routine.",
+                "An ordinary day so far.",
+                f"Nothing unusual to report. I am {activity}.",
             ),
         }
         return _stable_pick(
@@ -4338,11 +4959,13 @@ class DialogueFlowMixin:
             spouse_name = str(spouse.get("name", spouse_id)) if isinstance(spouse, dict) else spouse_id
             children = [str(child.get("name", "my child")) for child in getattr(self.state, "children", []) or [] if isinstance(child, dict)]
             if spouse_name and children:
-                return f"I am married to {spouse_name}, and our children are {', '.join(children)}."
+                kin = "child is" if len(children) == 1 else "children are"
+                return f"I am married to {spouse_name}, and our {kin} {', '.join(children)}."
             if spouse_name:
                 return f"I am married to {spouse_name}."
             if children:
-                return f"My children are {', '.join(children)}."
+                kin = "child is" if len(children) == 1 else "children are"
+                return f"My {kin} {', '.join(children)}."
             return "I do not currently have a spouse or children, so my household is still mostly defined by the farm."
         dynasty = str(getattr(self.state, "dynasty_name", "") or f"{getattr(self.state, 'player_name', 'My')} family")
         generation = int(getattr(self.state, "player_generation", 1) or 1)
@@ -4707,11 +5330,13 @@ class DialogueFlowMixin:
                 self.dialogue_romance_stage(actor), "playful",
                 self.dialogue_demeanor(actor, kind),
                 f"{event.get('id')}:{actor.get('id')}:chemistry",
+                self.dialogue_kinship_context(actor),
             ),
             "quiet": romance_flirt_response(
                 self.dialogue_romance_stage(actor), "private",
                 self.dialogue_demeanor(actor, kind),
                 f"{event.get('id')}:{actor.get('id')}:quiet",
+                self.dialogue_kinship_context(actor),
             ),
         }[choice]
         mood = {
@@ -5327,6 +5952,45 @@ class DialogueFlowMixin:
                 pass
         return str(actor.get("role", actor.get("age_group", "Child")) or "Child")
 
+    def dialogue_spouse_stage(self) -> str:
+        """Which phase of marriage the player's household is in.
+
+        The wedding is stored as calendar parts, so rebuild it on the same
+        112-day year dialogue_absolute_day uses.
+        """
+        state = self.state
+        children = [
+            child for child in (getattr(state, "children", []) or [])
+            if isinstance(child, dict)
+        ]
+        try:
+            married_year = int(getattr(state, "marriage_year", 0) or 0)
+        except (TypeError, ValueError):
+            married_year = 0
+        years_married = 0.0
+        if married_year > 0:
+            month = max(1, int(getattr(state, "marriage_month", 1) or 1))
+            day = max(1, int(getattr(state, "marriage_day", 1) or 1))
+            # Both endpoints must come off the same calendar, so mirror the
+            # choice dialogue_absolute_day makes: the real 365-day year when the
+            # game exposes it, its 112-day approximation otherwise.
+            if hasattr(self, "absolute_game_day"):
+                married_on = int(self.absolute_game_day(month, day, married_year))
+                year_length = 365.0
+            else:
+                married_on = max(0, married_year - 1) * 112 + (month - 1) * 28 + day
+                year_length = 112.0
+            years_married = max(
+                0.0, (self.dialogue_absolute_day() - married_on) / year_length
+            )
+        # a grown child still counts as family but no longer sets the household's
+        # daily shape, so an emptier house gets its own voice
+        dependents = sum(
+            1 for child in children
+            if child_stage_group(str(child.get("stage", "Child"))) != "adult"
+        )
+        return spouse_stage_group(years_married, len(children), dependents)
+
     def dialogue_household_content_context(
         self, actor: Dict[str, object], kind: str
     ) -> Dict[str, object]:
@@ -5362,8 +6026,11 @@ class DialogueFlowMixin:
         properties = len(getattr(self.state, "player_properties", {}) or {})
         return {
             "activity": self.dialogue_activity(actor, kind).replace("their ", "my "),
-            "children": ", ".join(child_names) if child_names else "the children",
+            "children": name_list(child_names) if child_names else "the children",
             "child_count": len(children),
+            # a household with one child still speaks about that child
+            "children_are": quantity_agreement(len(children), "is", "are"),
+            "children_have": quantity_agreement(len(children), "has", "have"),
             "focus": focus,
             "focus_lower": focus.lower(),
             "home": home,
@@ -5373,6 +6040,7 @@ class DialogueFlowMixin:
             "priority": priority,
             "priority_lower": priority.lower(),
             "property_count": properties,
+            "property_label": quantity_agreement(properties, "property", "properties"),
             "season": str(getattr(self.state, "season", "Spring")),
             "weather": str(getattr(self.state, "weather", "Clear")),
             "weather_lower": str(getattr(self.state, "weather", "Clear")).lower(),
@@ -5411,7 +6079,10 @@ class DialogueFlowMixin:
                 "Suggest private time together without making the conversation explicit.",
             ))
         options.append(("back", "Perhaps another time.", "Return without flirting."))
-        style = self.dialogue_choose(actor, "How do you flirt with them?", "flirting", options, transcript)
+        courted = pronouns_for_sex(self.npc_sex(actor) if hasattr(self, "npc_sex") else "")
+        style = self.dialogue_choose(
+            actor, f"How do you flirt with {courted['object']}?", "flirting", options, transcript,
+        )
         if not style or style == "back":
             return True
 
@@ -5436,6 +6107,7 @@ class DialogueFlowMixin:
                 style,
                 demeanor,
                 f"{self.dialogue_day_key()}:{actor.get('id')}:{style}:{len(history)}",
+                self.dialogue_kinship_context(actor),
             )
         first_today = int(slot.get("last_flirt_day", -1) or -1) != today
         relationship_gain = 0
@@ -5534,6 +6206,7 @@ class DialogueFlowMixin:
                 choice,
                 household_context,
                 f"{self.dialogue_day_key()}:{actor.get('id')}:{choice}",
+                self.dialogue_spouse_stage(),
             )
             if choice == "safety":
                 self.dialogue_set_mood(actor, kind, "worried", "the danger surrounding your travels", 1, 2)
@@ -5734,6 +6407,7 @@ class DialogueFlowMixin:
                         "friendship": friendship,
                         "friendship_lower": friendship.lower(),
                         "planned": readiness,
+                        **self.dialogue_kinship_context(actor),
                     },
                     f"{self.dialogue_day_key()}:{actor_id}:relationship-status",
                 )
@@ -5904,7 +6578,15 @@ class DialogueFlowMixin:
         if topic == "directions":
             places = self.dialogue_known_places(actor, kind)
             if not places:
-                return "I don't know the surrounding places well enough to direct you responsibly."
+                return _stable_pick(
+                f"{self.dialogue_day_key()}:{actor.get('id')}:no-places",
+                (
+                    "I don't know the surrounding places well enough to direct you responsibly.",
+                    "I do not know the country around here well enough to send you anywhere with confidence.",
+                    "I would only be guessing at directions, and a bad guess costs you a day.",
+                    "Ask someone who travels more than I do. I would steer you wrong.",
+                ),
+            )
             options = [(str(place["id"]), str(place["name"]), str(place.get("district", "A place they know"))) for place in places]
             options.append(("back", "Ask about something else", "Return to the conversation."))
             selected = self.dialogue_choose(actor, "Where are you trying to go?", "questions", options, transcript)
@@ -5913,7 +6595,15 @@ class DialogueFlowMixin:
         if topic == "people":
             people = self.dialogue_known_people(actor, kind)
             if not people:
-                return "I don't know anyone here well enough to tell you much about them."
+                return _stable_pick(
+                f"{self.dialogue_day_key()}:{actor.get('id')}:no-people",
+                (
+                    "I don't know anyone here well enough to tell you much about them.",
+                    "I do not know people here well enough to say anything worth repeating.",
+                    "I could not tell you much about anyone without inventing it.",
+                    "I keep to myself more than is useful for a question like that.",
+                ),
+            )
             options = [(str(person.get("id", person.get("name"))), str(person.get("name", "Someone")), str(person.get("role", "Someone they know"))) for person in people]
             options.append(("back", "Ask about someone else later", "Return to the conversation."))
             selected = self.dialogue_choose(actor, "Who did you want to ask about?", "questions", options, transcript)
@@ -5932,27 +6622,74 @@ class DialogueFlowMixin:
         demeanor = self.dialogue_demeanor(actor, kind)
         if tier in {"Close", "Trusted"}:
             close_pools = {
-                "warm": ("I'm glad you stopped. Take care.", "Come back when you have more time."),
-                "blunt": ("Good talk. You know where to find me.", "That was useful. Take care."),
-                "reserved": ("Thank you for coming by. I mean that.", "I'll see you again."),
-                "skeptical": ("You gave me something to think about. Take care.", "We can continue this when we know more."),
+                "warm": (
+                    "I'm glad you stopped. Take care.", "Come back when you have more time.",
+                    "That was worth the interruption. Go safely.",
+                    "Do not leave it so long next time.",
+                ),
+                "blunt": (
+                    "Good talk. You know where to find me.", "That was useful. Take care.",
+                    "Right. Off you go.", "We are done, and that is a compliment.",
+                ),
+                "reserved": (
+                    "Thank you for coming by. I mean that.", "I'll see you again.",
+                    "I appreciated that. Go on, then.", "That was a good while. Quietly said.",
+                ),
+                "skeptical": (
+                    "You gave me something to think about. Take care.",
+                    "We can continue this when we know more.",
+                    "You have earned some benefit of the doubt. Take care.",
+                    "I will think on it. Go on.",
+                ),
             }
-            return _stable_pick(
+            return _cycling_pick(
                 f"{self.dialogue_day_key()}:{actor.get('id')}:farewell:close:{demeanor}",
-                close_pools.get(demeanor, ("Take care. I mean that.", "We'll continue this another time.")),
+                close_pools.get(demeanor, (
+                    "Take care. I mean that.",
+                    "We'll continue this another time.",
+                    "That deserves more thought than I can give it standing here.",
+                    "Go safely. We are not finished talking.",
+                )),
+                actor.get("dialogue_count", 0),
             )
         pools = {
-            "professional": ("Thank you. Let me know if you need anything else.", "Take care, and have a good day."),
-            "warm": ("It was good talking with you. Take care!", "I hope we speak again soon."),
-            "skeptical": ("We'll leave it there for now.", "I have heard enough to think about."),
-            "blunt": ("That's enough for now.", "I should get back to what I was doing."),
-            "reserved": ("Goodbye.", "Thank you for the conversation."),
-            "wary": ("We're finished here.", "That is all I am willing to discuss."),
-            "hostile": ("Leave me alone now.", "This conversation is over."),
-            "neutral": ("Take care on the road.", "I'll see you around town."),
+            "professional": (
+                "Thank you. Let me know if you need anything else.", "Take care, and have a good day.",
+                "That should cover it. Good day to you.", "I will be here if anything else comes up.",
+            ),
+            "warm": (
+                "It was good talking with you. Take care!", "I hope we speak again soon.",
+                "Go on, then. Come back soon!", "That brightened the day. Take care.",
+            ),
+            "skeptical": (
+                "We'll leave it there for now.", "I have heard enough to think about.",
+                "We will see. Take care.", "I will keep what you said in mind.",
+            ),
+            "blunt": (
+                "That's enough for now.", "I should get back to what I was doing.",
+                "Right. Go on.", "Done talking.",
+            ),
+            "reserved": (
+                "Goodbye.", "Thank you for the conversation.",
+                "Until next time.", "Mind how you go.",
+            ),
+            "wary": (
+                "We're finished here.", "That is all I am willing to discuss.",
+                "Keep to the road.", "That is enough talking.",
+            ),
+            "hostile": (
+                "Leave me alone now.", "This conversation is over.",
+                "Go.", "Do not come back today.",
+            ),
+            "neutral": (
+                "Take care on the road.", "I'll see you around town.",
+                "Take care of yourself.", "Until next time, then.",
+            ),
         }
-        return _stable_pick(
-            f"{self.dialogue_day_key()}:{actor.get('id')}:farewell:{demeanor}", pools[demeanor]
+        return _cycling_pick(
+            f"{self.dialogue_day_key()}:{actor.get('id')}:farewell:{demeanor}",
+            pools[demeanor],
+            actor.get("dialogue_count", 0),
         )
 
     def run_unified_npc_conversation(
@@ -6056,6 +6793,14 @@ class DialogueFlowMixin:
                 "turn_in", "I finished one of your requests.",
                 "Choose which of their requests to hand in.",
             ))
+        if self.dialogue_distorted_player_rumors(actor, kind):
+            # Only when this NPC is actually carrying a garbled version of
+            # something the player did. That is rare by construction, so the
+            # option cannot become permanent furniture on the menu.
+            initial_options.append((
+                "set_record", "They have it wrong about me.",
+                "Correct the version of events they have been repeating.",
+            ))
         if not initiated:
             initial_options.append(("help", "Is there anything I can help with?", "Find out whether they have concrete work available."))
         initial_options.extend([
@@ -6071,6 +6816,10 @@ class DialogueFlowMixin:
         elif initial == "turn_in":
             discussed.append("work")
             if not self.dialogue_handle_quest_turn_in(actor, kind, transcript):
+                return finish(True)
+        elif initial == "set_record":
+            discussed.append("player")
+            if not self.dialogue_handle_rumor_correction(actor, kind, transcript):
                 return finish(True)
         elif initial == "help":
             discussed.append("work")
@@ -6200,6 +6949,7 @@ class DialogueFlowMixin:
                 "plans",
                 self.dialogue_household_content_context(resident, "spouse"),
                 f"{today}:{resident_id}:home-agenda",
+                self.dialogue_spouse_stage(),
             ),
         )
         resident["dialogue_count"] = int(resident.get("dialogue_count", 0)) + 1
@@ -6216,6 +6966,24 @@ class DialogueFlowMixin:
 def _stable_pick(seed: str, values: Sequence[str]) -> str:
     choices = tuple(str(value) for value in values if str(value))
     return choices[_stable_index(seed, len(choices))] if choices else ""
+
+
+def _cycling_pick(seed: str, values: Sequence[str], step: object) -> str:
+    """Pick by stepping through the pool instead of resampling it.
+
+    For lines a player can trigger several times in a row -- repeat greetings,
+    farewells -- an independent pick collides with itself often enough to read
+    as a bug. Seeding the starting point per NPC and per day keeps them
+    distinct from each other, while the step guarantees no consecutive repeat.
+    """
+    choices = tuple(str(value) for value in values if str(value))
+    if not choices:
+        return ""
+    try:
+        offset = int(step or 0)
+    except (TypeError, ValueError):
+        offset = 0
+    return choices[(_stable_index(seed, len(choices)) + offset) % len(choices)]
 
 
 __all__ = ["DialogueFlowMixin", "ROLE_INTERESTS", "naturalize_spoken_dialogue"]

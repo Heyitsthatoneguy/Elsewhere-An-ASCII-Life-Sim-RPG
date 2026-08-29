@@ -23,6 +23,7 @@ from ascii_battle_prototype.combat.loot import loot_profile_for_enemy
 from ascii_farmstead_random_loot import add_random_reward_items
 from ascii_farmstead_wilderness_generation import biome_enemy_ecology
 from ascii_farmstead_custom_extended import custom_enemy_field_profile
+from ascii_farmstead_mega_skills import clean_mega_skill_ranks
 from ascii_battle_prototype.combat.models import Skill
 from ascii_battle_prototype.combat.skills import create_default_skills
 from ascii_farmstead_alchemy import (
@@ -315,6 +316,42 @@ class DungeonRoguelikeCombatMixin:
         floor_num = max(1, int(floor if floor is not None else self.state.current_dungeon_floor))
         return f"F{floor_num}:{int(x)},{int(y)}"
 
+    def dungeon_floor_feature_values(
+        self,
+        field: str,
+        floor: Optional[int] = None,
+    ) -> List[str]:
+        """Return feature keys belonging to one floor of the current dungeon."""
+        floor_num = max(1, int(floor if floor is not None else self.state.current_dungeon_floor))
+        prefix = f"F{floor_num}:"
+        values = self.dungeon_roguelike_record().setdefault(str(field), [])
+        if not isinstance(values, list):
+            values = []
+            self.dungeon_roguelike_record()[str(field)] = values
+        return [str(value) for value in values if str(value).startswith(prefix)]
+
+    def dungeon_store_floor_positions(
+        self,
+        field: str,
+        positions: Set[Tuple[int, int]],
+        floor: Optional[int] = None,
+    ) -> None:
+        """Replace one floor's coordinate keys without erasing other floors."""
+        floor_num = max(1, int(floor if floor is not None else self.state.current_dungeon_floor))
+        prefix = f"F{floor_num}:"
+        combat = self.dungeon_roguelike_record()
+        values = combat.setdefault(str(field), [])
+        if not isinstance(values, list):
+            values = []
+        retained = [value for value in values if not str(value).startswith(prefix)]
+        retained.extend(
+            self.dungeon_feature_key(x, y, floor=floor_num)
+            for x, y in sorted(positions, key=lambda point: (point[1], point[0]))
+        )
+        combat[str(field)] = retained
+        if str(field) == "explored_tiles":
+            self._dungeon_explored_cache_signature = None
+
     def dungeon_door_states(self) -> Dict[str, bool]:
         states = self.dungeon_roguelike_record().setdefault("door_states", {})
         if not isinstance(states, dict):
@@ -452,9 +489,11 @@ class DungeonRoguelikeCombatMixin:
     def dungeon_explored_tiles(self) -> Set[Tuple[int, int]]:
         combat = self.dungeon_roguelike_record()
         values = combat.setdefault("explored_tiles", [])
+        floor_num = max(1, int(getattr(self.state, "current_dungeon_floor", 1)))
+        floor_prefix = f"F{floor_num}"
         signature = (
             str(getattr(self.state, "current_dungeon_key", "")),
-            int(getattr(self.state, "current_dungeon_floor", 1)),
+            floor_num,
             len(values),
         )
         if getattr(self, "_dungeon_explored_cache_signature", None) == signature:
@@ -464,7 +503,9 @@ class DungeonRoguelikeCombatMixin:
         explored: Set[Tuple[int, int]] = set()
         for value in values:
             try:
-                _floor, coordinate = str(value).split(":", 1)
+                stored_floor, coordinate = str(value).split(":", 1)
+                if stored_floor != floor_prefix:
+                    continue
                 x_text, y_text = coordinate.split(",", 1)
                 explored.add((int(x_text), int(y_text)))
             except (TypeError, ValueError):
@@ -493,9 +534,7 @@ class DungeonRoguelikeCombatMixin:
                 if 0 <= ny < len(grid) and 0 <= nx < len(grid[ny]):
                     expanded.add((nx, ny))
         explored.update(expanded)
-        combat["explored_tiles"] = [
-            self.dungeon_feature_key(px, py) for px, py in sorted(explored, key=lambda point: (point[1], point[0]))
-        ]
+        self.dungeon_store_floor_positions("explored_tiles", explored)
         self._dungeon_explored_cache_signature = None
         self._dungeon_visibility_cache_signature = None
         return True
@@ -518,14 +557,23 @@ class DungeonRoguelikeCombatMixin:
         if not self.on_wilderness_dungeon():
             return set()
         self.dungeon_reveal_room_at(int(self.state.player_x), int(self.state.player_y))
-        combat = self.dungeon_roguelike_record()
+        floor_prefix = f"F{max(1, int(getattr(self.state, 'current_dungeon_floor', 1)))}:"
+        current_door_states = tuple(sorted(
+            (str(key), bool(value))
+            for key, value in self.dungeon_door_states().items()
+            if str(key).startswith(floor_prefix)
+        ))
+        current_revealed_rooms = tuple(
+            value
+            for value in self.dungeon_floor_feature_values("revealed_rooms")
+        )
         signature = (
             str(getattr(self.state, "current_dungeon_key", "")),
             int(getattr(self.state, "current_dungeon_floor", 1)),
             int(self.state.player_x),
             int(self.state.player_y),
-            tuple(sorted(self.dungeon_door_states().items())),
-            tuple(combat.setdefault("revealed_rooms", [])),
+            current_door_states,
+            current_revealed_rooms,
         )
         if getattr(self, "_dungeon_visibility_cache_signature", None) == signature:
             cached = getattr(self, "_dungeon_visible_tile_cache", None)
@@ -534,7 +582,7 @@ class DungeonRoguelikeCombatMixin:
         grid = self.active_map()
         px, py = int(self.state.player_x), int(self.state.player_y)
         _regions, room_lookup = self.dungeon_room_regions()
-        revealed_rooms = set(combat.setdefault("revealed_rooms", []))
+        revealed_rooms = set(current_revealed_rooms)
         visible: Set[Tuple[int, int]] = {(px, py)}
         radius = 9
         for y in range(max(0, py - radius), min(len(grid), py + radius + 1)):
@@ -569,10 +617,7 @@ class DungeonRoguelikeCombatMixin:
         if visible <= explored:
             return
         explored.update(visible)
-        self.dungeon_roguelike_record()["explored_tiles"] = [
-            self.dungeon_feature_key(x, y)
-            for x, y in sorted(explored, key=lambda point: (point[1], point[0]))
-        ]
+        self.dungeon_store_floor_positions("explored_tiles", explored)
         self._dungeon_explored_cache_signature = None
 
     def dungeon_tile_explored(self, x: int, y: int) -> bool:
@@ -1163,12 +1208,16 @@ class DungeonRoguelikeCombatMixin:
             "Light": ("Radiant Seal", "Solar Flare"),
             "Shadow": ("Umbral Mire", "Umbral Barrage"),
         }.get(str(progress.get("subclass", "Fire")), ("Ignite Field", "Flame Fan")))
+        known.update(clean_mega_skill_ranks(progress.get("book_skill_ranks")))
         catalog = self.dungeon_skill_catalog()
         ordered = [name for name in catalog if name in known]
         return ordered or (["Spark Shot"] if "Spark Shot" in catalog else list(catalog)[:1])
 
     def dungeon_skill_rank(self, skill_name: str) -> int:
         progress = self.combat_progress_for_key("player")
+        book_ranks = clean_mega_skill_ranks(progress.get("book_skill_ranks"))
+        if skill_name in book_ranks:
+            return book_ranks[skill_name]
         active_classes = progress.get("active_classes", [progress.get("class", "Vanguard")])
         if not isinstance(active_classes, list):
             active_classes = [str(progress.get("class", "Vanguard"))]
@@ -1243,6 +1292,8 @@ class DungeonRoguelikeCombatMixin:
             combo_heal_bonus += bonus * 2 if combo_heal_bonus else 0
         elif skill.effect == "restore_mp":
             mp_amount += bonus * 3
+        elif skill.effect == "guard":
+            mp_cost = max(0, mp_cost - bonus)
         subclass = str(self.combat_progress_for_key("player").get("subclass", "Fire"))
         lowered = skill.name.lower()
         if subclass == "Fire" and (skill.zone_type == "fire" or any(word in lowered for word in ("fire", "flame", "cinder", "ignite", "inferno"))):
@@ -1617,6 +1668,7 @@ class DungeonRoguelikeCombatMixin:
             gear_chance=0.52 if boss else (0.10 if elite else 0.035),
             consumable_chance=0.55 if boss else (0.22 if elite else 0.09),
             valuable_chance=0.48 if boss else (0.18 if elite else 0.06),
+            game_table_chance=0.08 if boss else (0.012 if elite else 0.0),
             quality_bonus=4 if boss else (2 if elite else 0),
             rng=random,
         )

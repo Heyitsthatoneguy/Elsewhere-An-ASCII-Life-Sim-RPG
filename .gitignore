@@ -23,6 +23,7 @@ custom_content.json
 *.backup*.json
 *.json.tmp
 chat-history.md
+*_pre_*.py.txt
 
 # Release tooling output
 .build-venv/

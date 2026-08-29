@@ -16,6 +16,7 @@ from typing import Dict, List, Optional, Tuple
 
 from ascii_farmstead_data import *  # noqa: F403
 from ascii_farmstead_helpers import *  # noqa: F403
+from ascii_farmstead_helpers import kinship_term, pronouns_for_sex
 from ascii_farmstead_inventory import *  # noqa: F403
 from ascii_farmstead_relationship_dialogue import child_household_line, child_stage_group
 from ascii_farmstead_state import GameState
@@ -727,6 +728,17 @@ class NpcMixin:
         if isinstance(npc, dict) and str(npc.get("sex", "")) in VALID_PLAYER_SEXES:
             return str(npc.get("sex"))
         return NPC_SEX_BY_ID.get(npc_id, "Unknown")
+
+    def player_spouse_term(self) -> str:
+        """Say "wife"/"husband" for the player's actual spouse where one exists.
+
+        Falls back to "spouse" when nobody is married yet or the record carries no
+        sex, which keeps rule text ("a pregnancy requires a spouse") correct.
+        """
+        spouse_id = str(getattr(self.state, "spouse_npc_id", "") or "")
+        if not spouse_id:
+            return "spouse"
+        return kinship_term("spouse", self.npc_sex(spouse_id))
 
     def is_romance_candidate_npc(self, npc: Dict[str, object]) -> bool:
         npc_id = str(npc.get("id", ""))
@@ -1739,7 +1751,7 @@ class NpcMixin:
                 LEFT_PANEL_WIDTH,
                 LEFT_PANEL_HEIGHT,
             )
-        return f" {name}, your spouse, died peacefully from {reason} at age {age}."
+        return f" {name}, your {self.player_spouse_term()}, died peacefully from {reason} at age {age}."
 
     def process_spouse_lifespan_overnight(
         self,
@@ -2103,10 +2115,10 @@ class NpcMixin:
     def spouse_support_modes(self) -> Dict[str, Dict[str, str]]:
         return {
             "Balanced": {"label": "Balanced", "note": "A little food, a little tidying, and no strong priority."},
-            "Meals": {"label": "Meals", "note": "Your spouse tries to keep simple food ready overnight."},
-            "Farm": {"label": "Farm", "note": "Your spouse focuses on seeds, small supplies, and farm prep."},
-            "Forage": {"label": "Forage", "note": "Your spouse keeps an eye out for useful wild goods."},
-            "Rest": {"label": "Rest", "note": "Your spouse keeps the house quiet instead of producing items."},
+            "Meals": {"label": "Meals", "note": f"Your {self.player_spouse_term()} tries to keep simple food ready overnight."},
+            "Farm": {"label": "Farm", "note": f"Your {self.player_spouse_term()} focuses on seeds, small supplies, and farm prep."},
+            "Forage": {"label": "Forage", "note": f"Your {self.player_spouse_term()} keeps an eye out for useful wild goods."},
+            "Rest": {"label": "Rest", "note": f"Your {self.player_spouse_term()} keeps the house quiet instead of producing items."},
         }
 
     def spouse_support_mode(self) -> str:
@@ -2143,7 +2155,7 @@ class NpcMixin:
 
     def spouse_support_menu(self):
         if not self.spouse_lives_on_farm():
-            self.set_message("Spouse support is available after your spouse moves onto the farm.")
+            self.set_message(f"Spouse support is available after your {self.player_spouse_term()} moves onto the farm.")
             return MENU_BACK
         while True:
             items = [
@@ -2365,7 +2377,7 @@ class NpcMixin:
     def can_invite_spouse_to_farm(self, npc: Dict[str, object]) -> Tuple[bool, str]:
         npc_id = str(npc.get("id", ""))
         if not self.state.spouse_npc_id or self.state.spouse_npc_id != npc_id:
-            return False, "Only your spouse can move onto the farm."
+            return False, f"Only your {self.player_spouse_term()} can move onto the farm."
         if self.state.spouse_moved_to_farm:
             return False, f"{npc.get('name', 'Your spouse')} already shares your household."
         return True, "Invite them to form a shared household with you."
@@ -2390,13 +2402,18 @@ class NpcMixin:
         if moved_in_scene and hasattr(self, "play_scene"):
             self.play_scene(moved_in_scene)
         elif hasattr(self, "play_world_event_scene"):
+            moving = pronouns_for_sex(self.npc_sex(npc))
             self.play_world_event_scene(
                 f"move_in:{npc_id}:{self.state.year}:{self.state.month}:{self.state.day}",
                 f"{npc.get('name')} Moves In",
                 [
                     {
                         "type": "narration",
-                        "text": f"{npc.get('name')} carries the first of their things through the household door and pauses to decide where they belong.",
+                        "text": (
+                            f"{npc.get('name')} carries the first of {moving['possessive']} things "
+                            f"through the household door and pauses to decide where "
+                            f"{moving['subject']} {'belong' if moving['plural_agreement'] else 'belongs'}."
+                        ),
                     },
                     {
                         "type": "dialogue",
@@ -2457,7 +2474,7 @@ class NpcMixin:
     ) -> Tuple[bool, str]:
         npc_id = str(npc.get("id", ""))
         if not self.state.spouse_npc_id or self.state.spouse_npc_id != npc_id:
-            return False, "A pregnancy requires your spouse."
+            return False, f"A pregnancy requires your {self.player_spouse_term()}."
         if not self.state.spouse_moved_to_farm:
             return False, "You and your spouse must share a home."
         if self.state.pregnancy_active:
@@ -3717,14 +3734,23 @@ class NpcMixin:
             }
             if isinstance(parent, dict):
                 parent_step["npc_id"] = str(parent.get("id", ""))
+            born = pronouns_for_sex(sex)
             self.play_world_event_scene(
                 f"birth:{child.get('id')}:{self.state.year}:{self.state.month}:{self.state.day}",
                 f"{child_name} Is Born",
                 [
                     {"type": "narration", "text": f"Morning reaches {home} differently. The household's routes, sleep, meals, and plans now bend around a newborn child."},
                     parent_step,
-                    {"type": "narration", "text": f"{child_name}'s birthday is {format_birthday(self.state.month, self.state.day)}. Their {profile_fields['personality_trait'].lower()} temperament is only a first hint, not a finished destiny."},
-                    {"type": "narration", "text": "No path has been chosen for this child. Learning, chores, affection, and the places you visit together will shape who they become."},
+                    {"type": "narration", "text": (
+                        f"{child_name}'s birthday is {format_birthday(self.state.month, self.state.day)}. "
+                        f"{born['possessive'].capitalize()} {profile_fields['personality_trait'].lower()} "
+                        f"temperament is only a first hint, not a finished destiny."
+                    )},
+                    {"type": "narration", "text": (
+                        "No path has been chosen for this child. Learning, chores, affection, and the "
+                        f"places you visit together will shape who {born['subject']} "
+                        f"{'become' if born['plural_agreement'] else 'becomes'}."
+                    )},
                 ],
                 f"{child_name} was born and joined the household.",
                 stage=self.family_relationship_stage_profile("pregnancy"),
@@ -5953,15 +5979,18 @@ class NpcMixin:
         self.remember_recent_gift_for_npc(npc_id, item)
 
         if reaction == "loved":
-            response = f"{npc.get('name')} accepts {item} with a look that says you understood them exactly."
+            said = pronouns_for_sex(self.npc_sex(npc))
+            response = f"{npc.get('name')} accepts {item} with a look that says you understood {said['object']} exactly."
         elif reaction == "liked artisan gift":
             response = f"{npc.get('name')} studies the work on {item} and seems genuinely impressed."
         elif reaction == "appreciated role gift":
-            response = f"{npc.get('name')} turns {item} over, already imagining where it fits into their work."
+            said = pronouns_for_sex(self.npc_sex(npc))
+            response = f"{npc.get('name')} turns {item} over, already imagining where it fits into {said['possessive']} work."
         elif reaction == "liked":
             response = f"{npc.get('name')} thanks you for {item}; it will not go to waste."
         elif reaction == "disliked":
-            response = f"{npc.get('name')} accepts {item} politely, but the pause gives them away."
+            said = pronouns_for_sex(self.npc_sex(npc))
+            response = f"{npc.get('name')} accepts {item} politely, but the pause gives {said['object']} away."
         else:
             response = f"{npc.get('name')} accepts {item} and tucks it away with a small thanks."
         if fatigue_note and actual_gain > 0:
@@ -8431,7 +8460,13 @@ class NpcMixin:
             "claim_type": context.get("claim_type", "farm claim"),
             "claim_traits": context.get("claim_traits", "raw land"),
             "claim_count": context.get("owned_claim_count", 0),
+            "claim_label": quantity_agreement(
+                int(context.get("owned_claim_count", 0) or 0), "claim", "claims"
+            ),
             "automation_count": context.get("automation_count", 0),
+            "automation_label": quantity_agreement(
+                int(context.get("automation_count", 0) or 0), "machine setup", "machine setups"
+            ),
             "house_rank": context.get("house_comfort_rank", "comfortable"),
             "combat_level": context.get("combat_level", 1),
             "deepest_floor": context.get("deepest_mine_floor", 1),
@@ -8484,7 +8519,9 @@ class NpcMixin:
                 "child": "your child",
                 "claim_name": "your land claim",
                 "claim_count": 0,
+                "claim_label": "claims",
                 "automation_count": 0,
+                "automation_label": "machine setups",
                 "deepest_floor": 1,
                 "hazard": "today's mine hazard",
                 "contract": "the posted mine contract",
@@ -8557,7 +8594,7 @@ class NpcMixin:
                 "I hope you and {spouse} are making the farm feel like a shared place.",
             ],
             "spouse_at_home": [
-                "{spouse} moving to the farm must change the mornings.",
+                "Having {spouse} move to the farm must change the mornings.",
                 "A second person in the farmhouse means the place has to work for both of you.",
                 "Shared space is practical work as much as romance.",
             ],
@@ -8567,7 +8604,7 @@ class NpcMixin:
                 "A remembered day can hold a household together better than a speech.",
             ],
             "child_related": [
-                "{child} must be changing the farmhouse schedule.",
+                "Having {child} around must be changing the farmhouse schedule.",
                 "Children make small routines matter more than people expect.",
                 "A quiet house is useful, but a lived-in house has its own kind of luck.",
             ],
@@ -8582,18 +8619,18 @@ class NpcMixin:
                 "Dinner does more work than people give it credit for.",
             ],
             "land_claim_owned": [
-                "{claim_name} sounds like raw land with real potential.",
+                "I hear {claim_name} is raw land with real potential.",
                 "A purchased claim is not a finished farm. That is the point.",
                 "Fast travel helps, but the land still needs your hands on it.",
             ],
             "land_claim_many": [
-                "{claim_count} claims is a lot of land to remember. Keep notes.",
+                "{claim_count} {claim_label} is a lot of land to remember. Keep notes.",
                 "More claims mean more freedom, but also more places to leave unfinished work.",
                 "Separate farms work best when each one has a clear purpose.",
             ],
             "automation_active": [
                 "Automation helps most when the farm still has clear paths.",
-                "{automation_count} machine setup can save time if you keep it fed and accessible.",
+                "{automation_count} {automation_label} can save time, provided each one stays fed and accessible.",
                 "A good machine should remove chores, not make the farm harder to walk through.",
             ],
             "house_comfortable": [
@@ -8622,12 +8659,12 @@ class NpcMixin:
                 "Do not let ore tempt you past your recovery supplies.",
             ],
             "mine_hazard_day": [
-                "{hazard} is on the calendar. Read it before going underground.",
+                "Check the calendar for {hazard}. Read it before going underground.",
                 "Mine hazard days reward caution more than courage.",
                 "If you go during a hazard, bring healing and leave early.",
             ],
             "combat_contract_day": [
-                "{contract} is posted today. Check the mission board before you commit.",
+                "Word is {contract} is worth a look today. Check the mission board before you commit.",
                 "Seasonal contracts pay better when you prepare for the target.",
                 "A contract is optional. Gear up before making it your problem.",
             ],
@@ -10559,7 +10596,11 @@ class NpcMixin:
                 return False
             self.state.town_npc_last_talk_day[visitor_id] = today
             gain = self.adjust_town_npc_relationship(visitor_id, RELATIONSHIP_TALK_GAIN)
-            self.autosave_with_message(f"Met {traveler.get('name', 'a town resident')} on their regional errand. Relationship +{gain}.")
+            met = pronouns_for_sex(self.npc_sex(traveler))
+            self.autosave_with_message(
+                f"Met {traveler.get('name', 'a town resident')} on {met['possessive']} regional errand. "
+                f"Relationship +{gain}."
+            )
             return True
         life = self.regional_town_life_state()
         today = self.town_npc_day_key()

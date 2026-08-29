@@ -757,6 +757,8 @@ class GameState:
     active_bounties: Dict[str, Dict[str, object]] = None
     completed_bounty_log: List[Dict[str, object]] = None
     learned_recipe_ids: List[str] = None
+    cooking_recipe_counts: Dict[str, int] = None
+    cooking_total_batches: int = 0
     library_research_ids: List[str] = None
     museum_donated_record_ids: List[str] = None
     museum_donation_counts: Dict[str, int] = None
@@ -824,6 +826,7 @@ class GameState:
     current_dungeon_floor: int = 1
     wilderness_dungeons_discovered: int = 0
     wilderness_dungeon_state: Dict[str, Dict[str, object]] = None
+    mega_skill_library: Dict[str, int] = None
     wilderness_field_combat: Dict[str, object] = None
     wilderness_field_loot: Dict[str, List[Dict[str, object]]] = None
     wilderness_combat_encounters: Dict[str, Dict[str, object]] = None
@@ -1772,6 +1775,19 @@ class GameState:
             cleaned_progress[progress_key] = json_safe_progress(value)
         self.combat_party_progress = cleaned_progress
 
+        if not isinstance(self.mega_skill_library, dict):
+            self.mega_skill_library = {}
+        else:
+            cleaned_library: Dict[str, int] = {}
+            for book_name, copies in self.mega_skill_library.items():
+                try:
+                    count = max(0, int(copies))
+                except (TypeError, ValueError):
+                    continue
+                if count:
+                    cleaned_library[str(book_name)] = count
+            self.mega_skill_library = cleaned_library
+
         self.combat_campaign_inventory = clean_party_points(self.combat_campaign_inventory)
         legacy_combat_money, legacy_combat_items = translated_battle_loot(self.combat_campaign_inventory)
         if legacy_combat_money or legacy_combat_items:
@@ -2024,6 +2040,14 @@ class GameState:
             self.completed_companion_quest_ids = []
         if self.learned_recipe_ids is None:
             self.learned_recipe_ids = []
+        if self.cooking_recipe_counts is None:
+            self.cooking_recipe_counts = {}
+        if not isinstance(self.cooking_recipe_counts, dict):
+            self.cooking_recipe_counts = {}
+        try:
+            self.cooking_total_batches = max(0, int(self.cooking_total_batches or 0))
+        except Exception:
+            self.cooking_total_batches = 0
         if self.library_research_ids is None:
             self.library_research_ids = []
         if self.museum_donated_record_ids is None:
@@ -2244,6 +2268,19 @@ class GameState:
         self.completed_bounty_log = cleaned_bounty_log[-30:]
 
         self.learned_recipe_ids = clean_string_list(self.learned_recipe_ids)
+        clean_cooking_counts: Dict[str, int] = {}
+        for recipe_name, raw_count in (self.cooking_recipe_counts or {}).items():
+            try:
+                count = max(0, min(999999, int(raw_count or 0)))
+            except Exception:
+                continue
+            if count > 0 and str(recipe_name).strip():
+                clean_cooking_counts[str(recipe_name).strip()[:120]] = count
+        self.cooking_recipe_counts = clean_cooking_counts
+        self.cooking_total_batches = max(
+            int(self.cooking_total_batches or 0),
+            sum(clean_cooking_counts.values()),
+        )
         self.library_research_ids = clean_string_list(self.library_research_ids)
         self.museum_donated_record_ids = sorted({value for value in clean_string_list(self.museum_donated_record_ids) if value.strip()})
         if not isinstance(self.museum_donation_counts, dict):

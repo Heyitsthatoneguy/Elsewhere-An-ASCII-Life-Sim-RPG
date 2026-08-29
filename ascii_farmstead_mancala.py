@@ -22,6 +22,38 @@ MANCALA_PAYOUT_RATIOS = {
     "Practiced": (3, 2),
     "Expert": (2, 1),
 }
+# Search depth behind each opponent, and how much it misjudges a position. Every
+# tier searches now: the old Practiced tier was a one-ply greedy scan, which a
+# player beats without trying, and the payout ladder then made the middle rung
+# the most profitable thing in the game to farm.
+#
+# "noise" is added to each candidate move's score before the best is taken, so a
+# weaker opponent picks a slightly worse move rather than an outright terrible
+# one. Occasional random moves were tried first and behaved far too sharply --
+# one careless sow in Kalah hands over a capture chain and loses the game, so
+# any blunder rate at all collapsed the top tier from unbeatable to a pushover.
+# A store is worth 18 points here, so noise near that flips genuinely close
+# calls and leaves clear ones alone.
+MANCALA_DIFFICULTY_SEARCH = {
+    "Friendly": {"depth": 1, "noise": 40.0},
+    "Practiced": {"depth": 5, "noise": 18.0},
+    "Expert": {"depth": 6, "noise": 10.0},
+}
+# A skilled player can still out-search the lower two tiers, so the stake they
+# can put behind that bounds the return. Expert is safe at the full cap because
+# a deep search beats anything a person is realistically doing at the board.
+MANCALA_TIER_MAX_WAGER = {
+    "Friendly": 50,
+    "Practiced": 150,
+    "Expert": 1000,
+}
+
+
+def mancala_max_wager(difficulty: str) -> int:
+    return min(
+        MANCALA_MAX_WAGER,
+        int(MANCALA_TIER_MAX_WAGER.get(str(difficulty), MANCALA_MAX_WAGER)),
+    )
 MANCALA_STATS_DEFAULTS = {
     "games_played": 0,
     "wins": 0,
@@ -199,28 +231,20 @@ def choose_mancala_ai_pit(
         simulated = list(board)
         result = apply_mancala_move(simulated, "ai", pit)
         previews.append((pit, result, simulated))
-    if difficulty == "Friendly":
-        pool: List[int] = []
-        for pit, result, _simulated in previews:
-            pool.append(pit)
-            if result["captured"]:
-                pool.append(pit)
-            if result["extra_turn"]:
-                pool.append(pit)
-        return int(rng.choice(pool))
-    scored: List[Tuple[int, float, int]] = []
+    config = MANCALA_DIFFICULTY_SEARCH.get(
+        difficulty, MANCALA_DIFFICULTY_SEARCH["Practiced"],
+    )
+    scored: List[Tuple[float, float, int]] = []
     for pit, result, simulated in previews:
-        if difficulty == "Expert":
-            next_turn = "ai" if result["extra_turn"] else "player"
-            score = _mancala_minimax(simulated, next_turn, 4, -10**9, 10**9)
-        else:
-            score = mancala_evaluate(simulated)
-            score += int(result["captured"]) * 8
-            score += 30 if result["extra_turn"] else 0
+        next_turn = "ai" if result["extra_turn"] else "player"
+        score = _mancala_minimax(
+            simulated, next_turn, int(config["depth"]), -10**9, 10**9,
+        )
+        noise = float(config.get("noise", 0.0))
+        if noise:
+            score += rng.gauss(0.0, noise)
         scored.append((score, rng.random(), pit))
     scored.sort(reverse=True)
-    if difficulty == "Practiced" and len(scored) > 1 and rng.random() < 0.2:
-        return int(rng.choice(scored[: min(3, len(scored))])[2])
     return int(scored[0][2])
 
 
@@ -281,17 +305,26 @@ class MancalaMixin:
             self.set_message("Finish or resign the paused mancala match first.")
             return {}
         difficulty = difficulty if difficulty in MANCALA_PAYOUT_RATIOS else "Practiced"
+        stats = self.state.tavern_mancala_stats
         wager = max(0, int(wager))
-        if wager and not MANCALA_MIN_WAGER <= wager <= MANCALA_MAX_WAGER:
-            self.set_message("Mancala wagers must be between 10g and 1,000g.")
+        tier_cap = mancala_max_wager(difficulty)
+        if wager and not MANCALA_MIN_WAGER <= wager <= tier_cap:
+            self.set_message(
+                f"{difficulty} mancala wagers must be between "
+                f"{MANCALA_MIN_WAGER}g and {tier_cap:,}g."
+            )
             return {}
         if int(self.state.money) < wager:
             self.set_message(f"You need {wager}g to place that wager.")
             return {}
         self.state.money -= wager
+        # Kalah(6,4) is a first-player win under perfect play, so a fixed opening
+        # side handed the player a standing edge in a wagered game. Sides now
+        # alternate with the match count, the way two people would take turns.
+        opener = "player" if int(stats.get("games_played", 0) or 0) % 2 == 0 else "ai"
         match = {
             "board": new_mancala_board(),
-            "turn": "player",
+            "turn": opener,
             "difficulty": difficulty,
             "venue": str(venue),
             "wager": wager,
@@ -304,7 +337,11 @@ class MancalaMixin:
             "history": [],
             "last_path": [],
             "last_landing": None,
-            "note": "Choose one of your six lower pits. The highlighted cups show its sowing path.",
+            "note": (
+                "Choose one of your six lower pits. The highlighted cups show its sowing path."
+                if opener == "player"
+                else "Your opponent opens this match. Watch their first sowing."
+            ),
         }
         self.state.tavern_mancala_match = match
         return match
@@ -607,7 +644,11 @@ class MancalaMixin:
     def mancala_wager_menu(self, venue: str, difficulty: str) -> Optional[int]:
         numerator, denominator = MANCALA_PAYOUT_RATIOS[difficulty]
         multiplier = f"{numerator / denominator:g}x profit"
-        presets = (10, 25, 50, 100, 250, 500, 1000)
+        tier_cap = mancala_max_wager(difficulty)
+        presets = tuple(
+            amount for amount in (10, 25, 50, 100, 250, 500, 1000)
+            if amount <= tier_cap
+        )
         while True:
             items = [
                 MenuItem(label="Free practice", value="0", enabled=True, hint="records count | no payout"),
@@ -626,7 +667,7 @@ class MancalaMixin:
                     label="Choose stone wager",
                     value="custom",
                     enabled=int(self.state.money) >= MANCALA_MIN_WAGER,
-                    hint=f"10g increments | {multiplier}",
+                    hint=f"10g increments | {multiplier} | max {tier_cap:,}g",
                 ),
                 MenuItem(label="Rules and payouts", value="rules", enabled=True),
                 MenuItem(label="Back", value=MENU_BACK, enabled=True),
@@ -646,7 +687,7 @@ class MancalaMixin:
                 )
                 continue
             if choice.value == "custom":
-                max_chips = min(MANCALA_MAX_WAGER // 10, int(self.state.money) // 10)
+                max_chips = min(tier_cap // 10, int(self.state.money) // 10)
                 quantity = self.vertical_quantity_select(
                     "Choose Mancala Wager",
                     "10g stone",

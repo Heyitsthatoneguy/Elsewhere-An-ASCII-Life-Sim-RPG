@@ -208,6 +208,13 @@ def create_default_skills() -> List[Skill]:
         Skill("Triple Shot", mp_cost=6, damage=4, range_max=5, shape="multishot", shots=3, description="Hits up to 3 enemies near the target."),
     ]
     try:
+        from ascii_farmstead_mega_skills import create_mega_dungeon_skills
+
+        skills.extend(create_mega_dungeon_skills())
+    except (ImportError, OSError, ValueError, TypeError):
+        # The standalone combat prototype remains usable without farmstead data.
+        pass
+    try:
         from ascii_farmstead_custom_content import create_custom_skills
 
         skills.extend(create_custom_skills(skill.name for skill in skills))

@@ -61,6 +61,7 @@ DIALOGUE_VARIABLE_DESCRIPTIONS = {
 DIALOGUE_SOURCE_NAMES = (
     "ascii_farmstead_dialogue.py",
     "ascii_farmstead_dialogue_library.py",
+    "ascii_farmstead_dialogue_registers.py",
     "ascii_farmstead_relationship_dialogue.py",
     "ascii_farmstead_npc_dialogue.py",
     "ascii_farmstead_npcs.py",
@@ -268,6 +269,7 @@ def dialogue_source_catalog(refresh: bool = False) -> List[Dict[str, object]]:
     records: List[Dict[str, object]] = []
     broad_names = {
         "ascii_farmstead_dialogue_library.py",
+        "ascii_farmstead_dialogue_registers.py",
         "ascii_farmstead_relationship_dialogue.py",
         "ascii_farmstead_npc_dialogue.py",
     }

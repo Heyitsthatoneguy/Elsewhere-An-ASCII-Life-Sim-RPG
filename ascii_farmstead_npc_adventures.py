@@ -68,6 +68,9 @@ def sanitize_npc_progression_records(value: object) -> Dict[str, Dict[str, objec
             "last_adventure_day": _bounded_int(raw.get("last_adventure_day", 0), 0, 0, 9999999),
             "earnings": _bounded_int(raw.get("earnings", 0), 0, 0, 99999999),
             "adventure_inclination": str(raw.get("adventure_inclination", ""))[:40],
+            "inclination_revision": _bounded_int(
+                raw.get("inclination_revision", 1), 1, 1, 999,
+            ),
             "last_outcome": str(raw.get("last_outcome", ""))[:240],
             "history": [
                 str(row)[:240] for row in history if str(row or "").strip()
@@ -120,6 +123,7 @@ class NpcAdventureMixin:
                 "courage": min(80, courage), "journeys": 0, "victories": 0,
                 "rescues": 0, "recovery_until_day": 0, "last_adventure_day": 0,
                 "earnings": 0, "adventure_inclination": "",
+                "inclination_revision": 1,
                 "last_outcome": "", "history": [],
             }
             store[key] = raw
@@ -214,13 +218,23 @@ class NpcAdventureMixin:
                 'pretending otherwise only creates a second casualty."'
             )
         if record.get("last_outcome"):
-            return f'"My last regional journey {record["last_outcome"]}."'
+            # Reads as a sentence whichever system wrote the outcome: the older
+            # trips store "cleared a dangerous stretch of road...", the physical
+            # system stores "finished <title>".
+            outcome = self.npc_adventure_spoken_outcome(record["last_outcome"])
+            return f'"Last time I went out, I {outcome}."'
         if self.npc_adventure_eligible(npc):
             return (
                 f'"My {str(record.get("weapon", "equipment")).lower()} is for the road, '
                 'not for showing off in town. The sensible victory is getting everyone home."'
             )
         return ""
+
+    @staticmethod
+    def npc_adventure_spoken_outcome(value: object) -> str:
+        """Make legacy journey fragments safe after the first-person wrapper."""
+        outcome = " ".join(str(value or "").split()).strip().rstrip(".")
+        return outcome.replace("their preparation", "safe preparation")
 
     def npc_adventure_journal_lines(self) -> List[str]:
         life = self.regional_town_life_state()
@@ -340,7 +354,7 @@ class NpcAdventureMixin:
             outcome = "completed the journey safely after avoiding unnecessary danger"
             xp = 25 + danger // 3
         else:
-            outcome = "returned injured after withdrawing from a threat beyond their preparation"
+            outcome = "returned injured after withdrawing from a threat beyond safe preparation"
             xp = 16 + danger // 4
             record["recovery_until_day"] = self.absolute_game_day() + 2
         gained = self.award_npc_adventure_xp(npc, xp)

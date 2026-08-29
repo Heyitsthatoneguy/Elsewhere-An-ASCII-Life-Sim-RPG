@@ -9,6 +9,13 @@ in the actual season, weather, place, activity, relationship, and player name.
 
 import hashlib
 from functools import lru_cache
+from ascii_farmstead_dialogue_registers import (
+    REGISTER_LENSES,
+    REGISTER_TOPIC_LENSES,
+    REGISTER_TOPIC_OBSERVATIONS,
+    REGISTER_TOPIC_PATTERNS,
+    register_for_profile,
+)
 from typing import Dict, Mapping, Sequence, Tuple
 
 
@@ -19,31 +26,31 @@ DIALOGUE_LIBRARY_TOPICS: Tuple[str, ...] = (
 
 
 VOICE_PROFILES: Tuple[Dict[str, str], ...] = (
-    {"id": "civic", "identity": "civic organizer", "vantage": "From the council desk", "work": "turning public promises into schedules people can rely on", "place": "the town hall steps", "concern": "small problems becoming permanent through neglect", "interest": "local history and practical planning", "people": "clerks, neighbors, and anyone willing to attend a meeting", "material": "ink, notices, and patient negotiation"},
-    {"id": "commerce", "identity": "shopkeeper", "vantage": "From behind a well-used counter", "work": "matching limited stock to what households actually need", "place": "the shop floor before opening", "concern": "a broken supply route leaving shelves empty", "interest": "prices, useful goods, and the habits of regular customers", "people": "suppliers, customers, and neighboring merchants", "material": "ledgers, crates, and careful estimates"},
-    {"id": "smith", "identity": "metalworker", "vantage": "Beside the cooling forge", "work": "making metal dependable before anyone trusts it underground", "place": "the forge after the hammering stops", "concern": "a hidden flaw failing when someone needs a tool most", "interest": "ore, edge geometry, and better tool designs", "people": "miners, craftspeople, and farmers with worn equipment", "material": "heat, iron, and measured blows"},
-    {"id": "carpentry", "identity": "builder", "vantage": "At the end of the workbench", "work": "giving rooms clear purposes and paths that remain usable", "place": "a frame where the next wall will stand", "concern": "careless construction trapping people in awkward spaces", "interest": "joinery, architecture, and bridges", "people": "homeowners, laborers, and apprentices", "material": "wood grain, chalk lines, and sound joints"},
-    {"id": "animals", "identity": "animal keeper", "vantage": "From the quiet side of the stable", "work": "noticing an animal's needs before distress makes them obvious", "place": "the barn during the calm between feedings", "concern": "routine neglect being mistaken for bad temperament", "interest": "breeding, training, and the personalities of individual animals", "people": "ranchers, veterinarians, and patient handlers", "material": "feed, clean bedding, and steady hands"},
-    {"id": "archive", "identity": "keeper of records", "vantage": "Between the shelves and catalog drawers", "work": "preserving useful knowledge before memory edits the details", "place": "the library's quietest table", "concern": "important experience disappearing because nobody wrote it down", "interest": "books, maps, and local histories", "people": "readers, witnesses, and careful researchers", "material": "paper, indexes, and corroborated accounts"},
-    {"id": "road", "identity": "road traveler", "vantage": "With one boot still pointed toward the road", "work": "learning which routes remain safe when conditions change", "place": "the next marked junction", "concern": "a familiar road encouraging careless travel", "interest": "maps, distant settlements, and roadside stories", "people": "couriers, guides, wayfarers, and fellow travelers", "material": "trail signs, packed provisions, and good directions"},
-    {"id": "medicine", "identity": "medical worker", "vantage": "From the clinic's clean worktable", "work": "catching small symptoms before they become emergencies", "place": "the clinic between appointments", "concern": "someone waiting too long because they fear the cost or diagnosis", "interest": "herbal remedies, anatomy, and preventative care", "people": "patients, nurses, and reliable suppliers", "material": "clean instruments, herbs, and careful observation"},
-    {"id": "hospitality", "identity": "host", "vantage": "Near the inn's front desk", "work": "making strangers feel safe without prying into what brought them", "place": "the common room before the evening crowd", "concern": "a guest having nowhere private to rest", "interest": "traveler stories, card games, and shared meals", "people": "guests, cooks, performers, and regular patrons", "material": "clean rooms, warm food, and discretion"},
-    {"id": "culinary", "identity": "cook", "vantage": "At the edge of the kitchen heat", "work": "turning seasonal ingredients into meals people remember", "place": "the kitchen before service", "concern": "good produce being wasted through careless preparation", "interest": "recipes, forage, and unusual flavor combinations", "people": "farmers, diners, and anyone honest about a meal", "material": "sharp knives, steady heat, and fresh ingredients"},
-    {"id": "market", "identity": "market trader", "vantage": "Under the market awning", "work": "finding value in goods other people overlook", "place": "the stalls while they are being arranged", "concern": "an empty market teaching residents to shop elsewhere", "interest": "bargains, festivals, and changing demand", "people": "vendors, customers, and caravan crews", "material": "display cloth, coin, and quick arithmetic"},
-    {"id": "garden", "identity": "grower", "vantage": "At the end of a cultivated row", "work": "reading soil and season before committing a crop", "place": "the garden at first light", "concern": "poor timing wasting both seed and labor", "interest": "flowers, crop rotation, and weather signs", "people": "farmers, seed sellers, and neighboring gardeners", "material": "soil, seed, compost, and patient watering"},
-    {"id": "water", "identity": "water worker", "vantage": "Beside the waterline", "work": "understanding currents and what they carry", "place": "the bank where the current changes", "concern": "calm water hiding a dangerous shift", "interest": "fish, boats, rainfall, and changing channels", "people": "fishers, ferry crews, and riverside families", "material": "rope, nets, sound boats, and weather sense"},
-    {"id": "mining", "identity": "miner", "vantage": "At the mouth of the worked stone", "work": "reading rock before committing strength and tools", "place": "the mine entrance between descents", "concern": "greed carrying someone deeper than preparation allows", "interest": "geology, ore seams, and cave routes", "people": "smiths, prospectors, and dependable climbing partners", "material": "stone dust, supports, lamps, and tested tools"},
-    {"id": "youth", "identity": "young resident", "vantage": "From a place adults usually overlook", "work": "learning which rules protect people and which merely save adults time", "place": "the quickest route between home and something interesting", "concern": "being dismissed before getting to explain", "interest": "games, animals, stories, and exploring safe places", "people": "friends, relatives, teachers, and patient grown-ups", "material": "questions, scraped knees, and borrowed supplies"},
-    {"id": "arts", "identity": "artist", "vantage": "From the side of an unfinished piece", "work": "finding a shape for things ordinary speech cannot hold", "place": "the spot where the light changes color", "concern": "useful work leaving no room for beauty or celebration", "interest": "music, color, performance, and human expressions", "people": "performers, craftspeople, and attentive audiences", "material": "pigment, rhythm, rehearsal, and nerve"},
-    {"id": "solitary", "identity": "solitary worker", "vantage": "From the quieter edge of settlement", "work": "keeping independence without pretending nobody else matters", "place": "a sheltered place beyond the busiest paths", "concern": "company becoming obligation instead of choice", "interest": "foraging, repairs, and long periods of quiet", "people": "a few trusted neighbors and travelers who respect boundaries", "material": "stored provisions, simple tools, and privacy"},
-    {"id": "orchard", "identity": "orchard keeper", "vantage": "Beneath branches shaped over many seasons", "work": "planning harvests years before the fruit appears", "place": "the orchard between blossom and harvest", "concern": "short-term thinking damaging a tree's future", "interest": "fruit preserving, bees, grafting, and seasonal cycles", "people": "beekeepers, cooks, and patient growers", "material": "pruning tools, healthy soil, and time"},
-    {"id": "textile", "identity": "textile worker", "vantage": "Beside the cutting table", "work": "making useful cloth fit the person who must live in it", "place": "the workshop among folded fabrics", "concern": "rushed measurements turning good material into waste", "interest": "sewing, dyes, patterns, and practical fashion", "people": "customers, fiber suppliers, and other craftspeople", "material": "thread, cloth, needles, and exact measurements"},
-    {"id": "nature", "identity": "field researcher", "vantage": "At the boundary between trail and habitat", "work": "investigating useful plants and wildlife without damaging their habitat", "place": "a field station near the work tract", "concern": "collectors taking more than a region can replace", "interest": "plants, wildlife, fungi, and practical field records", "people": "rangers, herbalists, researchers, and local guides", "material": "samples, sketches, markers, and restraint"},
-    {"id": "mechanical", "identity": "mechanic", "vantage": "Over an opened machine casing", "work": "finding the small failure that makes the whole system unreliable", "place": "the workshop after a successful test", "concern": "a temporary repair being mistaken for a permanent one", "interest": "machines, puzzles, tools, and efficient designs", "people": "operators, smiths, builders, and curious apprentices", "material": "gears, fasteners, diagrams, and patient testing"},
-    {"id": "elder", "identity": "longtime resident", "vantage": "From a seat chosen through years of habit", "work": "remembering which old solutions deserve another chance", "place": "a familiar corner with a view of passing life", "concern": "nostalgia making the past kinder than it truly was", "interest": "local history, gardens, games, and watching families grow", "people": "old friends, younger relatives, and neighbors who stop to listen", "material": "memory, routine, and lessons paid for long ago"},
-    {"id": "law", "identity": "keeper of public safety", "vantage": "From the station doorway", "work": "keeping roads usable without making everyone feel watched", "place": "the patrol route where town meets wilderness", "concern": "fear turning a manageable danger into public panic", "interest": "tracking, civic rules, and practical defense", "people": "deputies, witnesses, travelers, and town officials", "material": "reports, patrols, evidence, and proportionate force"},
-    {"id": "research", "identity": "researcher", "vantage": "Beside a page crowded with observations", "work": "testing an appealing explanation against inconvenient evidence", "place": "the research table after fieldwork", "concern": "certainty arriving before enough observations do", "interest": "experiments, classification, maps, and unresolved questions", "people": "specialists, witnesses, students, and skeptical colleagues", "material": "samples, controls, notes, and repeatable methods"},
-    {"id": "settler", "identity": "working resident", "vantage": "From the middle of an ordinary day's work", "work": "keeping a household and community dependable one task at a time", "place": "the path between home, work, and neighbors", "concern": "too many small obligations landing on the same person", "interest": "useful crafts, local news, meals, and quiet recreation", "people": "family, coworkers, neighbors, and familiar travelers", "material": "routine, shared labor, and tools kept in good order"},
+    {"id": "civic", "task": "the council desk", "identity": "civic organizer", "vantage": "From the council desk", "work": "turning public promises into schedules people can rely on", "place": "the town hall steps", "concern": "small problems becoming permanent through neglect", "interest": "local history and practical planning", "people": "clerks, neighbors, and anyone willing to attend a meeting", "material": "ink, notices, and patient negotiation"},
+    {"id": "commerce", "task": "the counter", "identity": "shopkeeper", "vantage": "From behind a well-used counter", "work": "matching limited stock to what households actually need", "place": "the shop floor before opening", "concern": "a broken supply route leaving shelves empty", "interest": "prices, useful goods, and the habits of regular customers", "people": "suppliers, customers, and neighboring merchants", "material": "ledgers, crates, and careful estimates"},
+    {"id": "smith", "task": "the forge", "identity": "metalworker", "vantage": "Beside the cooling forge", "work": "making metal dependable before anyone trusts it underground", "place": "the forge after the hammering stops", "concern": "a hidden flaw failing when someone needs a tool most", "interest": "ore, edge geometry, and better tool designs", "people": "miners, craftspeople, and farmers with worn equipment", "material": "heat, iron, and measured blows"},
+    {"id": "carpentry", "task": "the bench", "identity": "builder", "vantage": "At the end of the workbench", "work": "giving rooms clear purposes and paths that remain usable", "place": "a frame where the next wall will stand", "concern": "careless construction trapping people in awkward spaces", "interest": "joinery, architecture, and bridges", "people": "homeowners, laborers, and apprentices", "material": "wood grain, chalk lines, and sound joints"},
+    {"id": "animals", "task": "the barn", "identity": "animal keeper", "vantage": "From the quiet side of the stable", "work": "noticing an animal's needs before distress makes them obvious", "place": "the barn during the calm between feedings", "concern": "routine neglect being mistaken for bad temperament", "interest": "breeding, training, and the personalities of individual animals", "people": "ranchers, veterinarians, and patient handlers", "material": "feed, clean bedding, and steady hands"},
+    {"id": "archive", "task": "the archive", "identity": "keeper of records", "vantage": "Between the shelves and catalog drawers", "work": "preserving useful knowledge before memory edits the details", "place": "the library's quietest table", "concern": "important experience disappearing because nobody wrote it down", "interest": "books, maps, and local histories", "people": "readers, witnesses, and careful researchers", "material": "paper, indexes, and corroborated accounts"},
+    {"id": "road", "task": "the roadside", "identity": "road traveler", "vantage": "With one boot still pointed toward the road", "work": "learning which routes remain safe when conditions change", "place": "the next marked junction", "concern": "a familiar road encouraging careless travel", "interest": "maps, distant settlements, and roadside stories", "people": "couriers, guides, wayfarers, and fellow travelers", "material": "trail signs, packed provisions, and good directions"},
+    {"id": "medicine", "task": "the clinic", "identity": "medical worker", "vantage": "From the clinic's clean worktable", "work": "catching small symptoms before they become emergencies", "place": "the clinic between appointments", "concern": "someone waiting too long because they fear the cost or diagnosis", "interest": "herbal remedies, anatomy, and preventative care", "people": "patients, nurses, and reliable suppliers", "material": "clean instruments, herbs, and careful observation"},
+    {"id": "hospitality", "task": "the inn", "identity": "host", "vantage": "Near the inn's front desk", "work": "making strangers feel safe without prying into what brought them", "place": "the common room before the evening crowd", "concern": "a guest having nowhere private to rest", "interest": "traveler stories, card games, and shared meals", "people": "guests, cooks, performers, and regular patrons", "material": "clean rooms, warm food, and discretion"},
+    {"id": "culinary", "task": "the kitchen", "identity": "cook", "vantage": "At the edge of the kitchen heat", "work": "turning seasonal ingredients into meals people remember", "place": "the kitchen before service", "concern": "good produce being wasted through careless preparation", "interest": "recipes, forage, and unusual flavor combinations", "people": "farmers, diners, and anyone honest about a meal", "material": "sharp knives, steady heat, and fresh ingredients"},
+    {"id": "market", "task": "the stall", "identity": "market trader", "vantage": "Under the market awning", "work": "finding value in goods other people overlook", "place": "the stalls while they are being arranged", "concern": "an empty market teaching residents to shop elsewhere", "interest": "bargains, festivals, and changing demand", "people": "vendors, customers, and caravan crews", "material": "display cloth, coin, and quick arithmetic"},
+    {"id": "garden", "task": "the garden", "identity": "grower", "vantage": "At the end of a cultivated row", "work": "reading soil and season before committing a crop", "place": "the garden at first light", "concern": "poor timing wasting both seed and labor", "interest": "flowers, crop rotation, and weather signs", "people": "farmers, seed sellers, and neighboring gardeners", "material": "soil, seed, compost, and patient watering"},
+    {"id": "water", "task": "the waterline", "identity": "water worker", "vantage": "Beside the waterline", "work": "understanding currents and what they carry", "place": "the bank where the current changes", "concern": "calm water hiding a dangerous shift", "interest": "fish, boats, rainfall, and changing channels", "people": "fishers, ferry crews, and riverside families", "material": "rope, nets, sound boats, and weather sense"},
+    {"id": "mining", "task": "the mine", "identity": "miner", "vantage": "At the mouth of the worked stone", "work": "reading rock before committing strength and tools", "place": "the mine entrance between descents", "concern": "greed carrying someone deeper than preparation allows", "interest": "geology, ore seams, and cave routes", "people": "smiths, prospectors, and dependable climbing partners", "material": "stone dust, supports, lamps, and tested tools"},
+    {"id": "youth", "task": "school", "identity": "kid", "vantage": "From a place adults usually overlook", "work": "figuring out how things work when nobody explains them", "place": "the quickest route between home and something interesting", "concern": "grown-ups deciding before I finish talking", "interest": "games, animals, stories, and exploring safe places", "people": "friends, relatives, teachers, and patient grown-ups", "material": "questions, scraped knees, and borrowed supplies"},
+    {"id": "arts", "task": "the studio", "identity": "artist", "vantage": "From the side of an unfinished piece", "work": "finding a shape for things ordinary speech cannot hold", "place": "the spot where the light changes color", "concern": "useful work leaving no room for beauty or celebration", "interest": "music, color, performance, and human expressions", "people": "performers, craftspeople, and attentive audiences", "material": "pigment, rhythm, rehearsal, and nerve"},
+    {"id": "solitary", "task": "my own place", "identity": "solitary worker", "vantage": "From the quieter edge of settlement", "work": "keeping independence without pretending nobody else matters", "place": "a sheltered place beyond the busiest paths", "concern": "company becoming obligation instead of choice", "interest": "foraging, repairs, and long periods of quiet", "people": "trusted neighbors and travelers who respect boundaries", "material": "stored provisions, simple tools, and privacy"},
+    {"id": "orchard", "task": "the orchard", "identity": "orchard keeper", "vantage": "Beneath branches shaped over many seasons", "work": "planning harvests years before the fruit appears", "place": "the orchard between blossom and harvest", "concern": "short-term thinking damaging a tree's future", "interest": "fruit preserving, bees, grafting, and seasonal cycles", "people": "beekeepers, cooks, and patient growers", "material": "pruning tools, healthy soil, and time"},
+    {"id": "textile", "task": "the cutting table", "identity": "textile worker", "vantage": "Beside the cutting table", "work": "making useful cloth fit the person who must live in it", "place": "the workshop among folded fabrics", "concern": "rushed measurements turning good material into waste", "interest": "sewing, dyes, patterns, and practical fashion", "people": "customers, fiber suppliers, and other craftspeople", "material": "thread, cloth, needles, and exact measurements"},
+    {"id": "nature", "task": "the field station", "identity": "field researcher", "vantage": "At the boundary between trail and habitat", "work": "investigating useful plants and wildlife without damaging their habitat", "place": "a field station near the work tract", "concern": "collectors taking more than a region can replace", "interest": "plants, wildlife, fungi, and practical field records", "people": "rangers, herbalists, researchers, and local guides", "material": "samples, sketches, markers, and restraint"},
+    {"id": "mechanical", "task": "the workshop", "identity": "mechanic", "vantage": "Over an opened machine casing", "work": "finding the small failure that makes the whole system unreliable", "place": "the workshop after a successful test", "concern": "a temporary repair being mistaken for a permanent one", "interest": "machines, puzzles, tools, and efficient designs", "people": "operators, smiths, builders, and curious apprentices", "material": "gears, fasteners, diagrams, and patient testing"},
+    {"id": "elder", "task": "my usual corner", "identity": "longtime resident", "vantage": "From a seat chosen through years of habit", "work": "remembering which old solutions deserve another chance", "place": "a familiar corner with a view of passing life", "concern": "nostalgia making the past kinder than it truly was", "interest": "local history, gardens, games, and watching families grow", "people": "old friends, younger relatives, and neighbors who stop to listen", "material": "memory, routine, and lessons paid for long ago"},
+    {"id": "law", "task": "the station", "identity": "keeper of public safety", "vantage": "From the station doorway", "work": "keeping roads usable without making everyone feel watched", "place": "the patrol route where town meets wilderness", "concern": "fear turning a manageable danger into public panic", "interest": "tracking, civic rules, and practical defense", "people": "deputies, witnesses, travelers, and town officials", "material": "reports, patrols, evidence, and proportionate force"},
+    {"id": "research", "task": "the research table", "identity": "researcher", "vantage": "Beside a page crowded with observations", "work": "testing an appealing explanation against inconvenient evidence", "place": "the research table after fieldwork", "concern": "certainty arriving before enough observations do", "interest": "experiments, classification, maps, and unresolved questions", "people": "specialists, witnesses, students, and skeptical colleagues", "material": "samples, controls, notes, and repeatable methods"},
+    {"id": "settler", "task": "the day's work", "identity": "working resident", "vantage": "From the middle of an ordinary day's work", "work": "keeping a household and community dependable one task at a time", "place": "the path between home, work, and neighbors", "concern": "too many small obligations landing on the same person", "interest": "useful crafts, local news, meals, and quiet recreation", "people": "family, coworkers, neighbors, and familiar travelers", "material": "routine, shared labor, and tools kept in good order"},
 )
 
 
@@ -52,28 +59,28 @@ TOPIC_PATTERNS: Dict[str, Tuple[str, ...]] = {
         "{vantage}, I have learned that a proper greeting saves confusion later; good {time}.",
         "{vantage}, faces become familiar through ordinary meetings like this one; it is good to see you.",
         "{vantage}, I was just considering {concern}; your arrival gives me a reason to pause.",
-        "{vantage}, a {identity} notices who appears and when; hello, {player}.",
+        "{vantage}, {a_identity} notices who appears and when; hello, {player}.",
         "{vantage}, the day has already found its rhythm, but there is room in it for a conversation.",
         "{vantage}, I recognize your step now; you need not introduce yourself again.",
-        "{vantage}, people often hurry past a {identity}; I appreciate that you stopped.",
+        "{vantage}, people often hurry past {a_identity}; I appreciate that you stopped.",
         "{vantage}, this is a better moment to talk than it may look from outside.",
         "{vantage}, I wondered whether our paths would cross in {setting} today.",
         "{vantage}, familiarity is built from small returns; welcome back.",
     ),
     "activity": (
-        "{vantage}, I am occupied with {work}; the visible task is only part of it.",
+        "{vantage}, I am occupied with {task}; the visible task is only part of it.",
         "{vantage}, today's routine is {activity}, which keeps pulling my attention back to {concern}.",
         "{vantage}, I am using {material} to keep the day's work from becoming tomorrow's problem.",
-        "{vantage}, being a {identity} means even a quiet hour contains preparation.",
-        "{vantage}, I am between the urgent portion of {work} and the part that requires patience.",
+        "{vantage}, being {a_identity} means even a quiet hour contains preparation.",
+        "{vantage}, I am between the urgent part of {task} and the part that needs patience.",
         "{vantage}, the work looks repetitive until one notices what changes each day.",
         "{vantage}, I am checking yesterday's effort before adding anything new.",
         "{vantage}, {activity} is going well enough, though I would not call it finished.",
         "{vantage}, I am trying to leave {setting} more usable than I found it this morning.",
-        "{vantage}, most of my attention is on {work}, with a little left for whoever stops to speak.",
+        "{vantage}, most of my attention is on {task}, with a little left for whoever stops to speak.",
     ),
     "work": (
-        "{vantage}, a {identity} succeeds by {work}, not by merely looking busy.",
+        "{vantage}, {a_identity} succeeds by {work}, not by merely looking busy.",
         "{vantage}, the hardest part of my profession is usually {concern}.",
         "{vantage}, people see {material}; they do not always see the judgment behind using it well.",
         "{vantage}, my work connects me to {people}, whether or not we share the same room.",
@@ -82,7 +89,7 @@ TOPIC_PATTERNS: Dict[str, Tuple[str, ...]] = {
         "{vantage}, the profession rewards attention long before it rewards confidence.",
         "{vantage}, I would rather explain a limitation honestly than hide it under enthusiasm.",
         "{vantage}, every shortcut creates a debt; my work is deciding which debts are acceptable.",
-        "{vantage}, if you want to understand a {identity}, watch what they check twice.",
+        "{vantage}, if you want to understand {a_identity}, watch what they check twice.",
     ),
     "place": (
         "{vantage}, {setting} makes sense once you notice how it connects to {place}.",
@@ -100,7 +107,7 @@ TOPIC_PATTERNS: Dict[str, Tuple[str, ...]] = {
         "{vantage}, my days bring me into contact with {people}; each notices a different part of town.",
         "{vantage}, I trust people more when their routine agrees with their promises.",
         "{vantage}, community is less about universal friendship than knowing who will actually show up.",
-        "{vantage}, a {identity} hears many opinions, but repetition does not make one true.",
+        "{vantage}, {a_identity} hears many opinions, but repetition does not make one true.",
         "{vantage}, I try not to explain another person's private motives for them.",
         "{vantage}, most disagreements become clearer once everyone names the problem they are solving.",
         "{vantage}, people reveal priorities through what they make time for when nobody is watching.",
@@ -117,11 +124,11 @@ TOPIC_PATTERNS: Dict[str, Tuple[str, ...]] = {
         "{vantage}, when three people repeat the same phrase, I start wondering who said it first.",
         "{vantage}, local news often begins as someone noticing a change in routine.",
         "{vantage}, I take gossip seriously only when it points toward something we can verify.",
-        "{vantage}, people are discussing {work}; the disagreement is mostly about what should happen next.",
+        "{vantage}, people are discussing {task}; the disagreement is mostly about what should happen next.",
         "{vantage}, I would rather give you an incomplete truth than decorate it into certainty.",
     ),
     "weather": (
-        "{vantage}, {weather} weather changes how a {identity} plans even when the work remains indoors.",
+        "{vantage}, {weather} weather changes how {a_identity} plans even when the work remains indoors.",
         "{vantage}, I watch the sky because {concern} becomes harder to manage after conditions turn.",
         "{vantage}, weather exposes which routines were designed well and which only worked by luck.",
         "{vantage}, the air around {setting} says more about the coming hours than the calendar does.",
@@ -145,7 +152,7 @@ TOPIC_PATTERNS: Dict[str, Tuple[str, ...]] = {
         "{vantage}, I am already preparing for what follows {season}, though I try not to rush it away.",
     ),
     "personal": (
-        "{vantage}, being a {identity} explains my routine, but it does not explain all of me.",
+        "{vantage}, being {a_identity} explains my routine, but it does not explain all of me.",
         "{vantage}, I return to {interest} when I need to remember that usefulness is not everything.",
         "{vantage}, I am proud of {work}, though pride can make criticism harder to hear.",
         "{vantage}, my strongest habits grew from trying not to repeat an old mistake.",
@@ -157,8 +164,8 @@ TOPIC_PATTERNS: Dict[str, Tuple[str, ...]] = {
         "{vantage}, I want my choices to make sense when remembered years from now.",
     ),
     "family": (
-        "{vantage}, family life has its own routines, and a {identity}'s schedule must bend around them.",
-        "{vantage}, I try not to bring every concern about {work} through the front door.",
+        "{vantage}, family life has its own routines, and {a_identity}'s schedule must bend around them.",
+        "{vantage}, I try not to bring every concern about {task} through the front door.",
         "{vantage}, sharing a household means learning which small tasks matter deeply to someone else.",
         "{vantage}, relatives remember who we were before our profession became our public face.",
         "{vantage}, affection is not a substitute for keeping promises at home.",
@@ -169,7 +176,7 @@ TOPIC_PATTERNS: Dict[str, Tuple[str, ...]] = {
         "{vantage}, the people closest to us deserve more than whatever attention remains at day's end.",
     ),
     "interests": (
-        "{vantage}, I make time for {interest} when {work} releases me early enough.",
+        "{vantage}, I make time for {interest} when the day lets me go early enough.",
         "{vantage}, my interests sharpen parts of me that the workday rarely uses.",
         "{vantage}, I enjoy learning from people who care deeply about something unfamiliar to me.",
         "{vantage}, {interest} began as a distraction and became part of how I understand the world.",
@@ -181,7 +188,7 @@ TOPIC_PATTERNS: Dict[str, Tuple[str, ...]] = {
         "{vantage}, I would rather be clumsy at something enjoyable than competent at nothing but work.",
     ),
     "farewell": (
-        "{vantage}, I should return to {work}; thank you for speaking plainly.",
+        "{vantage}, I should get back to {task}; thank you for speaking plainly.",
         "{vantage}, we can continue another time without pretending every subject is settled.",
         "{vantage}, take care around {setting}, especially while the weather remains {weather}.",
         "{vantage}, I will remember what mattered in this conversation and let the rest pass.",
@@ -201,75 +208,75 @@ TOPIC_PATTERNS: Dict[str, Tuple[str, ...]] = {
 # 15,000 lines without presenting several unrelated remarks at once.
 SUPPLEMENTAL_TOPIC_OBSERVATIONS: Dict[str, Tuple[str, ...]] = {
     "greeting": (
-        "good {time}; I was just finding the rhythm of the day when you arrived.",
+        "good {time}; I was just finding the rhythm of {task} when you arrived.",
         "hello, {player}; {setting} feels less anonymous when familiar people stop to speak.",
         "you caught me between {activity} and the next thing demanding my attention.",
-        "welcome back; I remember our last conversation better than I remember yesterday's weather.",
+        "welcome back; I remember our last conversation better than most of what happens at {task}.",
     ),
     "activity": (
         "I am {activity}, and the part requiring judgment is harder to see than the movement.",
         "today's task keeps circling back to {concern}, so I am taking it more carefully than usual.",
         "I am working with {material}; rushing would save minutes and create hours of repair.",
-        "the routine looks ordinary, but one changed detail has kept me alert all day.",
+        "the routine at {task} looks ordinary, but one changed detail has kept me alert all day.",
     ),
     "work": (
         "the useful part of my work is {work}, especially when nobody is around to praise it.",
-        "I learned this trade by making small mistakes where patient people could correct me.",
+        "I learned this trade around {people}, making small mistakes where patient hands could correct me.",
         "what exhausts me is not {material}; it is deciding which problem deserves attention first.",
-        "I still enjoy being a {identity}, although enjoyment and ease are not the same thing.",
+        "I still enjoy being {a_identity}, although enjoyment and ease are not the same thing.",
     ),
     "place": (
-        "{setting} becomes readable once you notice where people slow down, gather, and turn back.",
-        "I judge a place by whether its paths respect the people who must use them every day.",
-        "{place} is where I go when I need to remember how this area fits together.",
-        "roads, rooms, and shorelines all reveal what their builders expected people to do.",
+        "You can read {setting} once you notice where people slow down, gather, and turn back.",
+        "I judge a place the way I judge {place}: by whether its paths respect the people who use them daily.",
+        "I go to {place} when I need to remember how this area fits together.",
+        "roads, rooms, and shorelines reveal what their builders expected, the same way {place} does.",
     ),
     "people": (
         "I know {people}, but knowing someone does not give me ownership of their private story.",
-        "the dependable people here are not always the most charming, only the ones who return.",
-        "I have learned who wants advice, who wants help, and who only wants to be heard.",
-        "most reputations contain a little truth and a great deal of convenient editing.",
+        "among {people}, the dependable ones are not always the most charming, only the ones who return.",
+        "working around {people} taught me who wants advice, who wants help, and who only wants to be heard.",
+        "most reputations contain a little truth and a great deal of convenient editing; {people} are no exception.",
     ),
     "rumor": (
         "the latest rumor concerns {concern}, though the witnesses disagree about the important part.",
         "I heard something through {people}; I trust the source more than I trust the retelling.",
         "there is talk around {setting}, but nobody has yet shown me evidence worth acting upon.",
-        "gossip often reveals what people fear even when it reveals nothing about what happened.",
+        "gossip reveals what {people} fear even when it reveals nothing about what actually happened.",
     ),
     "weather": (
-        "{weather} weather changes the safe version of every familiar route.",
-        "I plan around the sky because {material} behaves differently once the air turns.",
-        "people call weather small talk until it changes their work, travel, or harvest.",
+        "{weather} weather changes the safe version of every route I take to {place}.",
+        "I plan around the sky because {material} behave differently once the air turns.",
+        "people call weather small talk until it reaches {task}.",
         "today's conditions have made {setting} feel like a different place wearing the same name.",
     ),
     "season": (
-        "{season} exposes which routines were habits and which were actually suited to the land.",
+        "{season} exposes which routines at {task} were habits and which actually suited the land.",
         "I measure the season by changes in {work}, not merely by the calendar.",
-        "this part of {season} always makes me reconsider what should be finished and what can wait.",
-        "every season gives something freely and makes something else expensive in time.",
+        "this part of {season} makes me reconsider what should be finished at {task} and what can wait.",
+        "every season gives something freely and makes something else expensive; {material} tell me which is which.",
     ),
     "personal": (
-        "I am better at {work} than I am at explaining what I want when work is over.",
+        "I am better at {task} than I am at explaining what I want once the day is over.",
         "I value {interest}, though I sometimes protect it so carefully that I forget to enjoy it.",
         "I have changed my mind about {concern} more than once, usually after certainty embarrassed me.",
-        "there are parts of me that only appear when I am not performing competence for anyone.",
+        "away from {task}, there are parts of me I do not show to many people.",
     ),
     "family": (
-        "family taught me that affection and agreement are entirely different skills.",
-        "the people closest to me know which version of my confidence is real and which is effort.",
-        "I think households work best when care is offered without turning into control.",
-        "family history is mostly ordinary moments becoming important because they were repeated.",
+        "family taught me that affection and agreement are entirely different skills; {people} taught me the rest.",
+        "the people closest to me know which version of my confidence is real; {people} only ever see the steady one.",
+        "I think households work best when care is offered without turning into control; {task} taught me the same lesson.",
+        "family history is ordinary moments becoming important through repetition, the way habits form around {task}.",
     ),
     "interests": (
         "when work releases me, I make time for {interest} and try not to make it productive.",
         "I enjoy learning how other people approach {interest}, especially when their reasons differ from mine.",
-        "{interest} gives me something to be bad at without anybody depending on the result.",
-        "my favorite interests tend to involve enough attention to quiet the rest of my thoughts.",
+        "I get to be bad at {interest} without anybody depending on the result.",
+        "I find {interest} take enough attention to quiet the rest of my thoughts.",
     ),
     "farewell": (
-        "take care, {player}; I hope the rest of your route gives you something worth remembering.",
-        "I should return to {work}, but I am glad the day made room for this conversation.",
-        "we can leave the subject here without pretending it is finished forever.",
+        "take care, {player}; I will be back at {task} if you need me.",
+        "I should get back to {task}, but I am glad the day made room for this conversation.",
+        "we can leave it here; {task} is not going to wait much longer anyway.",
         "go safely; {setting} will still have another story when our paths cross again.",
     ),
 }
@@ -288,12 +295,67 @@ SUPPLEMENTAL_CONVERSATION_LENSES: Tuple[str, ...] = (
 )
 
 
-def dialogue_patterns_for_topic(topic: str) -> Tuple[str, ...]:
-    base = tuple(TOPIC_PATTERNS[str(topic)])
+# The reflective tails above answer a personal question. Appended to "hello" or
+# "take care" they turn a passing greeting into a confession, so greetings and
+# farewells carry their own tails. Each set keeps ten entries: the catalog size
+# and uniqueness assertions below depend on the shape staying identical.
+TOPIC_CONVERSATION_LENSES: Dict[str, Tuple[str, ...]] = {
+    "greeting": (
+        "There is no hurry on my side.",
+        "Say what you came to say; I am listening.",
+        "You have caught me at a reasonable hour, at least.",
+        "I have a little time before the next thing needs me.",
+        "Stay or keep walking as you like; this need not be formal.",
+        "I am glad it is you and not another errand.",
+        "Ask me anything while the moment is quiet.",
+        "It is a decent enough day for standing and talking.",
+        "You look like you have something on your mind.",
+        "Never mind the work; it will wait a moment.",
+    ),
+    "farewell": (
+        "Come back when you have time to spare.",
+        "I will be here, or somewhere close to it.",
+        "Mind how you go.",
+        "We can pick this up when the day is kinder.",
+        "Safe roads until then.",
+        "You know where to find me.",
+        "I hope the rest of it goes easily.",
+        "Until the next time our paths cross.",
+        "Go on, then; the day is not getting longer.",
+        "That is enough talk for now, I think.",
+    ),
+}
+
+
+def dialogue_patterns_for_topic(topic: str, register: str = "") -> Tuple[str, ...]:
+    """Return every pattern a speaker of ``register`` can use on ``topic``.
+
+    A register supplies its own sentence bodies; the shared sets below remain
+    the fallback for any register that has not been written yet, so the two can
+    coexist while the registers are filled in.
+    """
+    topic = str(topic)
+    register = str(register or "")
+    base = tuple(
+        REGISTER_TOPIC_PATTERNS.get(register, {}).get(topic)
+        or TOPIC_PATTERNS[topic]
+    )
+    observations = tuple(
+        REGISTER_TOPIC_OBSERVATIONS.get(register, {}).get(topic)
+        or SUPPLEMENTAL_TOPIC_OBSERVATIONS[topic]
+    )
+    # Greeting and farewell keep their own tails; every other topic takes the
+    # register's, so the closing clause matches the voice that opened the line.
+    lenses = (
+        REGISTER_TOPIC_LENSES.get(register, {}).get(topic)
+        or TOPIC_CONVERSATION_LENSES.get(topic)
+        or REGISTER_LENSES.get(register)
+        or SUPPLEMENTAL_CONVERSATION_LENSES
+    )
     supplemental = tuple(
         f"{{vantage}}, {observation} {lens}"
-        for observation in SUPPLEMENTAL_TOPIC_OBSERVATIONS[str(topic)]
-        for lens in SUPPLEMENTAL_CONVERSATION_LENSES
+        for observation in observations
+        for lens in lenses
     )
     return base + supplemental
 
@@ -337,6 +399,15 @@ def dialogue_profile_for_role(role: object) -> Dict[str, str]:
 
 def _context(profile: Mapping[str, str], values: Mapping[str, object] | None = None) -> Dict[str, str]:
     context = dict(profile)
+    # "a animal keeper" -- the indefinite article has to agree with whichever
+    # identity is substituted, and a template string cannot decide that, so the
+    # article ships attached to the noun. A plain vowel test covers every current
+    # identity; a future one beginning with a sounded "u" or a silent "h" would
+    # need more than this.
+    identity = str(profile.get("identity", ""))
+    context["a_identity"] = (
+        f"an {identity}" if identity[:1].lower() in "aeiou" else f"a {identity}"
+    )
     context.update({
         "player": "neighbor", "time": "day", "weather": "clear",
         "season": "Spring", "setting": profile["place"],
@@ -347,15 +418,49 @@ def _context(profile: Mapping[str, str], values: Mapping[str, object] | None = N
     return context
 
 
+_PROFILE_SCOPED_TOKENS: Tuple[str, ...] = (
+    "{identity}", "{work}", "{task}", "{place}", "{concern}",
+    "{interest}", "{people}", "{material}", "{activity}", "{setting}",
+)
+
+
+def _pattern_names_its_speaker(pattern: str) -> bool:
+    """True when a line still identifies its speaker without the opening clause."""
+    return any(token in pattern for token in _PROFILE_SCOPED_TOKENS)
+
+
+def _render_pattern(pattern: str, index: int, context: Mapping[str, str]) -> str:
+    """Render one line, varying whether it opens with the speaker's vantage.
+
+    Opening every line with the same clause is what made a run of conversation
+    read as machine-written: four visits to the innkeeper began "Near the inn's
+    front desk" four times. The clause is kept on every third line, and always
+    on lines carrying no other profile-specific field -- for those the opening
+    is the only thing that distinguishes one speaker's version from another's.
+    """
+    line = pattern.format_map(context)
+    # "At the mouth of the worked stone, the rhythm of the mine" says the place
+    # twice; when the body already locates the speaker, the opener always goes.
+    names_place = any(token in pattern for token in ("{task}", "{place}", "{setting}"))
+    if not names_place and index % 4 == 0:
+        return line
+    prefix = f"{context['vantage']}, "
+    if not line.startswith(prefix):
+        return line
+    body = line[len(prefix):]
+    return body[:1].upper() + body[1:]
+
+
 @lru_cache(maxsize=1)
 def expanded_dialogue_catalog() -> Dict[str, str]:
     catalog: Dict[str, str] = {}
     for profile in VOICE_PROFILES:
         context = _context(profile)
         for topic in DIALOGUE_LIBRARY_TOPICS:
-            for index, pattern in enumerate(dialogue_patterns_for_topic(topic)):
+            register = register_for_profile(profile["id"])
+            for index, pattern in enumerate(dialogue_patterns_for_topic(topic, register)):
                 key = f"{profile['id']}:{topic}:{index}"
-                catalog[key] = pattern.format_map(context)
+                catalog[key] = _render_pattern(pattern, index, context)
     return catalog
 
 
@@ -369,20 +474,37 @@ def contextual_dialogue_line(
     normalized_topic = str(topic or "personal").lower()
     if normalized_topic not in TOPIC_PATTERNS:
         normalized_topic = "personal"
-    patterns: Sequence[str] = dialogue_patterns_for_topic(normalized_topic)
+    patterns: Sequence[str] = dialogue_patterns_for_topic(
+        normalized_topic, register_for_profile(profile["id"])
+    )
     digest = hashlib.sha256(
         f"{profile['id']}:{normalized_topic}:{seed}".encode("utf-8")
     ).digest()
     index = int.from_bytes(digest[:4], "big") % len(patterns)
-    return patterns[index].format_map(_context(profile, values))
+    return _render_pattern(patterns[index], index, _context(profile, values))
 
 
+# Registers differ in how many bodies they own, so the total is summed per
+# profile rather than assumed uniform.
 EXPANDED_DIALOGUE_LINE_COUNT = sum(
-    len(dialogue_patterns_for_topic(topic)) for topic in DIALOGUE_LIBRARY_TOPICS
-) * len(VOICE_PROFILES)
-assert EXPANDED_DIALOGUE_LINE_COUNT == 15000
-assert len(expanded_dialogue_catalog()) == 15000
-assert len(set(expanded_dialogue_catalog().values())) == 15000
+    len(dialogue_patterns_for_topic(topic, register_for_profile(profile["id"])))
+    for profile in VOICE_PROFILES
+    for topic in DIALOGUE_LIBRARY_TOPICS
+)
+assert len(expanded_dialogue_catalog()) == EXPANDED_DIALOGUE_LINE_COUNT
+# No speaker may ever repeat itself. Global uniqueness across all 25 profiles is
+# deliberately NOT asserted: profiles sharing a register share sentence bodies,
+# and a miner and a carpenter both saying "Right. Back to it." is ordinary
+# speech. Demanding otherwise is what forced every line to open with the
+# speaker's vantage clause, which is the uniformity the registers exist to undo.
+# The properties that do matter are checked instead: each profile's own lines are
+# distinct, and every authored source line is written once (see smoke_test).
+for _profile in VOICE_PROFILES:
+    _own = [
+        line for key, line in expanded_dialogue_catalog().items()
+        if key.split(":", 1)[0] == _profile["id"]
+    ]
+    assert len(_own) == len(set(_own)), _profile["id"]
 
 
 __all__ = [

@@ -1168,7 +1168,12 @@ class ProceduralNpcDialogueMixin:
             item, minimum, maximum, purpose = rng.choice(REQUEST_POOLS.get(role, REQUEST_POOLS["Settler"]))
             quantity = rng.randint(int(minimum), int(maximum))
             title = f"Supplies for {given_name}"
-            offer_text = f"I'm short of {quantity_item_phrase(item, quantity)} {purpose}. Could you bring it to me?"
+            # The pronoun has to agree with the amount asked for: "3 Berries ...
+            # bring it to me" reads as a mistake in front of the player.
+            offer_text = (
+                f"I'm short of {quantity_item_phrase(item, quantity)} {purpose}. "
+                f"Could you bring {'it' if quantity == 1 else 'them'} to me?"
+            )
             objectives.append({
                 "id": "delivery", "kind": "item", "item": item,
                 "description": f"Bring {quantity_item_phrase(item, quantity)} to {given_name} in {settlement}.",

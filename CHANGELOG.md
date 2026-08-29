@@ -1,5 +1,36 @@
 # Changelog
 
+## 1.1.1
+
+- Expanded cooking into a persistent progression system with overall skill,
+  recipe mastery, preparation-time improvements, bonus servings, batch cooking,
+  flexible ingredient categories, eight new researchable meals, and a dedicated
+  cooking-progress screen.
+- Added powerful skill books to the deepest chambers of mega-dungeons. Their
+  permanent abilities and mastery ranks integrate with both tactical and
+  map-native combat.
+- Expanded randomized dungeon rewards with recoverable board-game furniture and
+  broader equipment, consumable, and valuable drops for appropriate chests,
+  elite enemies, and bosses.
+- Deepened NPC dialogue with more distinct registers, gender- and kinship-aware
+  language, better singular/plural agreement, grounded adventure reports, and a
+  rumor system in which inaccurate stories can spread and be corrected by the
+  player without exposing backend wording.
+- Rebalanced autonomous NPC adventuring so suitable residents can form viable
+  parties more consistently, while preserving their inclinations across saves.
+- Retuned advanced fishing behavior and pacing so every rod can catch every fish
+  while improved rods make difficult catches more manageable. Also refined
+  Mancala opponent play and minigame balance.
+- Fixed deeper dungeon floors inheriting explored coordinates and visibility
+  cache state from earlier floors. Fog, revealed rooms, and door-state work are
+  now scoped to the active floor while remaining persistent for return visits.
+- Fixed aquarium, family, dialogue, and progression edge cases found during the
+  final audit, including malformed contractions, pronoun mismatches, stale rumor
+  state, unnatural generated retellings, and save migration metadata.
+- Added extensive regression coverage for cooking, mega-dungeon skills, random
+  rewards, dialogue grammar and rumor correction, NPC progression, fishing,
+  minigames, and multi-floor dungeon performance.
+
 ## 1.1.0
 
 - Added persistent world opportunities that seed a new game with useful work and

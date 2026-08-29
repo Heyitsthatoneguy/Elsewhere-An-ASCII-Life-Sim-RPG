@@ -178,6 +178,36 @@ def tackle_weight_multiplier(
 
 
 FISHING_DRAG_LABELS = ("Loose", "Balanced", "Firm")
+# Fraction of rod reel power recovered per second in the rest window. This is
+# the main dial on fight length: a typical catch should land inside roughly
+# 20-45 seconds, so lowering it lengthens every fight at once.
+#
+# It also has to clear the fish's pull by more than the surge-to-rest ratio, or
+# a long run takes back more line than the rest that follows can recover. The
+# weakest pairing in the game -- the starter rod against a Powerful fish -- is
+# the one that sets this floor.
+FISHING_REST_RETRIEVAL = 0.72
+# How far a strong fish starts out. Powerful fish are long fights mainly because
+# they begin farther away, so this keeps a trophy feeling big without letting it
+# outstay that window. Scaling distance rather than retrieval matters: slowing a
+# strong fish's retrieval drives its net progress per cycle toward zero, and the
+# fight length then swings wildly on small changes.
+FISHING_POWER_REACH = 0.4
+# How much line a fight spans. Distance has to scale with phase length: at the
+# old ~1.5s cycles a fish sat close enough that a single rest could not reel it
+# home, but a 7s rest recovers several times that, and the fight ended inside
+# the first pause before the fish ever ran twice. This sets how many runs a
+# catch actually takes.
+FISHING_LINE_SCALE = 1.5
+# How much of the rod's reel power bites back while the fish is running. The
+# floor beside it means a surge always takes some line no matter what, so this
+# only sets how much a well-timed pull claws back.
+FISHING_SURGE_REEL_OPPOSE = 0.34
+# Guaranteed tension relief per second for giving line during a run. Without a
+# floor, a firm drag on a light line raises tension even when the player lets
+# go, which leaves no recovery path at the only drag that gains line -- and
+# makes the in-game advice to release during a surge untrue.
+FISHING_SLACK_RELIEF_FLOOR = 6.0
 
 
 def fish_fight_behavior(fish_name: str, fish_data: Dict[str, object]) -> str:
@@ -211,13 +241,24 @@ def fish_fight_profile(
 ) -> Dict[str, float]:
     """Build fight-only traits without reusing the fish's food recovery value."""
     behavior = fish_fight_behavior(fish_name, fish_data)
+    # Burst and rest set the fight's duty cycle. A surge can only take line, so
+    # the rest window is the player's entire opportunity to gain it back.
+    #
+    # Seconds per phase. At the ~1.5s these used to be, a quarter of the window
+    # was gone to human reaction time before the player could start reeling,
+    # which made the fight feel like mashing rather than playing. Each phase now
+    # lands somewhere in 3-6 seconds once jitter is applied.
+    #
+    # Size deliberately does NOT appear here. A big fish is not one with longer
+    # runs, it is one that has to be brought further, so it runs more times --
+    # size scales the line to recover instead (see build_fishing_fight_state).
     profiles = {
-        "Darting": {"power": 0.95, "burst": 1.35, "rest": 0.82, "speed": 1.28, "strain": 1.05},
-        "Powerful": {"power": 1.55, "burst": 1.78, "rest": 1.05, "speed": 1.18, "strain": 1.34},
-        "Stubborn": {"power": 1.24, "burst": 1.88, "rest": 1.12, "speed": 0.90, "strain": 1.18},
-        "Erratic": {"power": 1.12, "burst": 1.50, "rest": 0.78, "speed": 1.12, "strain": 1.24},
-        "Steady": {"power": 1.00, "burst": 1.62, "rest": 0.96, "speed": 1.00, "strain": 1.00},
-        "Inert": {"power": 0.32, "burst": 0.90, "rest": 1.35, "speed": 0.35, "strain": 0.45},
+        "Darting": {"power": 0.95, "burst": 4.20, "rest": 4.60, "speed": 1.28, "strain": 1.05},
+        "Powerful": {"power": 1.55, "burst": 4.90, "rest": 4.50, "speed": 1.18, "strain": 1.34},
+        "Stubborn": {"power": 1.24, "burst": 4.80, "rest": 4.70, "speed": 0.90, "strain": 1.18},
+        "Erratic": {"power": 1.12, "burst": 4.40, "rest": 4.30, "speed": 1.12, "strain": 1.24},
+        "Steady": {"power": 1.00, "burst": 4.60, "rest": 4.70, "speed": 1.00, "strain": 1.00},
+        "Inert": {"power": 0.32, "burst": 3.20, "rest": 5.40, "speed": 0.35, "strain": 0.45},
     }
     base = dict(profiles.get(behavior, profiles["Steady"]))
     price = max(1, int(fish_data.get("price", 1) or 1))
@@ -226,8 +267,12 @@ def fish_fight_profile(
     power = base["power"] * (0.82 + size_factor * 0.25 + rarity)
     return {
         "power": min(2.8, max(0.28, float(fish_data.get("fight_power", power) or power))),
-        "burst_seconds": max(0.75, float(fish_data.get("burst_seconds", base["burst"] * size_factor) or 1.4)),
-        "rest_seconds": max(0.55, float(fish_data.get("rest_seconds", base["rest"] / max(0.88, size_factor ** 0.35)) or 0.9)),
+        # Size stretches both halves of the cycle equally, so a big fish is a
+        # longer fight rather than a tighter one. Scaling only the run would
+        # quietly skew the duty cycle against the player on exactly the biggest
+        # fish, which is where a light rod can least afford it.
+        "burst_seconds": max(3.00, float(fish_data.get("burst_seconds", base["burst"]) or 4.60)),
+        "rest_seconds": max(3.00, float(fish_data.get("rest_seconds", base["rest"]) or 4.60)),
         "speed": base["speed"],
         "strain": base["strain"],
     }
@@ -305,12 +350,19 @@ def build_fishing_fight_state(
     burst_energy_max = 100.0 * size_factor
     burst_seconds = float(fight_profile["burst_seconds"]) * (1.0 - affinity * 0.03)
     rest_seconds = float(fight_profile["rest_seconds"]) * (1.0 + affinity * 0.06)
-    initial_burst_seconds = burst_seconds * rng.uniform(0.90, 1.10)
+    initial_burst_seconds = burst_seconds * rng.uniform(0.70, 1.30)
     depth_bonus = {"Shallow": 0.0, "Normal": 2.0, "Deep": 4.0}.get(str(depth), 1.0)
-    starting_distance = 6.5 + max(1, int(cast_distance)) * 0.65 + depth_bonus + fish_power * 1.7
+    # Size lands here rather than on phase length: a larger fish sits further out,
+    # so bringing it in costs more runs. The exponent widens a narrow size roll
+    # (0.88-1.16) into a visible spread in how many times the fish breaks away.
+    starting_distance = (
+        6.5 + max(1, int(cast_distance)) * 0.65 + depth_bonus + fish_power * FISHING_POWER_REACH
+    ) * FISHING_LINE_SCALE * (size_factor ** 2.5)
     rod_range = max(1, int(rod_data.get("range", 4) or 4))
     line_strength = max(0.7, float(rod_data.get("line_strength", 1.0) or 1.0))
-    spool_limit = starting_distance + 10.0 + rod_range * 1.35 + line_strength * 3.5
+    spool_limit = starting_distance + (
+        10.0 + rod_range * 1.35 + line_strength * 3.5
+    ) * FISHING_LINE_SCALE
     size_label = (
         "small" if size_factor < 0.95
         else "large" if size_factor > 1.08
@@ -423,8 +475,8 @@ def advance_fishing_fight(
     maneuver = str(state.get("maneuver", "run"))
     burst_energy = max(0.0, float(state.get("burst_energy", state.get("vigor", 100.0)) or 0.0))
     burst_energy_max = max(1.0, float(state.get("burst_energy_max", state.get("vigor_max", 100.0)) or 100.0))
-    burst_seconds = max(0.65, float(state.get("burst_seconds", 1.5) or 1.5))
-    rest_seconds = max(0.50, float(state.get("rest_seconds", 0.9) or 0.9))
+    burst_seconds = max(3.00, float(state.get("burst_seconds", 5.00) or 5.00))
+    rest_seconds = max(3.00, float(state.get("rest_seconds", 5.00) or 5.00))
     burst_drain_rate = max(1.0, float(state.get("burst_drain_rate", burst_energy_max / burst_seconds) or 1.0))
     burst_recovery_rate = max(1.0, float(state.get("burst_recovery_rate", burst_energy_max / rest_seconds) or 1.0))
     power = max(0.5, float(state.get("fish_power", 1.0) or 1.0))
@@ -457,28 +509,42 @@ def advance_fishing_fight(
         if reeling:
             # A live surge always gains at least a little line. Reeling opposes
             # the run, but cannot make an actively pulling fish glide shoreward.
-            line_take = max(power * 0.28, outward_speed - reel_power * reel_factors[drag] * 0.18)
+            line_take = max(
+                power * 0.28,
+                outward_speed - reel_power * reel_factors[drag] * FISHING_SURGE_REEL_OPPOSE,
+            )
             distance += dt * line_take
+            # Reeling into a run is a mistake, not an execution. The player needs
+            # long enough to read the SURGING warning and let go; only holding on
+            # well past that point should threaten the line.
             sustained_strain = (
-                max(0.0, continuous_reel_time - 0.65)
-                * (18.0 + power * 4.0)
+                max(0.0, continuous_reel_time - 1.25)
+                * (11.0 + power * 3.0)
                 / line_strength
             )
             tension += dt * (
-                ((20.0 + power * 18.0) * tension_factors[drag] * behavior_profile["strain"] / line_strength)
-                - control * 1.5
+                ((12.0 + power * 11.0) * tension_factors[drag] * behavior_profile["strain"] / line_strength)
+                - control * 2.5
                 + sustained_strain
             )
         else:
             distance += dt * outward_speed
-            tension += dt * (
-                drag * (3.0 + power * 2.0) * behavior_profile["strain"] / line_strength
-                - 10.0 * control
+            # Giving line always buys tension back. The drag still eats into how
+            # much relief you get, but never reverses it.
+            relief = (
+                10.0 * control
+                - drag * (3.0 + power * 2.0) * behavior_profile["strain"] / line_strength
             )
+            tension -= dt * max(FISHING_SLACK_RELIEF_FLOOR * control, relief)
+        # Giving line is the whole answer to a thrashing fish, so a released reel
+        # takes much less of the hit. Charging full strain regardless of what the
+        # player did made long fights unsurvivable no matter how well they were
+        # played, which capped how long a fight could safely run.
+        slack_relief = 1.0 if reeling else 0.45
         if maneuver == "shake":
-            tension += dt * (9.0 + power * 4.0) / line_strength
+            tension += dt * (9.0 + power * 4.0) * slack_relief / line_strength
         elif maneuver == "dive":
-            tension += dt * (3.0 + power * 2.5) / line_strength
+            tension += dt * (3.0 + power * 2.5) * slack_relief / line_strength
         swim_speed = (1.8 + power * 1.3) * behavior_profile["speed"] * (0.82 + energy_ratio * 0.18)
         fish_world_x += swim_speed * dt
         if maneuver == "dive":
@@ -491,7 +557,7 @@ def advance_fishing_fight(
         fish_direction = -1
         burst_energy = min(burst_energy_max, burst_energy + dt * burst_recovery_rate)
         if reeling:
-            distance -= dt * reel_power * reel_factors[drag] * 0.90
+            distance -= dt * reel_power * reel_factors[drag] * FISHING_REST_RETRIEVAL
             tension += dt * (2.8 * tension_factors[drag] / line_strength)
         else:
             tension -= dt * 18.0 * control
@@ -511,7 +577,7 @@ def advance_fishing_fight(
         state["mode_changed"] = True
         mode = "rest"
         burst_energy = 0.0
-        mode_time = rest_seconds * (0.86 + pulse * 0.28)
+        mode_time = rest_seconds * (0.70 + pulse * 0.60)
         burst_recovery_rate = burst_energy_max / max(0.1, mode_time)
         maneuver = "rest"
         maneuver_time = mode_time
@@ -521,7 +587,7 @@ def advance_fishing_fight(
         state["mode_changed"] = True
         mode = "surge"
         burst_energy = burst_energy_max
-        mode_time = burst_seconds * (0.90 + pulse * 0.20)
+        mode_time = burst_seconds * (0.70 + pulse * 0.60)
         burst_drain_rate = burst_energy_max / max(0.1, mode_time)
         maneuver = fishing_surge_maneuver(behavior, pulse)
         maneuver_time = min(mode_time, 0.45 + pulse * 0.48)

@@ -8,7 +8,8 @@ circular imports around FarmGame.
 """
 
 import random
-from typing import List, Optional
+import re
+from typing import Dict, List, Optional, Tuple
 
 from ascii_farmstead_support import C
 from ascii_farmstead_data import (
@@ -64,6 +65,8 @@ _ITEM_PLURAL_OVERRIDES.update({
     "Leaf": "Leaves",
     "Knife": "Knives",
     "Loaf": "Loaves",
+    # A mass noun keeps its form: "2 Winter Wheats" is not a quantity anyone says.
+    "Winter Wheat": "Winter Wheat",
 })
 
 
@@ -114,6 +117,83 @@ def item_name_for_quantity(item_name: object, quantity: object) -> str:
     return f"{head} {plural_word}" if separator else plural_word
 
 
+_PRONOUN_SETS = {
+    "female": ("she", "her", "her", "hers", "herself"),
+    "male": ("he", "him", "his", "his", "himself"),
+}
+_NEUTRAL_PRONOUNS = ("they", "them", "their", "theirs", "themselves")
+
+
+_KINSHIP_TERMS = {
+    "spouse": ("wife", "husband", "spouse"),
+    "child": ("daughter", "son", "child"),
+    "sibling": ("sister", "brother", "sibling"),
+    "parent": ("mother", "father", "parent"),
+    "grandparent": ("grandmother", "grandfather", "grandparent"),
+    "grandchild": ("granddaughter", "grandson", "grandchild"),
+    "nibling": ("niece", "nephew", "niece or nephew"),
+    "pibling": ("aunt", "uncle", "aunt or uncle"),
+}
+
+
+def kinship_term(relation: object, sex: object) -> str:
+    """Return the gendered word for a family relation, or the neutral fallback.
+
+    "My wife" reads as a person; "my spouse" reads as a form. Use this wherever a
+    specific known relative is being referred to. Keep the neutral word where no
+    such person exists yet ("I don't have a spouse") or where the text states a
+    rule rather than describing someone ("a pregnancy requires a spouse").
+    """
+    female, male, neutral = _KINSHIP_TERMS.get(
+        str(relation or "").strip().casefold(), ("", "", str(relation or "")),
+    )
+    folded = str(sex or "").strip().casefold()
+    if folded == "female" and female:
+        return female
+    if folded == "male" and male:
+        return male
+    return neutral
+
+
+def pronouns_for_sex(sex: object) -> Dict[str, str]:
+    """Return the pronoun set for a character whose sex the game knows.
+
+    Anything unset or unrecognised falls back to they/them, which is both
+    correct English and the right answer when the game genuinely does not know.
+
+    Callers must mind verb agreement when substituting: the neutral set takes
+    plural forms ("they were", "they have") while the gendered sets take
+    singular ("she was", "he has"). A template that hard-codes one or the other
+    cannot simply swap the pronoun.
+    """
+    forms = _PRONOUN_SETS.get(str(sex or "").strip().casefold(), _NEUTRAL_PRONOUNS)
+    subject, obj, possessive, possessive_pronoun, reflexive = forms
+    return {
+        "subject": subject,
+        "object": obj,
+        "possessive": possessive,
+        "possessive_pronoun": possessive_pronoun,
+        "reflexive": reflexive,
+        "plural_agreement": forms is _NEUTRAL_PRONOUNS,
+    }
+
+
+def clause_from_sentence(text: object) -> str:
+    """Return a standalone task line as a clause that can sit mid-sentence.
+
+    Objective descriptions are stored capitalised and full-stopped because they
+    are shown as their own row in a quest list ("Catch 3 freshwater fish."). The
+    same string is also spoken inside a longer sentence, where that shape reads
+    as "waiting for you to Catch 3 freshwater fish." Only the leading character
+    is lowered, so proper nouns further along ("Bring 2 Berries to Mara") keep
+    their capitals.
+    """
+    line = " ".join(str(text or "").split()).rstrip(".")
+    if not line:
+        return ""
+    return line[:1].lower() + line[1:]
+
+
 def quantity_item_phrase(item_name: object, quantity: object) -> str:
     """Format a stack count without changing its canonical inventory key."""
     try:
@@ -132,6 +212,171 @@ def naturalize_item_quantity_text(text: object, item_name: object, quantity: obj
     except (TypeError, ValueError):
         count = 0
     return rendered.replace(f"{count} {name}", quantity_item_phrase(name, count))
+
+
+# "'ve" is licensed only before a past participle, however many adverbs sit
+# between: "I've never quite finished" is fine, "I've a horse" is not. The
+# naturalizer contracts on sight, so this is the check that keeps its guards
+# honest -- it is what "do you've a few minutes to spare?" would trip today.
+_PAST_PARTICIPLES = (
+    "been|seen|gone|done|had|got|gotten|made|taken|given|come|found|said|told|known|become|"
+    "left|put|kept|heard|brought|thought|run|won|lost|met|read|written|spoken|eaten|forgotten|"
+    "chosen|driven|ridden|fallen|grown|drawn|flown|worn|torn|sworn|borne|shown|sown|blown|thrown|"
+    "begun|drunk|sung|sunk|swum|rung|hung|held|felt|meant|sent|spent|built|burnt|learnt|dealt|"
+    "slept|swept|wept|crept|leapt|dreamt|paid|laid|sold|stood|understood|withstood|caught|taught|"
+    "fought|sought|bought|beaten|bitten|hidden|risen|struck|stuck|swung|dug|clung|spun|stung|shot|"
+    "hit|cut|set|let|cost|quit|split|spread|shut|burst|"
+    r"\w+ed"
+)
+_PARTICIPLE_ADVERBS = (
+    r"(?:never|already|always|just|still|ever|recently|finally|nearly|almost|barely|hardly|only|"
+    r"often|since|long|yet|simply|actually|really|certainly|probably|apparently|clearly|mostly|"
+    r"largely|quietly|slowly|quickly|happily|gladly|not|no|about|quite|rather|fully|"
+    r"entirely|honestly|genuinely|somehow|definitely|surely|truly|well|once|scarcely|"
+    r"seldom|rarely|generally|usually|occasionally|thoroughly|properly|briefly|lately)\s+"
+)
+_LICENSED_VE = re.compile(
+    r"'ve\s+(?:%s)*(?:%s)\b" % (_PARTICIPLE_ADVERBS, _PAST_PARTICIPLES), re.I
+)
+_ANY_VE = re.compile(r"\b\w+'ve\b", re.I)
+
+
+def overcontraction_warnings(spoken: object) -> Tuple[str, ...]:
+    """Flag contractions English does not license, in already-naturalized text.
+
+    Pass the output of ``naturalize_spoken_dialogue``: the source line is always
+    written out in full, so a bad contraction can only appear after that pass.
+    """
+    text = str(spoken or "")
+    if "'ve" not in text and "'VE" not in text.upper():
+        return ()
+    found = []
+    for match in _ANY_VE.finditer(text):
+        tail = text[match.start():]
+        contraction_start = tail.lower().index("'ve")
+        if not _LICENSED_VE.match(tail[contraction_start:]):
+            found.append(
+                "%s: 've needs a past participle after it, not %r"
+                % (match.group(0), tail.split()[1] if len(tail.split()) > 1 else "")
+            )
+    return tuple(found)
+
+
+# An activity phrase is shown third-person ("Rowan is mending the fence") and
+# spoken first-person after a plain .replace("their ", "my "). Any other
+# third-person marker survives that swap and mixes the two persons, which is how
+# "protecting the deliberate change they added to my routine" happened. Written
+# without backslash escapes on purpose.
+_THIRD_PERSON_MARKERS = re.compile(
+    "(?<![a-zA-Z])(they|them|their|theirs|themselves)(?![a-zA-Z])", re.I
+)
+
+
+def first_person_warnings(activity: object) -> Tuple[str, ...]:
+    """Flag an activity phrase that cannot survive being spoken in first person.
+
+    The safe style is pronoun-free, which is what most authored activities
+    already are; "their" alone is fine because the swap handles it.
+    """
+    text = str(activity or "")
+    if not text:
+        return ()
+    spoken = text.replace("their ", "my ").replace("Their ", "My ")
+    return tuple(
+        "%s survives the first-person swap: 'I am %s'" % (match.group(1), spoken)
+        for match in _THIRD_PERSON_MARKERS.finditer(spoken)
+    )
+
+
+# Placeholders whose rendered value changes with a count: a joined name list is
+# singular with one child and plural with two, and a raw count is 1 as often as
+# it is 5.  A verb or noun written straight after one of these has to agree with
+# something the template cannot see, so each has an agreement key beside it that
+# the context builder fills using quantity_agreement.
+COUNT_VARYING_PLACEHOLDERS: Dict[str, Tuple[str, ...]] = {
+    "children": ("children_are", "children_have"),
+    "child_count": (),
+    "claim_count": ("claim_label",),
+    "property_count": ("property_label",),
+    "automation_count": ("automation_label",),
+}
+
+# Verbs that inflect for number. "will", "could" and the rest are absent on
+# purpose: a modal is safe after any subject.
+_NUMBER_INFLECTED = (
+    "is|are|was|were|has|have|does|do|need|needs|want|wants|keep|keeps|seem|seems|"
+    "live|lives|know|knows|make|makes|take|takes|come|comes|go|goes|look|looks|"
+    "feel|feels|stay|stays|grow|grows|get|gets|say|says|think|thinks|sound|sounds"
+)
+# After a preposition the placeholder is an object, not the subject, so the verb
+# that follows belongs to something else entirely: "Watching you with {children}
+# is the part..." is correct and must not be flagged.
+_OBJECT_MARKERS = (
+    "with|for|to|of|from|about|at|around|among|near|like|between|before|after|"
+    "since|than|as|on|in|by|without|beside|behind|toward|towards|into|onto"
+)
+_SUBJECT_VERB = re.compile(
+    r"(?<!\w)(?:(?P<prep>%s)\s+)?\{(?P<name>children)\}\s+(?P<verb>%s)\b"
+    % (_OBJECT_MARKERS, _NUMBER_INFLECTED)
+)
+_COUNT_NOUN = re.compile(
+    r"\{(?P<name>\w*count)\}\s+(?P<word>[a-z]\w*)"
+)
+
+
+def agreement_warnings(template: object) -> Tuple[str, ...]:
+    """Flag wording that cannot agree with a count the template cannot see.
+
+    Catches two shapes: a count-varying placeholder used as the subject of a
+    number-inflected verb ("{children} are"), and a raw count followed by a
+    hardcoded noun ("{property_count} properties", which reads "1 properties").
+    The fix for both is the agreement key named in the warning.
+    """
+    text = str(template or "")
+    if not text:
+        return ()
+    found = []
+    for match in _SUBJECT_VERB.finditer(text):
+        if match.group("prep"):
+            continue
+        keys = COUNT_VARYING_PLACEHOLDERS.get(match.group("name"), ())
+        found.append(
+            "{%s} %s: use an agreement key (%s) instead of a fixed verb"
+            % (match.group("name"), match.group("verb"), ", ".join(keys) or "none defined")
+        )
+    for match in _COUNT_NOUN.finditer(text):
+        word = match.group("word")
+        if re.fullmatch(_NUMBER_INFLECTED, word) or word in _OBJECT_MARKERS.split("|"):
+            continue        # a verb or preposition here, not a noun to pluralize
+        keys = COUNT_VARYING_PLACEHOLDERS.get(match.group("name"), ())
+        if not keys:
+            continue
+        # An adjective may sit between the count and its label, as in
+        # "{property_count} outside {property_label}"; the phrase is agreeing
+        # already, so only complain when no key appears before the sentence ends.
+        clause = text[match.start():]
+        stop = re.search(r"[.!?]", clause)
+        if stop is not None:
+            clause = clause[:stop.start()]
+        if any(("{" + key + "}") in clause for key in keys):
+            continue
+        found.append(
+            "{%s} %s: pluralize with %s so a count of 1 still reads"
+            % (match.group("name"), word, ", ".join(keys))
+        )
+    return tuple(found)
+
+
+def name_list(names: object) -> str:
+    """Join names the way a person says them: "A", "A and B", "A, B, and C"."""
+    items = [str(name).strip() for name in (names or ()) if str(name).strip()]
+    if not items:
+        return ""
+    if len(items) == 1:
+        return items[0]
+    if len(items) == 2:
+        return "%s and %s" % (items[0], items[1])
+    return "%s, and %s" % (", ".join(items[:-1]), items[-1])
 
 
 def quantity_agreement(quantity: object, singular: str, plural: Optional[str] = None) -> str:

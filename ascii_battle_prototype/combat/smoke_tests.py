@@ -272,6 +272,13 @@ def run_smoke_tests() -> None:
         class_game.skill_rank_map(hero, "Vanguard")[skill_name] = class_game.skill_max_rank(skill_name, "Vanguard")
     assert class_game.class_mastered(hero, "Vanguard")
     assert class_game.focus_class_for_hero(hero, "Mystic")
+    progress["book_skill_ranks"] = {"Meteor Break": 2}
+    progress["book_study_counts"] = {"Meteor Break": 2}
+    assert "Meteor Break" in class_game.known_skill_names(hero)
+    assert class_game.skill_rank(hero, "Meteor Break") == 2
+    meteor = class_game.skill_by_name("Meteor Break")
+    assert meteor is not None
+    assert class_game.effective_skill(hero, meteor).damage > meteor.damage
 
     log_game = Game()
     log_game.start_battle_from_main_menu()

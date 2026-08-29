@@ -1014,6 +1014,14 @@ class DynastyMixin:
         self.state.equipped_weapon = DEFAULT_COMBAT_WEAPON
         self.state.equipped_armor = DEFAULT_COMBAT_ARMOR
         self.state.equipped_accessory = DEFAULT_COMBAT_ACCESSORY
+        player_progress = self.state.combat_party_progress.setdefault("player", {})
+        if not isinstance(player_progress, dict):
+            player_progress = {}
+            self.state.combat_party_progress["player"] = player_progress
+        # Skill books remain on the family shelves, but every heir must study
+        # the preserved volumes before using their techniques.
+        player_progress["book_skill_ranks"] = {}
+        player_progress["book_study_counts"] = {}
 
     def advance_dynasty_kin_transition(self, years: int) -> Tuple[int, int]:
         moved = 0

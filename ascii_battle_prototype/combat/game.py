@@ -53,6 +53,7 @@ from .rendering import (
     wrap_plain,
 )
 from .results import BattleRequest, BattleResult, battle_result_from_game
+from ascii_farmstead_mega_skills import clean_mega_skill_ranks, mega_dungeon_skill_names
 from .skills import create_default_skills
 from .utils import clamp, manhattan, neighbors4
 
@@ -5773,6 +5774,15 @@ class Game:
             class_ranks = ranks.setdefault(class_name, {})
             if not isinstance(class_ranks, dict):
                 ranks[class_name] = dict(class_ranks)
+        progress["book_skill_ranks"] = clean_mega_skill_ranks(progress.get("book_skill_ranks"))
+        study_counts = progress.setdefault("book_study_counts", {})
+        if not isinstance(study_counts, dict):
+            study_counts = {}
+        progress["book_study_counts"] = {
+            str(name): max(0, int(count))
+            for name, count in study_counts.items()
+            if str(name) in set(mega_dungeon_skill_names()) and str(count).lstrip("-").isdigit()
+        }
 
         defaults = self.default_equipment_for_hero(hero.name)
         equipped = progress.setdefault("equipped_gear", dict(defaults))
@@ -8611,11 +8621,18 @@ class Game:
         return class_ranks
 
     def skill_max_rank(self, skill_name: str, class_name: Optional[str] = None) -> int:
+        if skill_name in set(mega_dungeon_skill_names()):
+            return 3
         if class_name and any(entry[0] == skill_name for entry in self.class_tree_for(class_name)):
             return 3
         return 1
 
     def skill_rank(self, hero: Unit, skill_name: str, class_name: Optional[str] = None) -> int:
+        book_rank = clean_mega_skill_ranks(
+            self.ensure_progress_entry(hero).get("book_skill_ranks")
+        ).get(skill_name, 0)
+        if book_rank:
+            return book_rank
         if class_name:
             if skill_name not in self.known_skill_names(hero):
                 return 0
@@ -8675,6 +8692,8 @@ class Game:
                 combo_heal_bonus += bonus * 2
         elif skill.effect == "restore_mp":
             mp_amount += bonus * 3
+        elif skill.effect == "guard":
+            mp_cost = max(0, mp_cost - bonus)
 
         subclass = self.hero_subclass(hero)
         lname = skill.name.lower()
@@ -8783,6 +8802,7 @@ class Game:
                 names.add(mastery)
         for subclass_skill in self.subclass_skill_names(self.hero_subclass(hero)):
             names.add(subclass_skill)
+        names.update(clean_mega_skill_ranks(self.ensure_progress_entry(hero).get("book_skill_ranks")))
         ordered = [skill.name for skill in self.skills if skill.name in names]
         return ordered or ["Spark Shot"]
 

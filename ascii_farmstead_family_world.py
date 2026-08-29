@@ -17,7 +17,7 @@ from ascii_farmstead_data import (
 )
 from ascii_farmstead_furniture import furniture_component_at, furniture_walkable_kind
 from ascii_farmstead_furniture_actions import furniture_action_id
-from ascii_farmstead_helpers import date_reached, format_date, quantity_agreement
+from ascii_farmstead_helpers import pronouns_for_sex, date_reached, format_date, quantity_agreement
 from ascii_farmstead_ui import MenuItem
 
 
@@ -492,7 +492,7 @@ class FamilyWorldMixin:
             return {"location": "MarketRowInterior", "label": "Market Row", "activity": "shopping and planning the household meal"}
         if mode == "Rest" and phase == "work_afternoon":
             return {"location": "HouseInterior", "label": home, "activity": "protecting an unhurried afternoon at home"}
-        return {"location": "Original", "label": "their former workplace", "activity": "continuing the work and relationships they had before marriage"}
+        return {"location": "Original", "label": "their former workplace", "activity": "continuing the work and relationships that predate the marriage"}
 
     def town_npc_schedule_raw_value(self, npc: Dict[str, object]):
         if str(npc.get("id", "")) != str(getattr(self.state, "spouse_npc_id", "")) or not self.spouse_lives_on_farm():
@@ -1277,17 +1277,21 @@ class FamilyWorldMixin:
                 "Musical": "finds a rhythm in the road, water, and voices",
                 "Tinkering": "studies how every tool, gate, and fixture was made",
             }
-            personality_notes.append(f"- {child.get('name')}: {reactions.get(trait, 'finds their own reason to remember the day') }.")
+            kid = pronouns_for_sex(child.get("sex"))
+            default_note = f"finds {kid['possessive']} own reason to remember the day"
+            personality_notes.append(
+                f"- {child.get('name')}: {reactions.get(trait, default_note)}."
+            )
         rows = [
             outing_type,
             "",
             f"Destination: {data['destination']}",
             f"Conditions: {season}, {weather.lower()}",
-            f"Participants: {', '.join(names) if names else 'you and your spouse'}",
+            f"Participants: {', '.join(names) if names else f'you and your {self.player_spouse_term()}'}",
             "",
             "The outing gives everyone time together away from the household routine.",
         ]
-        rows.extend(personality_notes or ["- You and your spouse have time to talk without a chore waiting in the next room."])
+        rows.extend(personality_notes or [f"- You and your {self.player_spouse_term()} have time to talk without a chore waiting in the next room."])
         rows.extend(["", "What everyone notices becomes part of the family record and the children's upbringing."])
         return rows
 

@@ -19,7 +19,7 @@ from ascii_farmstead_data import (
     WILDERNESS_FORAGE_DATA,
     WILDERNESS_FORAGE_SYMBOLS,
 )
-from ascii_farmstead_helpers import forage_item_for_symbol, quantity_item_phrase
+from ascii_farmstead_helpers import clause_from_sentence, forage_item_for_symbol, quantity_item_phrase
 from ascii_farmstead_wilderness_generation import BIOME_PLANT_SYMBOLS, wilderness_tile_semantics
 
 
@@ -592,7 +592,9 @@ class WorldOpportunityMixin:
             "type": "world_opportunity", "id": str(opportunity["id"]),
             "quest_id": str(opportunity["quest_id"]), "quest_record": quest,
             "title": str(opportunity.get("title", "Local Work")),
-            "summary": str(objective.get("description", opportunity.get("description", "help with the work"))).rstrip("."),
+            "summary": clause_from_sentence(
+                objective.get("description", opportunity.get("description", "help with the work"))
+            ),
             "record": opportunity, "prompt": str(opportunity.get("description", "")),
             "promise": status == "offered", "deadline": "until someone completes it",
             "ready": status == "ready",
@@ -990,25 +992,39 @@ class WorldOpportunityMixin:
             elif action.value == "track":
                 self.track_quest(str(opportunity.get("quest_id", "")))
 
+    # Bumped when the thresholds below change, so saves carrying inclinations
+    # rolled under the old spread get re-derived once instead of keeping a town
+    # that can never field a party.
+    ADVENTURE_INCLINATION_REVISION = 2
+
     def npc_adventure_inclination(self, npc: Dict[str, object]) -> str:
         record = self.npc_progression_record(npc)
         existing = str(record.get("adventure_inclination", ""))
-        if existing:
+        if existing and int(record.get("inclination_revision", 1) or 1) >= self.ADVENTURE_INCLINATION_REVISION:
             return existing
         role = str(npc.get("role", ""))
         score = self.world_opportunity_stable_number(self.npc_adventure_identity(npc)) % 100
         if role in {"Traveler", "Courier", "Sheriff", "Deputy", "Miner", "Hunter", "Wayfarer"}:
             score += 7
+        # The original spread put "Professional Adventurer" above 102 on a 0-99
+        # roll, so it was reachable only through the role bonus, and leaders
+        # needed 94+. A measured town produced exactly one eligible leader out of
+        # eleven, which meant every posting any NPC ever took went to the same
+        # person and a party could never be more than one deep. The score is
+        # uniform over 0-99, so a 70 cut yields ~3.4 potential leaders in a town
+        # of eleven and ~5 who will join someone else's party, while a
+        # professional stays roughly one per town.
         inclination = "Homebound"
-        if score >= 102:
+        if score >= 92:
             inclination = "Professional Adventurer"
-        elif score >= 94:
+        elif score >= 70:
             inclination = "Adventurous"
-        elif score >= 80:
+        elif score >= 55:
             inclination = "Occasional Traveler"
-        elif score >= 58:
+        elif score >= 30:
             inclination = "Local Helper"
         record["adventure_inclination"] = inclination
+        record["inclination_revision"] = self.ADVENTURE_INCLINATION_REVISION
         return inclination
 
     def npc_can_lead_world_opportunity(self, npc: Dict[str, object]) -> bool:
@@ -1737,7 +1753,10 @@ class WorldOpportunityMixin:
         opportunity["resolved_by"] = "npc_party"
         opportunity["resolved_by_name"] = str(party.get("leader_name", "A resident"))
         opportunity["resolved_day"] = self.world_opportunity_day()
-        outcome = f"{party.get('leader_name', 'A resident')}'s party physically completed {opportunity.get('title', 'the posted work')}."
+        outcome = (
+            f"{party.get('leader_name', 'A resident')}'s party completed "
+            f"{opportunity.get('title', 'the posted work')} and returned."
+        )
         opportunity["history"] = (list(opportunity.get("history", [])) + [outcome])[-16:]
         party["history"] = (list(party.get("history", [])) + [outcome])[-20:]
         if bool(opportunity.get("linked_existing_quest", False)):
@@ -1771,7 +1790,7 @@ class WorldOpportunityMixin:
             record = self.npc_progression_record(actor)
             record["journeys"] = int(record.get("journeys", 0)) + 1
             record["earnings"] = int(record.get("earnings", 0)) + int(opportunity.get("reward_money", 0)) // max(1, len(party.get("member_ids", [])))
-            record["last_outcome"] = f"completed {opportunity.get('title', 'posted work')} with real fieldwork"
+            record["last_outcome"] = f"finished {opportunity.get('title', 'the posted work')}"
             record["history"] = (list(record.get("history", [])) + [outcome])[-8:]
             self.award_npc_adventure_xp(actor, 25 + 5 * len(party.get("member_ids", [])))
         state = self.ensure_world_opportunity_state()
@@ -2087,11 +2106,24 @@ class WorldOpportunityMixin:
         party = self.npc_world_opportunity_assignment(str(npc.get("id", "")))
         if party:
             opportunity = self.ensure_world_opportunity_state()["opportunities"].get(str(party.get("opportunity_id", "")), {})
-            return f'"I took {opportunity.get("title", "a posted job")}. Right now, we are {str(party.get("activity", "working on it")).lower()}."'
+            # Activity strings carry proper nouns ("traveling toward Mayor Ruth",
+            # "fishing from Miller's Pond"), so lowering the whole string flattens
+            # names. Only the opening word needs it, and most already start with a
+            # gerund.
+            activity = " ".join(str(party.get("activity", "working on it")).split())
+            activity = activity[:1].lower() + activity[1:]
+            return f'"I took {opportunity.get("title", "a posted job")}. Right now, we are {activity}."'
         record = self.npc_progression_record(npc)
-        history = list(record.get("history", []) or [])
-        if history:
-            return f'"{history[-1]} It was real work, not just something that happened while I was offscreen."'
+        # record["history"] holds journal entries -- "Ashford Crossing: cleared a
+        # stretch of road." or "Cora's party completed X." Spoken verbatim those
+        # read as a log being recited, and the second has the speaker referring
+        # to themselves in the third person. last_outcome is the field written
+        # for speech, so use that and nothing else.
+        outcome = " ".join(str(record.get("last_outcome", "") or "").split())
+        if outcome:
+            if hasattr(self, "npc_adventure_spoken_outcome"):
+                outcome = self.npc_adventure_spoken_outcome(outcome)
+            return f'"Last time I went out, I {outcome}."'
         return ""
 
     def world_opportunity_journal_lines(self) -> List[str]:

@@ -572,6 +572,7 @@ def add_random_reward_items(
     gear_chance: float,
     consumable_chance: float,
     valuable_chance: float,
+    game_table_chance: float = 0.0,
     quality_bonus: int = 0,
     rng: Optional[random.Random] = None,
 ) -> Dict[str, int]:
@@ -602,4 +603,10 @@ def add_random_reward_items(
     if rng.random() < max(0.0, min(1.0, float(valuable_chance))):
         item_name = rng.choice(RANDOM_VALUABLES)
         rewards[item_name] = rewards.get(item_name, 0) + 1
+    if float(game_table_chance) > 0.0:
+        from ascii_farmstead_game_tables import rare_recovered_game_table
+
+        table_name = rare_recovered_game_table(source_key, game_table_chance)
+        if table_name:
+            rewards[table_name] = rewards.get(table_name, 0) + 1
     return {name: qty for name, qty in rewards.items() if qty > 0}

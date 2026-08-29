@@ -10,9 +10,27 @@ future crafting, cooking, shops, and combat reward systems.
 import random
 from typing import Dict, Mapping
 
-from ascii_farmstead_data import CROP_DATA, FISH_DATA, FISH_ITEMS, QUALITY_ORDER
+from ascii_farmstead_data import CROP_DATA, FISH_DATA, FISH_ITEMS, ITEM_SELL_PRICES, QUALITY_ORDER
 from ascii_farmstead_helpers import fish_sell_price, quantity_item_phrase
-from ascii_farmstead_state import quality_item_name
+from ascii_farmstead_state import parse_quality_item, quality_item_name
+
+
+INGREDIENT_GROUPS = {
+    "Any Vegetable": (
+        "Radish", "Turnip", "Lettuce", "Carrot", "Potato", "Pea", "Cabbage",
+        "Tomato", "Corn", "Pepper", "Cucumber", "Pumpkin", "Yam", "Eggplant",
+        "Beet", "Onion", "Garlic", "Artichoke", "Kale", "Parsnip", "Leek",
+        "Snow Pea", "Frostroot", "Wild Carrot", "Spring Onion", "Watercress",
+    ),
+    "Any Fruit": (
+        "Salmonberry", "Wild Berries", "Spice Berry", "Blackberry", "Wild Apple",
+        "Berries", "Strawberry", "Blueberry", "Cranberry", "Grape", "Watermelon",
+        "Melon", "Crystal Berry", "Ancient Fruit",
+    ),
+    "Any Egg": ("Bird Egg", "Duck Egg", "Large Bird Egg", "Large Duck Egg"),
+    "Any Milk": ("Milk", "Large Milk"),
+    "Any Mushroom": ("Mushrooms", "Morel", "Cave Mushroom"),
+}
 
 
 class CapacityInventory(dict):
@@ -142,9 +160,33 @@ def inventory_crop_quantity(inventory: Dict[str, int], crop_name: str) -> int:
 def inventory_fish_quantity(inventory: Dict[str, int]) -> int:
     return sum(qty for item_name, qty in inventory.items() if item_name in FISH_ITEMS and qty > 0 and not FISH_DATA[item_name].get("junk", False))
 
+
+def ingredient_accepts_item(ingredient_name: str, item_name: str) -> bool:
+    ingredient = str(ingredient_name)
+    item = str(item_name)
+    crop_name, _quality = parse_quality_item(item)
+    base_name = str(crop_name or item)
+    if ingredient == "Any Fish":
+        return item in FISH_DATA and not FISH_DATA[item].get("junk", False)
+    if ingredient in INGREDIENT_GROUPS:
+        return base_name in INGREDIENT_GROUPS[ingredient]
+    return item == ingredient or bool(crop_name and crop_name == ingredient)
+
+
+def _ingredient_member_quantity(inventory: Dict[str, int], item_name: str) -> int:
+    if item_name in CROP_DATA:
+        return inventory_crop_quantity(inventory, item_name)
+    return max(0, int(inventory.get(item_name, 0) or 0))
+
+
 def inventory_ingredient_quantity(inventory: Dict[str, int], ingredient_name: str) -> int:
     if ingredient_name == "Any Fish":
         return inventory_fish_quantity(inventory)
+    if ingredient_name in INGREDIENT_GROUPS:
+        return sum(
+            _ingredient_member_quantity(inventory, item_name)
+            for item_name in INGREDIENT_GROUPS[ingredient_name]
+        )
     if ingredient_name in CROP_DATA:
         return inventory_crop_quantity(inventory, ingredient_name)
     return inventory.get(ingredient_name, 0)
@@ -179,9 +221,32 @@ def consume_fish_ingredient(inventory: Dict[str, int], qty: int) -> int:
             break
     return consumed
 
+
+def consume_group_ingredient(inventory: Dict[str, int], ingredient_name: str, qty: int) -> int:
+    consumed = 0
+    members = sorted(
+        INGREDIENT_GROUPS.get(ingredient_name, ()),
+        key=lambda name: int(CROP_DATA.get(name, {}).get("sell_price", ITEM_SELL_PRICES.get(name, 0)) or 0),
+    )
+    for item_name in members:
+        needed = max(0, int(qty) - consumed)
+        if needed <= 0:
+            break
+        if item_name in CROP_DATA:
+            consumed += consume_crop_ingredient(inventory, item_name, needed)
+        else:
+            available = max(0, int(inventory.get(item_name, 0) or 0))
+            take = min(available, needed)
+            inventory[item_name] = available - take
+            consumed += take
+    return consumed
+
+
 def consume_ingredient(inventory: Dict[str, int], ingredient_name: str, qty: int) -> int:
     if ingredient_name == "Any Fish":
         return consume_fish_ingredient(inventory, qty)
+    if ingredient_name in INGREDIENT_GROUPS:
+        return consume_group_ingredient(inventory, ingredient_name, qty)
     if ingredient_name in CROP_DATA:
         return consume_crop_ingredient(inventory, ingredient_name, qty)
     available = inventory.get(ingredient_name, 0)
@@ -235,9 +300,12 @@ def roll_wood_drops(count: int = 1, axe_level: int = 1) -> Dict[str, int]:
 __all__ = [
     'inventory_crop_quantity',
     'inventory_fish_quantity',
+    'INGREDIENT_GROUPS',
+    'ingredient_accepts_item',
     'inventory_ingredient_quantity',
     'consume_crop_ingredient',
     'consume_fish_ingredient',
+    'consume_group_ingredient',
     'consume_ingredient',
     'add_inventory_items',
     'format_drops',

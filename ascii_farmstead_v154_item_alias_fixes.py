@@ -196,12 +196,19 @@ from ascii_farmstead_inventory import (
     consume_fish_ingredient,
     consume_ingredient,
     format_drops,
+    ingredient_accepts_item,
     inventory_crop_quantity,
     inventory_fish_quantity,
     inventory_ingredient_quantity,
     roll_stone_drops,
     roll_weed_drops,
     roll_wood_drops,
+)
+from ascii_farmstead_cooking import (
+    cooking_level_profile,
+    cooking_time_minutes,
+    mastery_bonus_servings,
+    recipe_mastery_profile,
 )
 from ascii_farmstead_combat import (
     COMBAT_EQUIPMENT_SLOTS,
@@ -385,6 +392,14 @@ from ascii_farmstead_custom_extended import (
 )
 from ascii_farmstead_dungeon_combat import DungeonRoguelikeCombatMixin
 from ascii_farmstead_world_magic import WorldMagicMixin
+from ascii_farmstead_mega_skills import (
+    MEGA_DUNGEON_SKILL_BOOKS,
+    clean_mega_skill_ranks,
+    mega_dungeon_book_for_theme,
+    mega_dungeon_book_record,
+    mega_dungeon_skill_catalog,
+    mega_dungeon_skill_names,
+)
 from ascii_battle_prototype.combat.classes import class_defs as tactical_class_defs
 from ascii_battle_prototype.combat.equipment import equipment_defs as tactical_equipment_defs
 from ascii_battle_prototype.combat.loot import loot_profile_for_enemy as tactical_loot_profile_for_enemy
@@ -12193,7 +12208,26 @@ class FarmGame(
             items["Relic Fragment"] = items.get("Relic Fragment", 0) + 2
             items["Ancient Cog"] = items.get("Ancient Cog", 0) + 1
             items["Ancient Seed"] = items.get("Ancient Seed", 0) + 1
+            if floor >= max_floor:
+                skill_book = self.mega_dungeon_skill_book_reward(dungeon_key)
+                if skill_book:
+                    items[skill_book] = items.get(skill_book, 0) + 1
         return money, items
+
+    def mega_dungeon_skill_book_reward(self, dungeon_key: str) -> str:
+        """Choose and preserve one deterministic capstone book per mega-dungeon."""
+        if not self.dungeon_is_mega(dungeon_key):
+            return ""
+        record = self.dungeon_record(dungeon_key)
+        existing = str(record.get("skill_book_reward", "") or "")
+        if existing in MEGA_DUNGEON_SKILL_BOOKS:
+            return existing
+        cx, cy, ex, ey = self.dungeon_context_from_key(dungeon_key)
+        selector = int(self.wilderness_hash01(cx * 1879 + ex, cy * 1877 + ey, 26171) * 1_000_000)
+        theme = self.dungeon_theme_for_key(dungeon_key)
+        book_name = mega_dungeon_book_for_theme(theme, selector)
+        record["skill_book_reward"] = book_name
+        return book_name
 
     def apply_wilderness_dungeon_battle_result(self, enemy: Dict[str, object], result: object):
         outcome = combat_result_outcome(result)
@@ -12403,6 +12437,7 @@ class FarmGame(
             gear_chance=min(0.42, 0.16 + depth * 0.008),
             consumable_chance=0.58,
             valuable_chance=0.72,
+            game_table_chance=min(0.075, 0.025 + depth * 0.0015),
             quality_bonus=min(4, 1 + depth // 10),
             rng=rng,
         )
@@ -28989,6 +29024,9 @@ class FarmGame(
                     "- Crafting recipes consume exact materials and create infrastructure, machines, supplies, or furniture.",
                     "- Research, restoration, progression, and discoveries unlock additional recipes.",
                     "- Cooking requires kitchen access and turns crops, fish, and forage into stronger recovery items.",
+                    "- Flexible recipes accept ingredient groups such as any vegetable, fruit, egg, milk, mushroom, or proper fish. The kitchen uses lower-value matching ingredients first.",
+                    "- Cooking one, three, or up to ten batches at once reduces menu repetition and prepares later batches more efficiently.",
+                    "- Every prepared batch builds overall cooking skill and mastery of that recipe. Skill reduces preparation time; mastery extends meal buffs and periodically creates bonus servings.",
                     "- Food restores field stamina and may also restore tactical HP or focus.",
                     "- Cooked meals can grant temporary action discounts that reduce later stamina costs.",
                     "- Craft or buy an Alchemy Table, place it in a player home, then use Z/Enter to brew property-driven mixtures.",
@@ -29069,6 +29107,7 @@ class FarmGame(
                     "- Tanks use Elsewhere's caught fish. Freshwater, saltwater, and underground species need compatible habitats; empty tanks can be reconfigured with H.",
                     "- Fish become nameable individuals with age, personality, movement behavior, and occasional cosmetic offspring when compatible adults are well cared for.",
                     "- Better-supported and familiar cooking stations prepare food faster and can produce a bonus serving.",
+                    "- The Cooking Progress page records your overall level and mastery of every recipe you have prepared.",
                     "- Owned beds can be assigned to a spouse or child. Household routines respect assignments and family use builds familiarity.",
                     "- Tables in owned homes can display a real inventory item. Examine displays for daily focus or return the item at any time.",
                     "- Valuable household displays add a bounded comfort bonus. Stocked aquariums and occupied displays must be emptied before storage, so contents cannot be lost.",
@@ -29699,7 +29738,11 @@ class FarmGame(
                     "- Dungeons contain enemies, chests, traps, inscriptions, and a final chamber.",
                     "- Rare mega-dungeons run for 10-15 floors, change strata every three floors, and guard each deeper section with an elite enemy.",
                     "- Mega-dungeon refuge floors are safe checkpoints. Once reached, later expeditions resume from the deepest secured refuge.",
-                    "- Defeating the boss clears the site and pays dungeon-specific rewards.",
+                    "- Defeating a mega-dungeon's final boss awards a themed skill book containing a permanent late-game ability.",
+                    "- Use the book from inventory to learn its ability and preserve the volume in the family skill library.",
+                    "- Extra copies raise that ability as high as rank 3. Future heirs inherit the library and may study its preserved copies.",
+                    "- The family skill library is available under Adventure > Skills for the player character.",
+                    "- Defeating any dungeon boss clears the site and pays dungeon-specific rewards.",
                     "- Progress should not depend on a random impassable layout; if a ruin looks dangerous, prepare and return.",
                 ],
             },
@@ -43968,26 +44011,84 @@ class FarmGame(
                     return True
         return False
 
-    def can_cook_recipe(self, recipe_name: str) -> Tuple[bool, str]:
+    def cooking_recipe_count(self, recipe_name: str) -> int:
+        counts = getattr(self.state, "cooking_recipe_counts", {})
+        if not isinstance(counts, dict):
+            return 0
+        return max(0, int(counts.get(str(recipe_name), 0) or 0))
+
+    def cooking_progress_lines(self) -> List[str]:
+        overall = cooking_level_profile(getattr(self.state, "cooking_total_batches", 0))
+        rows = [
+            "COOKING PROGRESS",
+            "",
+            f"Level: {overall['label']}",
+            f"Batches prepared: {overall['total']}",
+            f"Preparation-time reduction: {overall['time_reduction']} minutes per batch",
+        ]
+        if overall["next_count"] is not None:
+            rows.append(f"Next level: {int(overall['next_count']) - int(overall['total'])} more batches")
+        else:
+            rows.append("Highest cooking level reached.")
+        practiced = [
+            (self.cooking_recipe_count(name), name)
+            for name in self.known_recipe_names()
+            if self.cooking_recipe_count(name) > 0
+        ]
+        rows.extend(["", "Recipe mastery:"])
+        if not practiced:
+            rows.append("- Cook a known recipe to begin mastering it.")
+        else:
+            for count, recipe_name in sorted(practiced, key=lambda pair: (-pair[0], pair[1])):
+                mastery = recipe_mastery_profile(count)
+                progress = (
+                    "mastered"
+                    if mastery["next_count"] is None
+                    else f"{int(mastery['next_count']) - count} to next tier"
+                )
+                rows.append(f"- {recipe_name}: {mastery['label']} ({count}; {progress})")
+        rows.extend([
+            "",
+            "Familiar recipes provide longer meal buffs. Skilled and mastered",
+            "recipes periodically produce bonus servings.",
+        ])
+        return rows
+
+    def max_cookable_batches(self, recipe_name: str, limit: int = 99) -> int:
+        recipe = COOKING_RECIPES.get(recipe_name, {})
+        ingredients = recipe.get("ingredients", {})
+        if not ingredients:
+            return 0
+        possible = min(
+            inventory_ingredient_quantity(self.state.inventory, ingredient_name) // max(1, int(qty))
+            for ingredient_name, qty in ingredients.items()
+        )
+        return max(0, min(max(1, int(limit)), int(possible)))
+
+    def can_cook_recipe(self, recipe_name: str, batches: int = 1) -> Tuple[bool, str]:
         if recipe_name not in self.known_recipe_names():
             return False, "unknown recipe"
         recipe = COOKING_RECIPES[recipe_name]
         if recipe.get("requires_kitchen", True) and not self.has_kitchen_access():
             return False, "needs kitchen"
+        batch_count = max(1, int(batches or 1))
         for ingredient_name, qty in recipe.get("ingredients", {}).items():
             have = inventory_ingredient_quantity(self.state.inventory, ingredient_name)
-            if have < qty:
-                return False, f"need {ingredient_name} x{qty - have}"
+            needed = int(qty) * batch_count
+            if have < needed:
+                return False, f"need {ingredient_name} x{needed - have}"
         return True, "ok"
 
 
-    def recipe_ingredient_lines(self, recipe_name: str) -> List[str]:
+    def recipe_ingredient_lines(self, recipe_name: str, batches: int = 1) -> List[str]:
         recipe = COOKING_RECIPES[recipe_name]
         lines = []
+        batch_count = max(1, int(batches or 1))
         for ingredient_name, qty in recipe.get("ingredients", {}).items():
             have = inventory_ingredient_quantity(self.state.inventory, ingredient_name)
-            status = "OK" if have >= qty else f"need {qty - have}"
-            lines.append(f"- {ingredient_name}: {have}/{qty} {status}")
+            needed = int(qty) * batch_count
+            status = "OK" if have >= needed else f"need {needed - have}"
+            lines.append(f"- {ingredient_name}: {have}/{needed} {status}")
         return lines
 
     def show_cooking_recipe_details(self, recipe_name: str):
@@ -43997,6 +44098,8 @@ class FarmGame(
         recipe = COOKING_RECIPES[recipe_name]
         output_name, output_qty = recipe["output"]
         stamina = food_stamina_value(output_name)
+        mastery = recipe_mastery_profile(self.cooking_recipe_count(recipe_name))
+        overall = cooking_level_profile(getattr(self.state, "cooking_total_batches", 0))
         rows = [
             recipe_name,
             "",
@@ -44005,6 +44108,8 @@ class FarmGame(
             f"Output: {quantity_item_phrase(output_name, output_qty)}",
             f"Restores: {stamina} stamina",
             f"Kitchen required: {'yes' if recipe.get('requires_kitchen', True) else 'no'}",
+            f"Recipe mastery: {mastery['label']} ({mastery['count']} batches)",
+            f"Cooking level: {overall['label']}",
             "",
             "Ingredients:",
         ]
@@ -44015,15 +44120,17 @@ class FarmGame(
             rows.extend(buff_lines)
         self.vertical_panel_view("Recipe Details", rows, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
 
-    def cook_recipe(self, recipe_name: str) -> bool:
-        ok, reason = self.can_cook_recipe(recipe_name)
+    def cook_recipe(self, recipe_name: str, batches: int = 1) -> bool:
+        batch_count = max(1, min(10, int(batches or 1)))
+        ok, reason = self.can_cook_recipe(recipe_name, batch_count)
         if not ok:
             self.set_message(f"Cannot cook {recipe_name}: {reason}.")
             return False
         recipe = COOKING_RECIPES[recipe_name]
         for ingredient_name, qty in recipe.get("ingredients", {}).items():
-            consumed = consume_ingredient(self.state.inventory, ingredient_name, qty)
-            if consumed < qty:
+            needed = int(qty) * batch_count
+            consumed = consume_ingredient(self.state.inventory, ingredient_name, needed)
+            if consumed < needed:
                 self.set_message(f"Missing {ingredient_name}.")
                 return False
         output_name, output_qty = recipe["output"]
@@ -44032,37 +44139,80 @@ class FarmGame(
             max(0, int(cooking_context.get("bonus", 0) or 0))
             if isinstance(cooking_context, dict) else 0
         )
-        bonus_output = 1 if furniture_bonus >= 4 else 0
-        produced = int(output_qty) + bonus_output
+        previous_count = self.cooking_recipe_count(recipe_name)
+        previous_mastery = recipe_mastery_profile(previous_count)
+        mastery_output = mastery_bonus_servings(previous_count, batch_count)
+        station_output = 1 if furniture_bonus >= 4 else 0
+        bonus_output = mastery_output + station_output
+        produced = int(output_qty) * batch_count + bonus_output
         self.state.inventory[output_name] = self.state.inventory.get(output_name, 0) + produced
-        time_cost = max(5, 15 - furniture_bonus) if isinstance(cooking_context, dict) else 0
-        if time_cost:
-            self.advance_time(time_cost)
+        total_before = max(0, int(getattr(self.state, "cooking_total_batches", 0) or 0))
+        time_cost = cooking_time_minutes(
+            batch_count,
+            kitchen_required=bool(recipe.get("requires_kitchen", True)),
+            station_bonus=furniture_bonus,
+            total_batches=total_before,
+        )
+        self.advance_time(time_cost)
+        if not isinstance(getattr(self.state, "cooking_recipe_counts", None), dict):
+            self.state.cooking_recipe_counts = {}
+        self.state.cooking_recipe_counts[recipe_name] = previous_count + batch_count
+        self.state.cooking_total_batches = total_before + batch_count
+        new_mastery = recipe_mastery_profile(previous_count + batch_count)
         station = str(cooking_context.get("name", "kitchen")) if isinstance(cooking_context, dict) else ""
-        extra = " including one bonus serving" if bonus_output else ""
-        context_text = f" at the {station.lower()} in {time_cost} minutes" if station else ""
+        extra = f" including {quantity_agreement(bonus_output, 'bonus serving')}" if bonus_output else ""
+        context_text = f" at the {station.lower()}" if station else ""
+        mastery_text = (
+            f" {recipe_name} mastery advanced to {new_mastery['label']}."
+            if new_mastery["label"] != previous_mastery["label"]
+            else ""
+        )
         self.autosave_with_message(
-            f"Cooked {quantity_item_phrase(output_name, produced)}{extra}{context_text}."
+            f"Cooked {quantity_item_phrase(output_name, produced)}{extra}{context_text} "
+            f"in {time_cost} minutes.{mastery_text}"
         )
         return True
 
     def show_cooking_menu(self):
         while True:
-            items: List[MenuItem] = []
+            overall = cooking_level_profile(getattr(self.state, "cooking_total_batches", 0))
+            items: List[MenuItem] = [
+                MenuItem(
+                    label="Cooking progress",
+                    value="progress",
+                    enabled=True,
+                    hint=f"{overall['label']}, {overall['total']} batches",
+                )
+            ]
             for recipe_name in self.known_recipe_names():
                 recipe = COOKING_RECIPES[recipe_name]
-                output_name, output_qty = recipe["output"]
+                output_name, _output_qty = recipe["output"]
                 ok, reason = self.can_cook_recipe(recipe_name)
                 stamina = food_stamina_value(output_name)
                 buff = self.food_buff_for_item(output_name)
                 buff_hint = f", buff" if buff else ""
-                hint = f"+{stamina} stamina{buff_hint}" if ok else reason
-                items.append(MenuItem(label=recipe_name, value=recipe_name, enabled=True, hint=hint))
+                mastery = recipe_mastery_profile(self.cooking_recipe_count(recipe_name))
+                ready = self.max_cookable_batches(recipe_name, limit=10)
+                hint = f"ready x{ready}, +{stamina} stamina{buff_hint}" if ok else reason
+                items.append(MenuItem(
+                    label=f"{recipe_name} [{mastery['label']}]",
+                    value=recipe_name,
+                    enabled=True,
+                    hint=hint,
+                ))
             items.append(MenuItem(label="Back", value=MENU_BACK, enabled=True))
 
             choice = self.vertical_panel_select("Cooking", items, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT, return_back=True)
             if choice is None or choice.value == MENU_BACK:
                 return MENU_BACK
+            if choice.value == "progress":
+                self.vertical_panel_view(
+                    "Cooking Progress",
+                    self.cooking_progress_lines(),
+                    LEFT_PANEL_WIDTH,
+                    LEFT_PANEL_HEIGHT,
+                )
+                continue
 
             recipe_name = str(choice.value)
             recipe = COOKING_RECIPES[recipe_name]
@@ -44070,18 +44220,33 @@ class FarmGame(
             ok, reason = self.can_cook_recipe(recipe_name)
             stamina = food_stamina_value(output_name)
             confirm_items = [
-                MenuItem(label=f"Cook {quantity_item_phrase(output_name, output_qty)}", value="cook", enabled=ok, hint=f"+{stamina} stamina" + (", buff" if self.food_buff_for_item(output_name) else "") if ok else reason),
+                MenuItem(label=f"Cook {quantity_item_phrase(output_name, output_qty)}", value="cook:1", enabled=ok, hint=f"+{stamina} stamina" + (", buff" if self.food_buff_for_item(output_name) else "") if ok else reason),
                 MenuItem(label="Recipe details", value="details", enabled=True),
-                MenuItem(label="Back", value=MENU_BACK, enabled=True),
             ]
+            max_batches = self.max_cookable_batches(recipe_name, limit=10)
+            if max_batches >= 3:
+                confirm_items.insert(1, MenuItem(
+                    label="Cook 3 batches",
+                    value="cook:3",
+                    enabled=ok,
+                    hint=f"produces at least {int(output_qty) * 3}" if ok else reason,
+                ))
+            if max_batches > 1 and max_batches != 3:
+                confirm_items.insert(1, MenuItem(
+                    label=f"Cook {max_batches} batches",
+                    value=f"cook:{max_batches}",
+                    enabled=ok,
+                    hint="maximum available, capped at 10" if ok else reason,
+                ))
+            confirm_items.append(MenuItem(label="Back", value=MENU_BACK, enabled=True))
             confirm = self.vertical_panel_select(recipe_name, confirm_items, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT, return_back=True)
             if confirm is None or confirm.value == MENU_BACK:
                 continue
             if confirm.value == "details":
                 self.show_cooking_recipe_details(recipe_name)
                 continue
-            if confirm.value == "cook":
-                self.cook_recipe(recipe_name)
+            if str(confirm.value).startswith("cook:"):
+                self.cook_recipe(recipe_name, int(str(confirm.value).split(":", 1)[1]))
                 return "cooked"
 
     def edible_items_in_inventory(self) -> List[Tuple[str, int, int]]:
@@ -44111,8 +44276,37 @@ class FarmGame(
             "Pickle Plate": {"name": "Sharp Focus", "charges": 6, "discount": 1, "description": "Next 6 stamina actions cost 1 less."},
             "Pantry Stew": {"name": "Pantry Strength", "charges": 8, "discount": 2, "description": "Next 8 stamina actions cost 2 less."},
             "Ancient Dessert": {"name": "Ancient Vigor", "charges": 12, "discount": 2, "description": "Next 12 stamina actions cost 2 less."},
+            "Seasonal Stir-Fry": {"name": "Seasonal Energy", "charges": 8, "discount": 2, "description": "Next 8 stamina actions cost 2 less."},
+            "Fruit Compote": {"name": "Orchard Focus", "charges": 6, "discount": 1, "description": "Next 6 stamina actions cost 1 less."},
+            "Country Omelet": {"name": "Country Breakfast", "charges": 8, "discount": 2, "description": "Next 8 stamina actions cost 2 less."},
+            "Creamy Fish Chowder": {"name": "Coastal Warmth", "charges": 10, "discount": 2, "description": "Next 10 stamina actions cost 2 less."},
+            "Stuffed Pumpkin": {"name": "Harvest Feast", "charges": 10, "discount": 2, "description": "Next 10 stamina actions cost 2 less."},
+            "Berry Pancakes": {"name": "Morning Momentum", "charges": 9, "discount": 2, "description": "Next 9 stamina actions cost 2 less."},
+            "Mushroom Skillet": {"name": "Woodland Sustenance", "charges": 8, "discount": 2, "description": "Next 8 stamina actions cost 2 less."},
+            "Orchard Tart": {"name": "Orchard Feast", "charges": 12, "discount": 2, "description": "Next 12 stamina actions cost 2 less."},
         }
-        return buffs.get(item_name)
+        buff = buffs.get(item_name)
+        if not buff:
+            return None
+        result = dict(buff)
+        recipe_name = next(
+            (
+                name
+                for name, recipe in COOKING_RECIPES.items()
+                if str(recipe.get("output", ("", 0))[0]) == str(item_name)
+            ),
+            "",
+        )
+        if recipe_name:
+            mastery = recipe_mastery_profile(self.cooking_recipe_count(recipe_name))
+            bonus_charges = max(0, int(mastery["buff_bonus"]))
+            if bonus_charges:
+                result["charges"] = int(result["charges"]) + bonus_charges
+                result["description"] = (
+                    f"Next {result['charges']} stamina actions cost "
+                    f"{result['discount']} less thanks to {mastery['label'].lower()} preparation."
+                )
+        return result
 
     def apply_food_buff(self, item_name: str) -> str:
         buff = self.food_buff_for_item(item_name)
@@ -44204,7 +44398,126 @@ class FarmGame(
             return f" Restored {gained} focus." if gained > 0 else ""
         return ""
 
+    def mega_skill_library(self) -> Dict[str, int]:
+        library = getattr(self.state, "mega_skill_library", None)
+        if not isinstance(library, dict):
+            library = {}
+            self.state.mega_skill_library = library
+        cleaned: Dict[str, int] = {}
+        for book_name, copies in library.items():
+            if book_name not in MEGA_DUNGEON_SKILL_BOOKS:
+                continue
+            try:
+                count = max(0, int(copies))
+            except (TypeError, ValueError):
+                continue
+            if count:
+                cleaned[str(book_name)] = count
+        self.state.mega_skill_library = cleaned
+        return cleaned
+
+    def learn_mega_skill_book(self, book_name: str, from_library: bool = False) -> bool:
+        record = mega_dungeon_book_record(book_name)
+        if not record:
+            self.set_message("That volume doesn't contain a mega-dungeon technique.")
+            return False
+        skill_name = str(record.get("skill", "") or "")
+        progress = self.combat_progress_for_key("player")
+        ranks = clean_mega_skill_ranks(progress.get("book_skill_ranks"))
+        study_counts = progress.get("book_study_counts", {})
+        if not isinstance(study_counts, dict):
+            study_counts = {}
+        studied = max(0, int(study_counts.get(skill_name, 0) or 0))
+        library = self.mega_skill_library()
+
+        if from_library:
+            if int(library.get(book_name, 0) or 0) <= studied:
+                self.set_message("This character has already studied every preserved copy of that volume.")
+                return False
+        else:
+            owned = max(0, int(self.state.inventory.get(book_name, 0) or 0))
+            if owned <= 0:
+                self.set_message(f"You don't have {book_name}.")
+                return False
+            self.state.inventory[book_name] = owned - 1
+            library[book_name] = int(library.get(book_name, 0) or 0) + 1
+
+        study_counts[skill_name] = studied + 1
+        old_rank = int(ranks.get(skill_name, 0) or 0)
+        new_rank = min(3, old_rank + 1)
+        ranks[skill_name] = max(1, new_rank)
+        progress["book_skill_ranks"] = ranks
+        progress["book_study_counts"] = study_counts
+        self.save_combat_progress_for_key("player", progress, autosave=False)
+
+        if new_rank > old_rank:
+            message = f"You study {book_name} and learn {skill_name} at rank {new_rank}. The volume is preserved in the family library."
+        else:
+            message = f"You preserve another copy of {book_name}. {skill_name} is already mastered, but a future heir can study it."
+        self.autosave_with_message(message)
+        return True
+
+    def mega_skill_library_lines(self) -> List[str]:
+        library = self.mega_skill_library()
+        progress = self.combat_progress_for_key("player")
+        ranks = clean_mega_skill_ranks(progress.get("book_skill_ranks"))
+        lines = [
+            "Books recovered from the deepest floors of mega-dungeons remain with the household.",
+            "Each character may study every preserved copy once. Repeated copies raise an ability to rank 3.",
+            "Heirs inherit the library, but must study its books for themselves.",
+            "",
+        ]
+        if not library:
+            lines.append("No capstone skill books have been preserved yet.")
+            return lines
+        for book_name in MEGA_DUNGEON_SKILL_BOOKS:
+            copies = int(library.get(book_name, 0) or 0)
+            if not copies:
+                continue
+            skill_name = str(MEGA_DUNGEON_SKILL_BOOKS[book_name]["skill"])
+            lines.append(f"{book_name} x{copies} - {skill_name} R{ranks.get(skill_name, 0)}/3")
+        return lines
+
+    def show_mega_skill_library_menu(self):
+        while True:
+            library = self.mega_skill_library()
+            progress = self.combat_progress_for_key("player")
+            study_counts = progress.get("book_study_counts", {})
+            if not isinstance(study_counts, dict):
+                study_counts = {}
+            items: List[MenuItem] = []
+            for book_name, record in MEGA_DUNGEON_SKILL_BOOKS.items():
+                copies = int(library.get(book_name, 0) or 0)
+                if copies <= 0:
+                    continue
+                skill_name = str(record.get("skill", "Unknown Art"))
+                studied = max(0, int(study_counts.get(skill_name, 0) or 0))
+                items.append(MenuItem(
+                    label=book_name,
+                    value=book_name,
+                    enabled=copies > studied,
+                    hint=f"{skill_name} | studied {studied}/{copies}",
+                ))
+            if not items:
+                items.append(MenuItem(
+                    label="No preserved skill books",
+                    value="empty",
+                    enabled=False,
+                    hint="Defeat a mega-dungeon's final boss to recover one.",
+                ))
+            items.append(MenuItem(label="Library guide", value="guide", enabled=True, hint="books, ranks, and inheritance"))
+            items.append(MenuItem(label="Back", value=MENU_BACK, enabled=True))
+            choice = self.vertical_panel_select("Study Preserved Book", items, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT, return_back=True)
+            if choice is None or choice.value == MENU_BACK:
+                return MENU_BACK
+            if choice.value == "guide":
+                self.vertical_panel_view("Family Skill Library", self.mega_skill_library_lines(), LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT)
+                continue
+            self.learn_mega_skill_book(str(choice.value), from_library=True)
+
     def is_inventory_consumable_item(self, item_name: str) -> bool:
+        if mega_dungeon_book_record(item_name):
+            return True
         if self.alchemy_product(item_name):
             return True
         if item_name == "Regional Chart":
@@ -44217,6 +44530,13 @@ class FarmGame(
         return effect in {"heal", "mp"}
 
     def consumable_item_hint(self, item_name: str) -> str:
+        book = mega_dungeon_book_record(item_name)
+        if book:
+            skill_name = str(book.get("skill", "Unknown Art"))
+            rank = clean_mega_skill_ranks(
+                self.combat_progress_for_key("player").get("book_skill_ranks")
+            ).get(skill_name, 0)
+            return f"preserve and learn {skill_name} (rank {rank}/3)"
         alchemy_hint = self.alchemy_product_hint(item_name)
         if alchemy_hint:
             return alchemy_hint
@@ -44237,6 +44557,8 @@ class FarmGame(
     def consumable_can_help_now(self, item_name: str) -> bool:
         if not self.is_inventory_consumable_item(item_name):
             return False
+        if mega_dungeon_book_record(item_name):
+            return True
         if self.alchemy_product(item_name):
             return True
         if item_name == "Regional Chart":
@@ -44258,6 +44580,9 @@ class FarmGame(
         if not self.is_inventory_consumable_item(item_name):
             self.set_message(f"{item_name} is not usable from inventory.")
             return False
+
+        if mega_dungeon_book_record(item_name):
+            return self.learn_mega_skill_book(item_name, from_library=False)
 
         if self.alchemy_product(item_name):
             return self.use_alchemy_product(item_name)
@@ -44352,6 +44677,8 @@ class FarmGame(
         if qty_owned <= 0:
             self.set_message(f"You do not have any {item_name}.")
             return False
+        if mega_dungeon_book_record(item_name):
+            return self.use_consumable_item(item_name)
         qty = 1
         if qty_owned > 1:
             qty_choice = self.vertical_quantity_select(
@@ -46016,6 +46343,17 @@ class FarmGame(
             if not isinstance(ranks, dict):
                 skill_ranks[name] = {}
 
+        progress["book_skill_ranks"] = clean_mega_skill_ranks(progress.get("book_skill_ranks"))
+        raw_study_counts = progress.setdefault("book_study_counts", {})
+        if not isinstance(raw_study_counts, dict):
+            raw_study_counts = {}
+        allowed_book_skills = set(mega_dungeon_skill_names())
+        progress["book_study_counts"] = {
+            str(skill_name): max(0, int(count))
+            for skill_name, count in raw_study_counts.items()
+            if str(skill_name) in allowed_book_skills and str(count).lstrip("-").isdigit()
+        }
+
         defaults = self.tactical_default_gear_for_key(member_key)
         equipped = progress.setdefault("equipped_gear", {})
         if not isinstance(equipped, dict):
@@ -46257,6 +46595,7 @@ class FarmGame(
                 gear_chance=gear_chance,
                 consumable_chance=0.48 if boss else min(0.28, 0.08 + len(defeated) * 0.035),
                 valuable_chance=0.42 if boss else min(0.22, 0.05 + len(defeated) * 0.025),
+                game_table_chance=0.08 if boss else (0.012 if elite else 0.0),
                 quality_bonus=4 if boss else (2 if elite else 0),
             )
         if money:
@@ -46612,6 +46951,15 @@ class FarmGame(
                     MenuItem(label="Change class", value="class", enabled=True, hint=str(self.combat_progress_for_key(member_key).get("class", ""))),
                     MenuItem(label="Change element", value="element", enabled=True, hint=str(self.combat_progress_for_key(member_key).get("subclass", ""))),
                     MenuItem(label="Learn or upgrade skill", value="skill", enabled=True, hint=f"SP {self.combat_progress_for_key(member_key).get('skill_points', 0)}"),
+                    *(
+                        [MenuItem(
+                            label="Family skill library",
+                            value="book_library",
+                            enabled=True,
+                            hint=f"{sum(self.mega_skill_library().values())} preserved",
+                        )]
+                        if member_key == "player" else []
+                    ),
                     MenuItem(label="Back", value=MENU_BACK, enabled=True),
                 ]
                 action = self.vertical_panel_select(self.tactical_member_name(member_key), items, LEFT_PANEL_WIDTH, LEFT_PANEL_HEIGHT, return_back=True)
@@ -46623,6 +46971,8 @@ class FarmGame(
                     self.show_tactical_element_menu(member_key)
                 elif action.value == "skill":
                     self.show_tactical_skill_menu(member_key)
+                elif action.value == "book_library":
+                    self.show_mega_skill_library_menu()
 
     def tactical_equipment_slots(self) -> List[str]:
         return ["weapon", "armor", "charm"]
@@ -48273,13 +48623,9 @@ class FarmGame(
     def ingredient_usage_lines(self, item_name: str) -> List[str]:
         """Show recipes that can use this item directly or by category."""
         lines: List[str] = []
-        crop_name, _quality = parse_quality_item(item_name)
         for recipe_name, recipe in COOKING_RECIPES.items():
             ingredients = recipe.get("ingredients", {})
-            direct = item_name in ingredients
-            crop_match = bool(crop_name and crop_name in ingredients)
-            fish_match = item_name in FISH_DATA and "Any Fish" in ingredients and not FISH_DATA[item_name].get("junk", False)
-            if direct or crop_match or fish_match:
+            if any(ingredient_accepts_item(ingredient_name, item_name) for ingredient_name in ingredients):
                 output_name, _output_qty = recipe["output"]
                 stamina = food_stamina_value(output_name)
                 lines.append(f"- {recipe_name} -> {output_name} (+{stamina} stamina)")
@@ -49888,6 +50234,28 @@ class FarmGame(
     def item_detail_lines(self, item_name: str) -> List[str]:
         qty = self.state.inventory.get(item_name, 0)
         lines: List[str] = [item_name, "", f"Quantity: {qty}"]
+        skill_book = mega_dungeon_book_record(item_name)
+        if skill_book:
+            skill_name = str(skill_book.get("skill", "Unknown Art"))
+            skill = mega_dungeon_skill_catalog().get(skill_name)
+            rank = clean_mega_skill_ranks(
+                self.combat_progress_for_key("player").get("book_skill_ranks")
+            ).get(skill_name, 0)
+            preserved = int(self.mega_skill_library().get(item_name, 0) or 0)
+            lines.extend([
+                "",
+                "Mega-dungeon skill book:",
+                f"Teaches: {skill_name}",
+                f"Current mastery: rank {rank}/3",
+                f"Preserved family copies: {preserved}",
+                str(skill_book.get("description", "A rare manual recovered from a mega-dungeon.")),
+            ])
+            if skill is not None:
+                lines.extend([
+                    f"MP cost: {skill.mp_cost}",
+                    f"Range: {skill.range_max}",
+                    str(skill.description),
+                ])
         alchemy_lines = self.alchemy_product_lines(item_name)
         if alchemy_lines:
             lines.extend(["", "Alchemical mixture:", *alchemy_lines])

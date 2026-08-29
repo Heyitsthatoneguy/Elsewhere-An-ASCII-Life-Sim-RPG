@@ -11,7 +11,7 @@ from ascii_farmstead_data import (
     AUTHORED_TOWN_RESIDENCE_DATA,
     AUTHORED_TOWN_RESIDENCE_ID_BY_NPC,
 )
-from ascii_farmstead_helpers import quantity_agreement
+from ascii_farmstead_helpers import kinship_term, pronouns_for_sex, quantity_agreement
 from ascii_farmstead_npc_builder import (
     FEMALE_GIVEN_NAMES,
     MALE_GIVEN_NAMES,
@@ -1252,17 +1252,21 @@ class NpcFamilyLifeMixin:
             )
             if status == "Widowed" or spouse_record.get("deceased"):
                 statements.append(
-                    f"My late spouse was {self.town_npc_name(spouse_id)}. Some parts of our life together still shape my days."
+                    f"My late {kinship_term('spouse', self.npc_sex(spouse_id))} was "
+                    f"{self.town_npc_name(spouse_id)}. Some parts of our life together still shape my days."
                 )
             else:
-                statements.append(f"{self.town_npc_name(spouse_id)} and I have been settling into married life together.")
+                # "X and I have" is a compound subject, and the spoken-contraction pass
+                # turns it into "X and I've been settling", which is not English.
+                statements.append(f"{self.town_npc_name(spouse_id)} and I are settling into married life together.")
         elif status == "Engaged" and partner_id:
             statements.append(f"{self.town_npc_name(partner_id)} and I are planning our wedding, but we still keep separate homes until then.")
         elif status == "Courting" and partner_id:
             statements.append(f"I have been spending more time with {self.town_npc_name(partner_id)}. We are taking things slowly and still live separately.")
         if child_ids:
             child_names = [self.town_npc_name(value) for value in child_ids[:3]]
-            statements.append(f"My children are {', '.join(child_names)}.")
+            kin = "child is" if len(child_names) == 1 else "children are"
+            statements.append(f"My {kin} {', '.join(child_names)}.")
         close_order = (
             "mother", "father", "sister", "brother", "grandmother", "grandfather",
             "daughter", "son", "aunt", "uncle", "cousin", "niece", "nephew",
@@ -1278,9 +1282,14 @@ class NpcFamilyLifeMixin:
             if living_ordered else None
         )
         if selected:
+            # Relation rows carry the person's sex, so a named relative gets a
+            # real pronoun instead of the neutral fallback. Both slots here sit
+            # beside verbs that do not vary ("work ... keeps"), so the swap is safe.
+            kin = pronouns_for_sex(selected.get("sex"))
             statements.append(
                 f"My {selected.get('relation')} {selected.get('name')} is still part of my life; "
-                f"their work as a {str(selected.get('role', 'resident')).lower()} keeps them busy."
+                f"{kin['possessive']} work as a {str(selected.get('role', 'resident')).lower()} "
+                f"keeps {kin['object']} busy."
             )
         deceased_ordered = [
             row for relation in close_order for row in deceased if row.get("relation") == relation
@@ -1293,8 +1302,10 @@ class NpcFamilyLifeMixin:
             if deceased_ordered else None
         )
         if remembered:
+            gone = pronouns_for_sex(remembered.get("sex"))
             statements.append(
-                f"My {remembered.get('relation')} {remembered.get('name')} died, but I still find myself repeating things they taught me."
+                f"My {remembered.get('relation')} {remembered.get('name')} died, but I still find "
+                f"myself repeating things {gone['subject']} taught me."
             )
         if statements:
             return " ".join(statements[:3])
